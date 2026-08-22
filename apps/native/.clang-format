@@ -1,0 +1,16 @@
+# Formatting is one setting, applied by a tool, so that nobody has to have an
+# opinion about it in review.
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -2
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"(core|ipc|game|platform|features|ui|app)/'
+    Priority: 3
+  - Regex: '^<(Windows|d3d11|dxgi)'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 1

@@ -1,0 +1,44 @@
+{
+  "name": "brownie",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/runtime",
+    "tools/gamedata"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "build:clean": "tsc --build --clean",
+    "typecheck": "tsc --build --force && tsc -p tsconfig.eslint.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "gamedata": "node tools/gamedata/dist/main.js",
+    "build:native": "node apps/native/build.mjs",
+    "test:native": "node apps/native/build.mjs --test",
+    "test:link": "node scripts/link-check.mjs",
+    "profile:ipc": "node --expose-gc scripts/profile-ipc.mjs",
+    "profile:link": "node scripts/profile-link.mjs",
+    "live": "node scripts/live-run.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@oven/zig-win32-x64": "^0.12.0-dev.1286",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}

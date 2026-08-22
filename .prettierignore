@@ -1,0 +1,10 @@
+dist/
+coverage/
+apps/native/
+packages/protocol/data/
+*.md
+
+# A third-party Go tool, vendored as-is. Reformatting it would mean rewriting
+# somebody else's files on every check, and losing the ability to take an
+# upstream fix cleanly.
+tools/extractor/

@@ -1,0 +1,23 @@
+{
+  "name": "@brownie/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./bundled": {
+      "types": "./dist/bundled.d.ts",
+      "default": "./dist/bundled.js"
+    }
+  },
+  "files": [
+    "dist",
+    "data"
+  ],
+  "scripts": {
+    "build": "tsc --build"
+  }
+}

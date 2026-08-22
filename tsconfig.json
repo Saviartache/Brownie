@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/ipc" },
+    { "path": "./packages/plugin-api" },
+    { "path": "./apps/runtime" },
+    { "path": "./tools/gamedata" }
+  ]
+}

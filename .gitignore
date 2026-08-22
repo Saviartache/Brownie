@@ -1,0 +1,71 @@
+# Everything here is either produced by a build, extracted from a local game
+# install, or a secret. The rule this file follows: if a fresh clone can
+# regenerate it, or if it came off this machine rather than out of the source,
+# it does not belong in the history.
+
+# ── Dependencies and build output ───────────────────────────────────────────
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# The native module's build tree. Zig's cache and the DLL it produces are both
+# derived from `apps/native/src` — and the DLL is the thing that gets injected,
+# so a binary in the history is a binary somebody will run without having built
+# it. `apps/native/vendor/` is *not* here on purpose: imgui, MinHook and Detours
+# are sources the build compiles, and without them a fresh clone cannot build.
+apps/native/build/
+apps/native/zig-out/
+apps/native/.zig-cache/
+
+# ── Extracted from the local game install ───────────────────────────────────
+# The game's own data files, read at startup and regenerated per install by
+# `tools/gamedata`. Thirty-five megabytes of somebody else's XML.
+game-data/
+
+# The extractor's working tree: game binaries, decrypted metadata, merged XML,
+# and the third-party tools it downloads. Half a gigabyte, all of it derived
+# from whatever client this machine happens to have.
+tools/extractor/output/
+tools/extractor/local.yml
+tools/extractor/*.exe
+# Everything the extractor downloads into these, whether it lands as a folder
+# or as one large executable with no extension — which `cpp2il` does, and which
+# a directory-only pattern quietly let through.
+tools/extractor/tools/il2cpp/*
+tools/extractor/tools/assetripper/*
+!tools/extractor/tools/**/README.md
+
+# Cheat Engine's MCP bridge, installed locally rather than vendored: it brings
+# its own virtual environment and Cheat Engine's own files with it.
+tools/cheatengine-mcp-bridge/
+
+# ── Local machine state ─────────────────────────────────────────────────────
+# The working plan: what is finished, what is next, and what each stage has to
+# meet before it counts as done. Somebody's own notes about the work rather than
+# part of it, so it stays on the machine it is being written on.
+docs/migration/plan.md
+
+config/local.json
+logs/
+*.log
+
+# **Never.** A capture holds bytes from a real session, which is why the runtime
+# warns out loud on every run that samples them.
+packet-census.json
+
+# **Never.** The runtime mints a fresh secret per run and publishes it where the
+# module can read it; anything of this shape is either that or a private key,
+# and one in a repository is one that everybody has.
+*.key
+*.pem
+.env
+.env.*
+
+# ── Editors and operating systems ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

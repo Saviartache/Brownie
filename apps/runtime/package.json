@@ -1,0 +1,16 @@
+{
+  "name": "@brownie/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "dependencies": {
+    "@brownie/ipc": "0.1.0",
+    "@brownie/plugin-api": "0.1.0",
+    "@brownie/protocol": "0.1.0",
+    "@brownie/gamedata-tool": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc --build"
+  }
+}

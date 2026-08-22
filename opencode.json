@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "cheatengine": {
+      "type": "local",
+      "command": ["cmd.exe", "/d", "/c", "tools\\cheatengine-mcp-bridge\\start-mcp.cmd"],
+      "enabled": true,
+      "environment": {
+        "CE_MCP_TIMEOUT": "30"
+      }
+    }
+  }
+}

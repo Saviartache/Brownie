@@ -1,0 +1,7 @@
+# Line endings belong to the repository, not to whichever machine checked it
+# out. Without this, a Windows clone with the usual `core.autocrlf=true` gets
+# CRLF working files — and `npm run format:check` fails on every file in the
+# project, because Prettier is configured for LF and is the thing that decides.
+#
+# `text=auto` still leaves anything Git detects as binary alone.
+* text=auto eol=lf

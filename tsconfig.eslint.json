@@ -1,0 +1,35 @@
+// Type information for the linter and for typechecking tests. The per-package
+// tsconfig.json files stay build-only (src in, dist out) so test files never
+// end up in a published dist/.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "types": ["node"],
+
+    // Plugins are plain JavaScript by design — the loader takes `.js`, because
+    // a plugin is a file someone edits and saves rather than a build artefact.
+    // What that costs is real: a mistyped API is a handler that silently does
+    // nothing, and the first plugin shipped a comparison against `undefined`
+    // that could not have fired at any setting. `allowJs` lets those files be
+    // read here; `checkJs` stays off so a file opts in with `// @ts-check`,
+    // rather than every config script in the tree being dragged in with it.
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "apps/runtime/**/*.ts",
+    "tools/*/src/**/*.ts",
+    "tools/*/test/**/*.ts",
+    "plugins/**/*.js",
+    "*.ts",
+    "*.js"
+  ],
+  "exclude": ["**/dist/**", "**/node_modules/**"]
+}

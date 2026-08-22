@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "cheatengine": {
+      "type": "stdio",
+      "command": "${CLAUDE_PROJECT_DIR:-.}\\tools\\cheatengine-mcp-bridge\\.venv\\Scripts\\python.exe",
+      "args": [
+        "${CLAUDE_PROJECT_DIR:-.}\\tools\\cheatengine-mcp-bridge\\MCP_Server\\mcp_cheatengine.py"
+      ],
+      "env": {
+        "CE_MCP_TIMEOUT": "30"
+      }
+    }
+  }
+}
