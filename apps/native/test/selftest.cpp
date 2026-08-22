@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -376,6 +377,50 @@ void WorldRecordsAreReadStrictly() {
           "a field that is not a whole number is refused");
     Check(!brownie::overlay::ParseWorldRecord("world|640|770||0|0|0", partial),
           "an empty field is refused");
+}
+
+void WorldRecordsCarryBlastCounts() {
+    brownie::overlay::WorldStatus status;
+    Check(brownie::overlay::ParseWorldRecord("world|640|770|0|0|0|0|41|3|0|0|2|7|1", status),
+          "a record with blast counts parses");
+    Check(status.blast_stats_known, "and says so");
+    Check(status.blasts == 2 && status.blasts_confirmed == 7 && status.blasts_unmatched == 1,
+          "all three survive");
+
+    // A runtime older than this build stops before them, which is not a
+    // malformed record — the same rule the defence and shot counts follow.
+    brownie::overlay::WorldStatus older;
+    Check(brownie::overlay::ParseWorldRecord("world|640|770|0|0|0|0|41|3|0|0", older),
+          "a record without them still parses");
+    Check(!older.blast_stats_known, "and says it does not know rather than reading nought");
+}
+
+void WeaponRecordsCarryTheName() {
+    brownie::overlay::WeaponStatus weapon;
+    Check(brownie::overlay::ParseWeaponRecord("weapon|Bow%20of%20Covert%20Havens|2822|1600|440|704",
+                                              weapon),
+          "a weapon record parses");
+    Check(weapon.known && weapon.described, "and says the catalog described it");
+    Check(weapon.name == "Bow of Covert Havens", "the name is decoded");
+    Check(weapon.object_type == 2822, "the type survives");
+    Check(weapon.speed_hundredths == 1600 && weapon.lifetime_ms == 440,
+          "so do the shot's own numbers");
+    Check(weapon.range_hundredths == 704, "and the reach they come to");
+
+    // An item the data files do not describe is still reported: "no entry for
+    // this type" and "the numbers are wrong" want opposite fixes.
+    brownie::overlay::WeaponStatus unknown;
+    Check(brownie::overlay::ParseWeaponRecord("weapon||2822|0|0|0", unknown),
+          "an undescribed weapon still parses");
+    Check(unknown.known && !unknown.described, "and says which of the two it is");
+    Check(unknown.object_type == 2822, "with the type to look up by hand");
+
+    brownie::overlay::WeaponStatus other;
+    Check(!brownie::overlay::ParseWeaponRecord("world|1|2|3|4|5|6", other),
+          "another kind is not ours");
+    Check(!brownie::overlay::ParseWeaponRecord("weapon|Bow|2822|1600", other),
+          "a short record is refused");
+    Check(!other.known, "and writes nothing");
 }
 
 void MoveRecordsAreReadStrictly() {
@@ -1449,6 +1494,59 @@ void PropertiesAreFoundByTypeAndBounded() {
           "without a type to match, nothing is a candidate");
 }
 
+void TheGamesOwnMultiplierIsTakenOnceAndPutBack() {
+    // Two addresses, and nothing is dereferenced: this decides *what* to write,
+    // and the walk that reads and writes is the part a game has to be running
+    // for.
+    int first = 0;
+    int second = 0;
+    const void* const properties = &first;
+    const void* const rebuilt = &second;
+
+    brownie::game::CollisionMemory memory;
+    Check(!memory.holding(), "nothing is held before a pass has seen anything");
+
+    Check(memory.Decide(properties, 1.0F, 0.5F) == std::optional<float>{0.5F},
+          "the first pass writes what was asked for");
+    Check(memory.holding(), "and holds the game's own value against putting it back");
+
+    // The second pass reads back the module's own write. Remembering *that* as
+    // the game's value is the mistake this class exists to make impossible —
+    // the restore would be a no-op and the collider would stay shrunk.
+    Check(memory.Decide(properties, 0.5F, 0.2F) == std::optional<float>{0.2F},
+          "a later pass writes the new value");
+    Check(memory.Decide(properties, 0.2F, std::nullopt) == std::optional<float>{1.0F},
+          "and switching off puts back what the game had, not what the module wrote");
+    Check(!memory.holding(), "which is the end of holding anything");
+
+    Check(memory.Decide(properties, 1.0F, std::nullopt) == std::nullopt,
+          "an off pass with nothing held writes nothing");
+
+    // The player is rebuilt between realms, and the address the walk hands over
+    // is a different object. Writing the old value into it would be restoring
+    // somebody else's number.
+    Check(memory.Decide(properties, 1.0F, 0.5F) == std::optional<float>{0.5F}, "on again");
+    Check(memory.Decide(rebuilt, 0.9F, std::nullopt) == std::nullopt,
+          "a different object is not the one the value came from");
+    // Still held: a walk asks every handler under the player's node, so one
+    // mismatch is not the answer — the pass forgets once the whole walk has
+    // found nowhere to put it back.
+    Check(memory.holding(), "and one mismatch is not the walk giving up");
+    memory.Forget();
+    Check(!memory.holding(), "which is the pass's to say, and it says it by forgetting");
+
+    Check(memory.Decide(nullptr, 1.0F, 0.5F) == std::nullopt, "there is nothing to write to");
+
+    // A field that is not a number is an object the walk mistook for the
+    // player's properties. Left alone, and not remembered either — a restore
+    // built on it would write a captured NaN back into the game.
+    brownie::game::CollisionMemory nonsense;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Check(nonsense.Decide(properties, nan, 0.5F) == std::nullopt,
+          "a field that is not finite is not written");
+    Check(!nonsense.holding(), "and nothing was taken from it");
+}
+
 void AMethodSignatureDoesNotStandInForAName() {
     FakeMetadata metadata;
     metadata.Add(PlayerClass());
@@ -1777,6 +1875,7 @@ int main() {
     AMethodSignatureDoesNotStandInForAName();
     AClassIsLookedForOnlyInItsOwnAssembly();
     PropertiesAreFoundByTypeAndBounded();
+    TheGamesOwnMultiplierIsTakenOnceAndPutBack();
     AColourSurvivesBeingPacked();
     AnUnpreparedClassIsNotAskedAboutItsMembers();
     AnUnverifiedEntryPointIsNoEntryPoint();
@@ -1794,6 +1893,8 @@ int main() {
     TwoEnginesAreRefused();
     PresentResolvesToRealCode();
     WorldRecordsAreReadStrictly();
+    WorldRecordsCarryBlastCounts();
+    WeaponRecordsCarryTheName();
     MoveRecordsAreReadStrictly();
     AimRecordsAreReadStrictly();
     AimRedirectsOnlyWhatItWasGiven();

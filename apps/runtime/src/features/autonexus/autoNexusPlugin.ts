@@ -37,6 +37,7 @@ import {
   type Plugin,
   type SessionView,
 } from '@brownie/plugin-api';
+import { isSafeZone } from '../../constants/SafeZones.js';
 import { BulletLog } from './BulletLog.js';
 import { HpTracker } from './HpTracker.js';
 import { damageTaken } from './damage.js';
@@ -47,7 +48,6 @@ import {
   GROUND_DAMAGE_ESTIMATE,
   MAX_PENDING_AOES,
   MAX_VOLLEY_SHOTS,
-  SAFE_ZONE_MAPS,
   UNKNOWN_SHOT_DAMAGE,
 } from './constants.js';
 
@@ -109,8 +109,7 @@ export function createAutoNexusPlugin(): Plugin {
         return state;
       };
 
-      const inSafeZone = (session: SessionView): boolean =>
-        SAFE_ZONE_MAPS.has(session.world.mapName.toLowerCase());
+      const inSafeZone = (session: SessionView): boolean => isSafeZone(session.world.mapName);
 
       const escape = (session: SessionView, state: SessionNexus, reason: string): void => {
         if (state.escaped) return;

@@ -56,6 +56,12 @@ export class EntityRecord implements EntityView {
     return typeof value === 'number' ? value : undefined;
   }
 
+  /** A text stat by id — the mirror of {@link stat}, for the string ones. */
+  text(id: number): string | undefined {
+    const value = this.stats.get(id);
+    return typeof value === 'string' ? value : undefined;
+  }
+
   applyStats(stats: readonly StatEntry[]): void {
     for (const stat of stats) this.stats.set(stat.id, stat.value);
 

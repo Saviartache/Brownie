@@ -55,13 +55,8 @@ import {
   type AntiLagSettings,
 } from './policy.js';
 import { PRESETS, presetMatches, type AntiLagPresetValues, type PresetChoice } from './presets.js';
-import {
-  StatusOutcome,
-  asStatus,
-  objectIdOf,
-  rewriteStatus,
-  statusOfEntity,
-} from './statusRewrite.js';
+import { asStatus, objectIdOf, statusOfEntity } from '../../state/statEdit.js';
+import { StatusOutcome, rewriteStatus } from './statusRewrite.js';
 
 /**
  * What the composition root hands over.

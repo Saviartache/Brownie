@@ -118,7 +118,32 @@
     "11": {
       "name": "SHOWEFFECT",
       "direction": "server",
-      "fields": []
+      "fields": [
+        {
+          "name": "effectType",
+          "type": "byte"
+        },
+        {
+          "name": "targetObjectId",
+          "type": "int32"
+        },
+        {
+          "name": "position",
+          "type": "Location"
+        },
+        {
+          "name": "targetPosition",
+          "type": "Location"
+        },
+        {
+          "name": "color",
+          "type": "int32"
+        },
+        {
+          "name": "duration",
+          "type": "float"
+        }
+      ]
     },
     "12": {
       "name": "SERVERPLAYERSHOOT",

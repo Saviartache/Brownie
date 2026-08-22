@@ -177,6 +177,30 @@ the rest, and the lifetimes differ per store because the questions do:
 | `TileMap` | ground the server has sent | the map changes |
 | `ProjectileStore` | shots **still in flight** | their flight ends, or the map changes |
 
+### A slot the server has not stated is absent, not empty
+
+`SelfState` carries the player's own item slots — what is worn, carried, in the
+backpack and on the potion belt — because two features move items and neither
+may keep its own copy. They are exposed as a **list of stated slots**, not a
+fixed array with `-1` in the gaps, and that is deliberate.
+
+Which stat carries which slot is a fact about a game build, and **the two stat
+tables in this repository disagree** about the backpack and the belt.
+`packages/protocol/data/stat-types.json` puts the backpack at 135–142 and
+148–155 with the belt at 143–145; the reference implementation, from a live
+capture, put the backpack at 131–146 and the belt at 116–118. It cannot be
+settled from a file on disk: the game's metadata is name-obfuscated, so the enum
+is not in it. `state/ItemSlots.ts` uses the first, records the second, and is
+the only place either appears.
+
+What makes leaving that unresolved safe is the absent-versus-empty rule. Point
+the ids at nothing and nothing is *reported* for those slots: auto-loot declines
+to use the backpack, auto-drink declines to use the belt, and both fall back to
+the eight carried slots — whose ids the two tables agree on. Treating an
+unstated slot as empty is what would aim a swap at a slot that is actually full.
+The `objectType` an `INVENTORYSWAP` carries is the second guard, because the
+server refuses a swap whose view of the destination disagrees with its own.
+
 ### A shot is gone the moment its flight ends
 
 `ProjectileStore` expires a shot at `firedAt + lifetimeMs` — the flight time the
@@ -387,12 +411,20 @@ process ends: `DllMain` may not tear anything down (loader lock), and
 
 `ScenePatches` owns what the module does through the scene itself: the local
 player's health bar held at a colour picked in the overlay, the local player's
-collision radius zeroed — which is what area damage is decided against, not what
+collision radius scaled — which is what area damage is decided against, not what
 walls are — and a line of the game's own floating text shown over the player.
 The first two are off until switched on under **Scene**, because each needs a
 detour or a write, and a detour nobody asked for is still in the way of every
 call the game makes through it. The third has no switch: it does nothing until
 the runtime sends a `text` record, which today is noclip's countdown.
+
+The collision radius is the one thing here with **two askers**: the overlay's
+"no hitbox" switch asks for the whole circle gone, and the runtime's collider
+plugin asks for a fraction of one. There is a single field under both, so
+`Engine::ColliderWanted` settles them into the single number the pass writes —
+and because the write replaces a value the game chose, the pass keeps the
+game's own multiplier and puts it back once nobody is asking. See
+`src/game/PlayerCollision.h`.
 
 All three need the same walk through Unity's own object model — `GameObject.Find`,
 `transform`, `GetChild`, `GetComponent` and the rest — which is `UnityScene`, and

@@ -37,6 +37,16 @@ export const StatType = {
   Effects: 29,
   Name: 31,
   AccountId: 38,
+  /**
+   * The maximum health the gear adds, on top of {@link MaxHp}.
+   *
+   * The pair is the health bar the game draws. The base alone is not a maximum
+   * of anything — current health goes above it on a geared character — which is
+   * why nothing reads one without the other. See `SelfState.maxHp`.
+   */
+  HpBoost: 46,
+  /** The same for mana, on top of {@link MaxMp}. */
+  MpBoost: 47,
   /** A string stat, and the only one that says two players are on one team. */
   GuildName: 62,
   /** Second condition-effect bitmask — bits 31+. Not tracked by state yet. */

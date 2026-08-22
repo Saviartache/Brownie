@@ -145,6 +145,23 @@ as a number.
 out. Holding a view across ticks and expecting it to update is a mistake; ask
 again.
 
+An entity carries the stats the runtime names — health, conditions, guild — and
+`entity.stat(id)` for every other one the server has sent, so a boss phase
+written into a stat nothing else reads needs no change to the state layer. Its
+mirror `entity.text(id)` reads the ids that carry a string, which are usually
+not text at all but a packed blob — a container's enchants, say — so decode it
+and survive a build that encodes it differently. Match a **value you can
+recognise** rather than testing for non-zero: a stat id is a fact about a game
+build, and the two tables in this repository do not agree about all of them.
+`features/sanctuary/punishedHits.ts` is the worked example.
+
+`session.self.inventory` is what the player is wearing, carrying and drinking
+from, addressed by the slot ids the item packets use. **A slot the server has
+not stated is absent, not empty** — see the note in
+[`docs/architecture.md`](architecture.md). A plugin that moves items reads
+`carried()`, `backpack()` and `belt()` and never assumes a slot it was not told
+about, because that is a swap aimed at a slot that may well be full.
+
 More important, and the one that has actually cost time: **the world keeps what
 is currently true, not a history.** Entities go on `UPDATE.drops`, tiles and
 everything positional go on a map change, and shots go the moment their flight
@@ -169,10 +186,17 @@ worked example.
 ## Native features
 
 ```ts
-ctx.native.setFeature('autoNexusEnabled', true);
+ctx.native.setFeature('player.collider', true);
 ```
 
 The native module stores nothing. The runtime remembers the last value per key
 and re-sends every key whenever the module (re)connects, so a plugin sets a key
 once and never has to watch the connection. Unknown keys are ignored by the
 module, so a newer plugin never breaks an older build.
+
+Which keys a build resolves, and what each of them means, is the table in
+[`docs/ipc.md`](ipc.md). Read the note under it before adding one: a key that
+makes the module change the game is a **lease**, restated once a second while
+the plugin wants it and dropped by the module a few seconds after it stops —
+because a plugin can be disabled, can fail, can be unloaded, and the runtime
+behind it can be killed, and none of those say so.

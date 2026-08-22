@@ -3,10 +3,11 @@
 // **Three things, and they are together here for one reason**: they need the
 // same walk through Unity's object model, and doing that walk three times would
 // be three times the calls into the game for the same answer. One holds the
-// player's health bar at a fixed colour; one zeroes the player's collision
-// radius; one shows a line of the game's own text over the player. The first
-// two are the reference module's and are off until somebody switches them on;
-// the third does nothing until the runtime has something to say.
+// player's health bar at a fixed colour; one scales the player's collision
+// radius, and puts the game's own value back when nobody wants it scaled any
+// more; one shows a line of the game's own text over the player. The first two
+// are the reference module's and are off until somebody switches them on; the
+// third does nothing until the runtime has something to say.
 //
 // **Two threads meet here, as they do in `PlayerControl`.** What the operator
 // switched on is noticed on the render thread; resolving and installing a
@@ -24,6 +25,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 
 #include <string_view>
 
@@ -38,17 +40,23 @@
 
 namespace brownie::app {
 
-/// What the operator has switched on. Off is the default for both, and the
-/// module does nothing to the scene until one of them is not.
+/// What has been asked for. Off is the default for both, and the module does
+/// nothing to the scene until one of them is not.
 struct ScenePatchWants {
     /// Hold the local player's health bar at one colour — the module's sign
     /// that it is attached and acting.
     bool health_bar_tint = false;
     /// What colour to hold it at. Ignored while the tint is off.
     game::UiColor tint_colour = game::HealthBarTint::kDefaultColour;
-    /// Zero the local player's collision radius, which is what area damage is
-    /// decided against — see `game/PlayerCollision.h`.
-    bool no_hitbox = false;
+    /// What to scale the local player's collision circle by, or nothing to
+    /// leave the game's own value alone — which is what area damage is decided
+    /// against, see `game/PlayerCollision.h`.
+    ///
+    /// One value rather than a switch because there are two askers: the
+    /// overlay's "no hitbox" is zero and the runtime's collider plugin is
+    /// whatever its slider says. Which of them won is `Engine`'s to settle,
+    /// because only it can see both.
+    std::optional<float> collision_multiplier;
 };
 
 class ScenePatches {
@@ -92,7 +100,7 @@ class ScenePatches {
     /// Whether the collision write has everything it needs, and how many times
     /// it has happened.
     [[nodiscard]] bool collision_bound() const noexcept { return collision_.bound(); }
-    [[nodiscard]] std::uint32_t collisions_cleared() const noexcept { return collision_.applied(); }
+    [[nodiscard]] std::uint32_t collisions_written() const noexcept { return collision_.applied(); }
 
     /// The route to the local player, which the floating text starts its two
     /// hops from. **IPC thread**, once, and until it arrives no line is shown.
@@ -136,7 +144,12 @@ class ScenePatches {
     std::atomic<game::ClassRef> image_class_{nullptr};
 
     std::atomic<bool> tint_wanted_{false};
-    std::atomic<bool> hitbox_wanted_{false};
+    /// Whether anybody wants the collision circle scaled, and by what. Two
+    /// members rather than an `optional` because they are published: both are
+    /// written by {@link Want} and read by {@link Apply}, and a lock-free load
+    /// is what the rest of this object's cross-thread state costs too.
+    std::atomic<bool> collision_wanted_{false};
+    std::atomic<float> collision_multiplier_{1.0F};
     std::atomic<bool> released_{false};
 
     // --- Game thread only. Both `Want` and `Apply` run inside the same frame,

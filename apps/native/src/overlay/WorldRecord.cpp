@@ -3,11 +3,18 @@
 #include <array>
 #include <charconv>
 #include <cstddef>
+#include <string>
+#include <vector>
+
+#include "overlay/ControlRecord.h"
 
 namespace brownie::overlay {
 namespace {
 
 constexpr std::string_view kKind = "world";
+constexpr std::string_view kWeaponKind = "weapon";
+/// The kind, the name, and the four numbers.
+constexpr std::size_t kWeaponFieldCount = 6;
 constexpr std::string_view kMoveKind = "move";
 constexpr std::string_view kAimKind = "aim";
 constexpr std::string_view kTextKind = "text";
@@ -71,6 +78,14 @@ bool ParseWorldRecord(std::string_view record, WorldStatus& out) noexcept {
                            ParseInt(TakeField(rest), no_owner) &&
                            ParseInt(TakeField(rest), no_definition);
 
+    // Appended after those, and read the same way: all three or none.
+    int blasts = 0;
+    int blasts_confirmed = 0;
+    int blasts_unmatched = 0;
+    const bool has_blasts = ParseInt(TakeField(rest), blasts) &&
+                            ParseInt(TakeField(rest), blasts_confirmed) &&
+                            ParseInt(TakeField(rest), blasts_unmatched);
+
     // Assigned only once every field has parsed, so a malformed record cannot
     // leave a half-updated status on screen.
     out.known = true;
@@ -86,6 +101,37 @@ bool ParseWorldRecord(std::string_view record, WorldStatus& out) noexcept {
     out.shots_announced = has_stats ? announced : 0;
     out.shots_no_owner = has_stats ? no_owner : 0;
     out.shots_no_definition = has_stats ? no_definition : 0;
+    out.blast_stats_known = has_blasts;
+    out.blasts = has_blasts ? blasts : 0;
+    out.blasts_confirmed = has_blasts ? blasts_confirmed : 0;
+    out.blasts_unmatched = has_blasts ? blasts_unmatched : 0;
+    return true;
+}
+
+bool ParseWeaponRecord(std::string_view record, WeaponStatus& out) {
+    const std::vector<std::string> fields = SplitRecord(record);
+    if (fields.size() < kWeaponFieldCount || fields[0] != kWeaponKind) {
+        return false;
+    }
+
+    std::array<int, kWeaponFieldCount - 2> values{};
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (!ParseInt(fields[i + 2], values[i])) {
+            return false;
+        }
+    }
+
+    // Assigned only once every field has parsed, for the same reason the world
+    // record is: half a description on screen reads as a whole one.
+    out.known = true;
+    // An empty name is the runtime saying the catalog has no entry for this
+    // type — not a weapon whose name happens to be blank.
+    out.described = !fields[1].empty();
+    out.name = fields[1];
+    out.object_type = values[0];
+    out.speed_hundredths = values[1];
+    out.lifetime_ms = values[2];
+    out.range_hundredths = values[3];
     return true;
 }
 

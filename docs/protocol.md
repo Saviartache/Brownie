@@ -195,3 +195,35 @@ record which ids actually arrive in each direction. Until that is done nothing i
 The degradation rules above bound the cost of that uncertainty: an unknown or
 misclassified packet is forwarded untouched, so what is missing is visibility,
 not correctness of the traffic.
+
+## SHOWEFFECT, and how a recovered body proves itself
+
+`SHOWEFFECT` (id 11) is the one packet here whose **fields** were recovered from
+the game rather than inherited. It matters because it is the only warning the
+wire carries before an area effect goes off: `AOE` reports a detonation that has
+already happened, and the client answers it with an `AOEACK` saying where the
+player was — by then there is nothing to dodge. The telegraph is what the dodge
+planner reads; see `state/blasts/BlastStore.ts`.
+
+The field list came from the client's own metadata, not from guesswork:
+
+- `tools/extractor` publishes `handlers.json`, whose `message_factories` binds
+  **packet id 11 to managed type `COEFCBBIBMC`** at confidence 100.
+- That is the same class the reference implementation hooks for ShowEffect, and
+  its `RuntimeOffsets` give the field offsets: `0x10` effectType, `0x14`
+  targetObjectId, `0x18` pos1, `0x20` pos2, `0x2C` duration.
+- The gap at `0x28` is a field the reference never read. The decrypted metadata
+  the extractor also publishes has the class's field-name strings in declaration
+  order, and the name between pos2 and duration is the colour.
+
+Six fields, and as wire types they come to **29 bytes**. A live census recorded
+**30** as the largest undescribed body over 113,698 sightings, so one byte is
+still unaccounted for. That is not a problem: bytes past the last field are kept
+as `trailing` and re-emitted verbatim, exactly as the table above promises.
+
+**The decode checks itself against the game.** Where a telegraph says a bomb will
+land is a claim; the `AOE` that follows is the answer sheet. `BlastStore` counts
+predictions a detonation landed on and detonations nothing predicted, and the
+World tab shows both. A layout that drifts after a patch therefore shows up as
+confirmations stopping and unmatched climbing — a number to look at, rather than
+a dodge that quietly stopped avoiding bombs.

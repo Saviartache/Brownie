@@ -54,8 +54,12 @@
  * arbiter and a mode-hysteresis timer. This decides one thing.
  */
 
+import { Blasts, type BlastView } from './Blasts.js';
 import { ThreatField, type DodgeShot, type Sweep, type ThreatFieldOptions } from './ThreatField.js';
 import { WalkReach, type Ground, type Reach } from './WalkReach.js';
+
+/** A session with nothing throwing bombs, which is most of them. */
+const NO_BLASTS: readonly BlastView[] = [];
 
 /** Why the controller did what it did. Reported so a log can say so. */
 export type DodgeVerdict =
@@ -65,6 +69,8 @@ export type DodgeVerdict =
   | 'intent-safe'
   /** Not urgent: moved to the nearest course that is safe and still theirs. */
   | 'guide'
+  /** Nothing in the air; something has simply walked too close. Making room. */
+  | 'spacing'
   /** Something lands soon. Survival first, their heading second. */
   | 'evade'
   /** No course clears the window. This is the one that is hit latest and least. */
@@ -89,6 +95,13 @@ export interface DodgeSettings {
    * up to something that is shooting is possible again.
    */
   readonly reactWithinMs: number;
+  /**
+   * How near a shot has to be before it may take the wheel, in tiles.
+   *
+   * The other half of the same question — see {@link ThreatFieldOptions.reactTiles}
+   * for why time alone leaves the planner reacting to fire across the room.
+   */
+  readonly reactWithinTiles: number;
   /** Spacing of predicted shot positions. See {@link ThreatFieldOptions}. */
   readonly sampleStepMs: number;
   /** How many directions to consider, evenly spaced. */
@@ -98,11 +111,12 @@ export interface DodgeSettings {
   /** A flat margin on every shot. */
   readonly padTiles: number;
   /**
-   * How far into the future a plan starts.
+   * How long before a plan takes effect.
    *
    * A decision made here reaches the module a frame later and the server later
-   * still. Planning from where the player *is* aims the dodge at where the shot
-   * used to be going.
+   * still, so for this long the player is still standing where they are while
+   * the shots are not. It *delays* the walk — see {@link ThreatField.sweep},
+   * where crediting it as a head start instead was costing most of a tile.
    */
   readonly leadMs: number;
   /** How fast confidence in a prediction decays. See {@link ThreatFieldOptions}. */
@@ -170,13 +184,14 @@ export interface DodgePlan {
  */
 export interface DodgeWorld extends Ground {
   /**
-   * How much room a course has from the nearest enemy body, in tiles.
+   * How far out of position a place is, in tiles: negative too near a monster,
+   * positive further from one than the weapon reaches, nought when it is
+   * somewhere worth standing. See `EnemyBodies.standoffAt`.
    *
-   * **Scored, never a veto.** Contact damage is real, but the only lane out of a
-   * volley sometimes runs past a monster, and a planner that refuses it stands
-   * in the volley instead. `Infinity` when nothing is near.
+   * **Scored, never a veto.** The only lane out of a volley sometimes runs past
+   * a monster, and a planner that refuses it stands in the volley instead.
    */
-  enemyRoomAt(x: number, y: number): number;
+  standoffAt(x: number, y: number): number;
 }
 
 /** The course that stays put. Always index nought, always considered. */
@@ -227,11 +242,22 @@ const CORRIDOR_NEIGHBOURS = 3;
  * three times, twice at the wrong layer (goal selection, then path selection)
  * before putting it where the commitment actually happens.
  *
- * **Urgency lifts it entirely.** A dwell that outlives the situation it was
- * committed to is a dwell that kills, so it never applies while trouble is
- * inside {@link DodgeSettings.urgentWithinMs}.
+ * **Long enough to actually leave, which is what a dodge is for.** A sustained
+ * pattern — a fan, a rotating source — has no course that is safe *now*; the way
+ * out is to run three or four tiles, which takes the better part of a second at
+ * six tiles a second. A planner that re-decides fifty times a second and commits
+ * for a tenth of one never completes an escape: it follows the local gradient,
+ * which points downwind, and drifts along in front of the pattern taking hits.
+ * Measured at a hundred and twenty milliseconds, three seconds of a wide fan
+ * produced forty-seven course changes and twenty ticks overlapping a shot; the
+ * churn falls off sharply between two and four hundred.
+ *
+ * **It is not a lock**, and {@link DodgeController.noWorse} is why it is safe to
+ * make it this long: the held course is kept only while it is no worse than the
+ * fresh answer on every measure that matters. Refreshed only when the course
+ * changes, so a commitment expires on its own rather than renewing itself.
  */
-const DWELL_MS = 120;
+const DWELL_MS = 300;
 
 /** How much better a new course must be to break the dwell, in tiles of room. */
 const DWELL_BREAK_TILES = 0.06;
@@ -267,6 +293,24 @@ const MAX_HEADINGS = 64;
  */
 const ROOM_QUANTUM_TILES = 0.05;
 const IMPACT_QUANTUM_MS = 20;
+/**
+ * The same, for how well a course sits relative to the monsters.
+ *
+ * Coarse, and that is what keeps it from being a leash of its own: two
+ * sidesteps around the same monster are equally good places to fight from, and
+ * splitting them by a hundredth of a tile would spend the term on a distinction
+ * nobody could see. What it is meant to separate is the sidestep from the
+ * retreat, and those differ by tiles.
+ */
+const STANDOFF_QUANTUM_TILES = 0.25;
+/**
+ * How much worse being too near a monster is than being too far from one.
+ *
+ * Out of range costs damage that was not dealt; inside the bubble costs the room
+ * needed to dodge at all, and then contact damage. They are not the same
+ * mistake, so a tile of each does not weigh the same.
+ */
+const CROWDED_WEIGHT = 2;
 /** The same, for how close a course is to the way the player is walking. */
 const ALIGNMENT_QUANTUM = 0.02;
 /**
@@ -303,8 +347,14 @@ function inQuanta(value: number, quantum: number): number {
   return Math.round(value / quantum);
 }
 
+/** Signed tiles out of the band as a cost. See {@link CROWDED_WEIGHT}. */
+function standoffCost(outOfBandTiles: number): number {
+  return outOfBandTiles < 0 ? -outOfBandTiles * CROWDED_WEIGHT : outOfBandTiles;
+}
+
 export class DodgeController {
   readonly #field = new ThreatField();
+  readonly #blasts = new Blasts();
   readonly #reach = new WalkReach();
 
   /**
@@ -329,7 +379,8 @@ export class DodgeController {
   #impactMs = new Float64Array(0);
   #unsafeMs = new Float64Array(0);
   #clearance = new Float64Array(0);
-  #enemyRoom = new Float64Array(0);
+  /** How far out of the standoff band each course ends up, as a cost. */
+  #standoff = new Float64Array(0);
   #headings = -1;
   /** Slots per speed tier: the ring plus the player's own direction. */
   #stride = 0;
@@ -340,28 +391,65 @@ export class DodgeController {
   /** Why {@link #choose} chose what it did, for the plan to report. */
   #verdict: DodgeVerdict = 'clear';
 
-  /** The course last committed to, and until when it stands. */
+  /**
+   * Whether something is standing closer than the band allows.
+   *
+   * A field rather than an argument because {@link #mostAligned} needs it and
+   * already takes six. What it changes there is one thing: a player who has let
+   * go of the keys is normally asking to stay where they are, and while
+   * something is on top of them that is not a request worth honouring.
+   */
+  #crowded = false;
+
+  /**
+   * The course last committed to, and until when it stands.
+   *
+   * **Held is a flag rather than "the direction is not nought", because holding
+   * still is a decision too.** Inferring it from the direction made the one
+   * transition that matters most — standing to walking and back — the only one
+   * with no hysteresis at all, so a shot drifting across the reaction window
+   * produced take-the-wheel, give-it-back, take-it-again at fifty hertz. That is
+   * the stutter, and it is also why a walk never got anywhere: every other plan
+   * started it over.
+   */
+  #held = false;
   #heldX = 0;
   #heldY = 0;
   #heldScale = 0;
   #heldUntilMs = 0;
+
+  /** What counted as trouble this plan, for {@link #safety} to classify against. */
+  #reactWithinMs = 0;
 
   readonly #sweep: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
   readonly #probe: Reach = { wallTiles: Infinity, hazardTiles: Infinity, exitTiles: Infinity };
 
   /** Drops the commitment. Called when the session or the character changes. */
   reset(): void {
+    this.#forget();
+  }
+
+  #forget(): void {
+    this.#held = false;
     this.#heldX = 0;
     this.#heldY = 0;
     this.#heldScale = 0;
     this.#heldUntilMs = 0;
   }
 
+  /**
+   * @param blasts Area effects on their way down — thrown bombs, novas,
+   *   telegraphed circles. Separate from `shots` because they are a different
+   *   shape of danger and are measured differently; see `Blasts`. Omitted means
+   *   this session has no source of them, which is what a test about bullets
+   *   wants and what a runtime without the telegraph decoded gets.
+   */
   plan(
     situation: DodgeSituation,
     settings: DodgeSettings,
     world: DodgeWorld,
     shots: Iterable<DodgeShot>,
+    blasts: Iterable<BlastView> = NO_BLASTS,
   ): DodgePlan {
     const tilesPerMs = situation.speedTilesPerSecond / 1000;
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
@@ -386,6 +474,7 @@ export class DodgeController {
 
     const horizonMs = settings.horizonMs;
     const reactWithinMs = Math.min(settings.reactWithinMs, horizonMs);
+    this.#reactWithinMs = reactWithinMs;
     this.#survivalCapMs = horizonMs + settings.sampleStepMs;
     const reachTiles = tilesPerMs * (settings.leadMs + horizonMs);
     const fieldOptions: ThreatFieldOptions = {
@@ -395,22 +484,49 @@ export class DodgeController {
       padTiles: settings.padTiles,
       driftTilesPerSecond: settings.driftTilesPerSecond,
       reachTiles,
+      reactTiles: settings.reactWithinTiles,
     };
     this.#field.build(situation.gameTimeMs, situation.x, situation.y, shots, fieldOptions);
+    this.#blasts.collect(
+      blasts,
+      situation.gameTimeMs,
+      situation.x,
+      situation.y,
+      reachTiles,
+      horizonMs,
+    );
 
     const onHazard = settings.avoidDamagingGround && world.isDamaging(situation.x, situation.y);
+    // Something has walked inside the bubble. Not damage yet, and still a reason
+    // to speak: the room being taken is the room a dodge needs, so waiting until
+    // it is damage is waiting until there is nowhere left to go.
+    //
+    // **Only while nobody is driving.** A player walking into a boss has said
+    // where they want to be, and a knight is *supposed* to be there. Crowding
+    // ranks the courses whatever they are doing; it only ever takes the wheel
+    // when their hands are off it.
+    this.#crowded = !steering && world.standoffAt(situation.x, situation.y) < 0;
+    const crowded = this.#crowded;
     const tracked = this.#field.tracked;
+    // Shots in flight and blasts on their way down. Either is a reason to think.
+    const incoming = tracked + this.#blasts.count;
 
     // The cheapest way out, and the common one: nothing can reach us, the ground
-    // is fine, and nobody is walking anywhere. Asked before any probing, because
-    // probing the map is the expensive half of a plan with nothing to decide.
-    if (tracked === 0 && !onHazard && !steering) return this.#nothing('clear', 0);
+    // is fine, nobody is on top of us and nobody is walking anywhere. Asked
+    // before any probing, because probing the map is the expensive half of a
+    // plan with nothing to decide.
+    if (incoming === 0 && !onHazard && !crowded && !steering) return this.#nothing('clear', 0);
 
     this.#measureGround(situation, settings, world, headings, reachTiles, tilesPerMs);
 
     // The same shortcut one probe later: nothing in the air, good ground now,
     // and the way they are walking stays good ground.
-    if (tracked === 0 && !onHazard && (this.#hazardMs[own] ?? Infinity) > HAZARD_GUARD_MS) {
+    if (
+      incoming === 0 &&
+      !onHazard &&
+      !crowded &&
+      (this.#hazardMs[own] ?? Infinity) > HAZARD_GUARD_MS
+    ) {
       return this.#nothing('clear', 0);
     }
 
@@ -420,7 +536,7 @@ export class DodgeController {
       // Getting off it may well need part speed too — a pool with one clean
       // step out of it is exactly the case the extra tiers exist for.
       this.#score(situation, settings, firstTier, total, tilesPerMs, horizonMs, onHazard, world);
-      return this.#commit('escape', this.#leaveHazard(situation, total), situation, tracked, true);
+      return this.#commit('escape', this.#leaveHazard(situation, total), total, situation, tracked);
     }
 
     // What the player is already doing, which is the baseline every branch below
@@ -428,14 +544,23 @@ export class DodgeController {
     const ownUnsafeAt = this.#unsafeMs[own] ?? Infinity;
     const ownHazard = this.#hazardMs[own] ?? Infinity;
 
-    if (ownUnsafeAt > reactWithinMs && ownHazard > HAZARD_GUARD_MS) {
+    // **Mid-escape, and letting go now would undo it.** A walk out of a pattern
+    // takes several hundred milliseconds, and it passes through moments where
+    // standing still happens to be safe for the next four hundred — so a gate
+    // that hands the wheel back the instant that is true stops the escape a
+    // third of the way through, every time, and starts it again on the next
+    // plan. That is the stutter the player sees and the reason a dodge never
+    // gets anywhere. The commitment expires on its own; until it does, the
+    // decision belongs to the scoring below, which is free to re-choose
+    // standing still if that is genuinely the best course.
+    const committed =
+      this.#held && (this.#heldX !== 0 || this.#heldY !== 0) && situation.nowMs < this.#heldUntilMs;
+
+    if (ownUnsafeAt > reactWithinMs && ownHazard > HAZARD_GUARD_MS && !crowded && !committed) {
       // Their course is fine for as long as this decision is about. Nothing to
       // say, and not saying it *is* the feature — what the caller does with a
       // plan that steers nowhere is give the wheel back; see `dodgePlugin`.
-      this.#heldUntilMs = 0;
-      this.#heldX = 0;
-      this.#heldY = 0;
-      this.#heldScale = 0;
+      this.#forget();
       return {
         verdict: steering ? 'intent-safe' : 'clear',
         steer: false,
@@ -465,7 +590,14 @@ export class DodgeController {
       chosen = this.#choose(scored, reactWithinMs, urgent, situation);
     }
 
-    return this.#commit(this.#verdict, chosen, situation, tracked, urgent);
+    // Said plainly when nothing was in the air and the only reason to move was
+    // that something walked in. The choice is the same one; the log is the only
+    // place a person can tell the two apart.
+    const verdict =
+      this.#verdict === 'guide' && crowded && ownUnsafeAt > reactWithinMs
+        ? 'spacing'
+        : this.#verdict;
+    return this.#commit(verdict, chosen, scored, situation, tracked);
   }
 
   // ── Candidate tables ──────────────────────────────────────────────────────
@@ -486,7 +618,7 @@ export class DodgeController {
     this.#impactMs = new Float64Array(slots);
     this.#unsafeMs = new Float64Array(slots);
     this.#clearance = new Float64Array(slots);
-    this.#enemyRoom = new Float64Array(slots);
+    this.#standoff = new Float64Array(slots);
 
     for (let tier = 0; tier < SPEED_TIERS.length; tier += 1) {
       const base = 1 + tier * stride;
@@ -567,10 +699,12 @@ export class DodgeController {
     for (let tier = 0; tier < SPEED_TIERS.length; tier += 1) {
       const base = 1 + tier * stride;
       const speed = tilesPerMs * (SPEED_TIERS[tier] ?? 1);
-      // Distance to time at *this* course's speed, undoing the head start the
-      // lead gives it.
+      // Distance to time at *this* course's speed, counting from now — so the
+      // wait before the walk starts is added, not taken off. The same
+      // correction as the sweep's, and it has to be the same or a course would
+      // meet a wall at one moment and a shot on a different clock.
       const whenReached = (tiles: number): number =>
-        tiles === Infinity || speed <= 0 ? Infinity : Math.max(0, tiles / speed - settings.leadMs);
+        tiles === Infinity || speed <= 0 ? Infinity : tiles / speed + settings.leadMs;
 
       for (let i = 0; i < headings; i += 1) {
         this.#wallTiles[base + i] = this.#reach.wallTilesFor(i);
@@ -618,22 +752,38 @@ export class DodgeController {
         settings.safeClearanceTiles,
         this.#sweep,
       );
+      // Into the same three numbers, because "when is this course in trouble"
+      // has one answer however it is caused. See `Blasts.sweep`.
+      this.#blasts.sweep(
+        situation.x,
+        situation.y,
+        this.#dirX[c] ?? 0,
+        this.#dirY[c] ?? 0,
+        speed,
+        tilesPerMs,
+        settings.leadMs,
+        until,
+        travel,
+        settings.safeClearanceTiles,
+        this.#sweep,
+      );
       this.#impactMs[c] = Math.min(this.#sweep.impactMs, hazard);
       this.#unsafeMs[c] = Math.min(this.#sweep.unsafeAtMs, hazard);
       this.#clearance[c] = this.#sweep.clearanceTiles;
-      this.#enemyRoom[c] = this.#roomFromEnemies(situation, world, c, speed, until, travel);
+      this.#standoff[c] = this.#standoffFor(situation, world, c, speed, until, travel);
     }
   }
 
   /**
-   * The nearest an enemy body comes to a course.
+   * How badly a course sits relative to the monsters, as a cost. Lower is better.
    *
    * Two points rather than every sample: enemies barely move over half a second,
-   * this only ever breaks a tie between courses that are already equal on
-   * survival, and the whole point of it is to prefer the lane that does not run
-   * through a monster rather than to measure by how much.
+   * and the whole point is to prefer the lane that keeps the fight rather than to
+   * measure by how much. The *worse* of the two, because a course that ends in
+   * range having walked through a boss on the way is not a course that kept its
+   * distance.
    */
-  #roomFromEnemies(
+  #standoffFor(
     situation: DodgeSituation,
     world: DodgeWorld,
     candidate: number,
@@ -644,13 +794,13 @@ export class DodgeController {
     const dirX = this.#dirX[candidate] ?? 0;
     const dirY = this.#dirY[candidate] ?? 0;
     if ((dirX === 0 && dirY === 0) || tilesPerMs <= 0) {
-      return world.enemyRoomAt(situation.x, situation.y);
+      return standoffCost(world.standoffAt(situation.x, situation.y));
     }
     const far = Math.min(tilesPerMs * untilMs, maxTravelTiles);
     const near = far / 2;
-    return Math.min(
-      world.enemyRoomAt(situation.x + dirX * near, situation.y + dirY * near),
-      world.enemyRoomAt(situation.x + dirX * far, situation.y + dirY * far),
+    return Math.max(
+      standoffCost(world.standoffAt(situation.x + dirX * near, situation.y + dirY * near)),
+      standoffCost(world.standoffAt(situation.x + dirX * far, situation.y + dirY * far)),
     );
   }
 
@@ -673,8 +823,8 @@ export class DodgeController {
     if (bestWindow <= reactWithinMs) {
       // Nothing clears the window, whatever speed it is walked at. Trade inside
       // a narrow band so the hit is still the latest and lightest available —
-      // and giving ground stops being the mistake, because there is no window
-      // left to walk through.
+      // and where the course leaves us stops mattering, because there is no
+      // window left to walk through and nothing to shoot back with once hit.
       const best = this.#bestSurvival(scored);
       this.#verdict = 'unavoidable';
       return this.#mostAligned(
@@ -752,24 +902,24 @@ export class DodgeController {
     let bestImpact = this.#survival(HOLD);
     let bestLane = this.#lane(HOLD);
     let bestRoom = this.#room(HOLD);
-    let bestEnemy = this.#enemyRoom[HOLD] ?? 0;
+    let bestStandoff = this.#standoffOf(HOLD);
 
     for (let c = 1; c < scored; c += 1) {
       const impact = this.#survival(c);
       if (impact < bestImpact) continue;
       const lane = this.#lane(c);
       const room = this.#room(c);
-      const enemy = this.#enemyRoom[c] ?? 0;
+      const standoff = this.#standoffOf(c);
       const better =
         impact > bestImpact ||
         lane > bestLane ||
-        (lane === bestLane && (room > bestRoom || (room === bestRoom && enemy > bestEnemy)));
+        (lane === bestLane && (room > bestRoom || (room === bestRoom && standoff < bestStandoff)));
       if (!better) continue;
       best = c;
       bestImpact = impact;
       bestLane = lane;
       bestRoom = room;
-      bestEnemy = enemy;
+      bestStandoff = standoff;
     }
     return best;
   }
@@ -790,6 +940,31 @@ export class DodgeController {
   /** How much room a course has, in whole quanta. */
   #room(candidate: number): number {
     return inQuanta(this.#clearance[candidate] ?? -Infinity, ROOM_QUANTUM_TILES);
+  }
+
+  /** How far out of the band a course ends up, in whole quanta. Lower is better. */
+  #standoffOf(candidate: number): number {
+    return inQuanta(this.#standoff[candidate] ?? 0, STANDOFF_QUANTUM_TILES);
+  }
+
+  /**
+   * Whether a course is safe at all, as a class rather than a measurement.
+   *
+   * **Two: never touched inside the horizon. One: touched, but not until after
+   * the moment that decided to act. Nought: hit inside it.**
+   *
+   * This is what stops the planner trading a hit for a better position, and it
+   * has to be a class rather than a number for the same reason the whole
+   * comparison is lexicographic: there is no exchange rate between "half a tile
+   * closer to the monster" and "gets shot", and inventing one produces exactly
+   * the behaviour it was invented to avoid. Two courses that both survive are
+   * then free to be told apart by where they leave us, which is the point of the
+   * terms after it.
+   */
+  #safety(candidate: number): number {
+    const impact = this.#impactMs[candidate] ?? Infinity;
+    if (impact === Infinity) return 2;
+    return impact > this.#reactWithinMs ? 1 : 0;
   }
 
   /** How much survival the neighbouring headings have. See {@link CORRIDOR_NEIGHBOURS}. */
@@ -823,21 +998,27 @@ export class DodgeController {
    * is what stops "every heading is equally unlike standing still" from picking
    * whichever happens to be first in the table.
    *
-   * **Among courses that all clear the window, the one that gives least ground
+   * **Among courses that all clear the window, the one that keeps the fight
    * wins.** Every acceptable course is safe for as long as this decision is
    * about, so choosing the *safest* of them is choosing to back away from a
-   * pattern there was room to walk through — and a dodge that answers every
-   * wave by retreating is one that can never be in range of anything. What is
-   * penalised is specifically running *with* the shots; crossing them and
-   * closing on them are alike, because the planner has no business preferring
-   * one of those to the other and the enemy-room term is what keeps it off the
+   * pattern there was room to walk through — and a dodge that answers every wave
+   * by retreating is one that can never be in range of anything.
+   *
+   * Two terms say that, in this order. Where the course leaves us relative to
+   * the monsters is a measurement and comes first; whether it runs *with* the
+   * shots is a heuristic for the same thing and is what remains when there is
+   * nobody in the list to measure against — an enemy off the edge of what was
+   * collected, or the whole idea switched off. Crossing the fire and closing on
+   * it are alike to the second term, because the planner has no business
+   * preferring one of those to the other and the band is what keeps it off the
    * monster itself.
    *
    * @param minWindowMs Trouble must be at least this far off. `-Infinity` when
    *   nothing clears the window and the question becomes "which is least bad".
-   * @param avoidRetreat Whether giving ground is worth ranking above survival.
-   *   False once nothing clears the window: with no gap to thread, backing off
-   *   is the answer rather than the mistake.
+   * @param keepPosition Whether where a course leaves us is worth ranking above
+   *   survival. False once nothing clears the window: with no gap to thread,
+   *   backing off is the answer rather than the mistake, and the best place to
+   *   fight from is any place still alive.
    */
   #mostAligned(
     scored: number,
@@ -845,19 +1026,20 @@ export class DodgeController {
     minImpactMs: number,
     minRoomTiles: number,
     situation: DodgeSituation,
-    avoidRetreat: boolean,
+    keepPosition: boolean,
   ): number {
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
     const flowX = this.#field.flowX;
     const flowY = this.#field.flowY;
-    const coherence = avoidRetreat ? this.#field.flowCoherence : 0;
+    const coherence = keepPosition ? this.#field.flowCoherence : 0;
     let best = -1;
     let bestDot = -Infinity;
+    let bestSafety = -Infinity;
+    let bestStandoff = Infinity;
     let bestGround = -Infinity;
     let bestImpact = -Infinity;
     let bestLane = -Infinity;
     let bestRoom = -Infinity;
-    let bestEnemy = -Infinity;
 
     for (let c = 0; c < scored; c += 1) {
       if ((this.#unsafeMs[c] ?? 0) <= minWindowMs) continue;
@@ -873,14 +1055,37 @@ export class DodgeController {
       // answer there. Both are "most like what they asked for"; they are simply
       // opposite ends of it. Kept selectable as a last resort either way, since
       // the first candidate to clear the bar is taken whatever it scores.
+      //
+      // **Unless standing is not a request worth honouring**, which is two
+      // cases. One: something has walked on top of them, and staying is the
+      // position the terms below exist to leave. Two — and this is what looked
+      // like the dodge shuffling on the spot instead of getting out — nothing
+      // clears the window at all. Holding still then outranked *every* moving
+      // course before their room was so much as looked at, because it is index
+      // nought and wins the first key outright; so under saturated fire the
+      // planner stood there and took it while a course with most of a tile of
+      // clearance sat unexamined. A player who let go of the keys asked to stay
+      // where they are. They did not ask to be shot.
       const dot = standing
         ? steering
           ? -Infinity
-          : 1
+          : this.#crowded || !keepPosition
+            ? 0
+            : 1
         : steering
           ? inQuanta(dirX * situation.intentX + dirY * situation.intentY, ALIGNMENT_QUANTUM)
           : 0;
       if (dot < bestDot) continue;
+      // **Ahead of everything about position, and that is the fix for trying to
+      // squeeze through gaps that do not fit.** Both terms below it — staying in
+      // weapon range, not running with the fire — were ranked above survival, so
+      // a course that got hit could win over one that did not on the strength of
+      // ending a tile nearer the monster. The filter above only guarantees the
+      // course is clear for the *reaction* window; being hit at eight hundred
+      // milliseconds still counted as eligible, and then position picked among
+      // them.
+      const safety = this.#safety(c);
+      const standoff = keepPosition ? this.#standoffOf(c) : 0;
       // How much ground this gives up: nought for standing, crossing the fire or
       // closing on it, negative for running with it. Faded out by how much the
       // shots agree on a direction, so a crossfire — where there is no "back" —
@@ -891,25 +1096,27 @@ export class DodgeController {
       const impact = this.#survival(c);
       const lane = this.#lane(c);
       const room = this.#room(c);
-      const enemy = this.#enemyRoom[c] ?? 0;
       const better =
         best < 0 ||
         dot > bestDot ||
-        ground > bestGround ||
-        (ground === bestGround &&
-          (impact > bestImpact ||
-            (impact === bestImpact &&
-              (lane > bestLane ||
-                (lane === bestLane &&
-                  (room > bestRoom || (room === bestRoom && enemy > bestEnemy)))))));
+        safety > bestSafety ||
+        (safety === bestSafety &&
+          (ground > bestGround ||
+            (ground === bestGround &&
+              (standoff < bestStandoff ||
+                (standoff === bestStandoff &&
+                  (impact > bestImpact ||
+                    (impact === bestImpact &&
+                      (lane > bestLane || (lane === bestLane && room > bestRoom)))))))));
       if (!better) continue;
       best = c;
       bestDot = dot;
+      bestSafety = safety;
+      bestStandoff = standoff;
       bestGround = ground;
       bestImpact = impact;
       bestLane = lane;
       bestRoom = room;
-      bestEnemy = enemy;
     }
     // Nothing cleared the bar, which happens when the bar came from a course
     // that has since been excluded. Survival is always answerable.
@@ -923,38 +1130,38 @@ export class DodgeController {
   #commit(
     verdict: DodgeVerdict,
     candidate: number,
+    scored: number,
     situation: DodgeSituation,
     tracked: number,
-    urgent: boolean,
   ): DodgePlan {
     let chosen = candidate;
 
-    const holding = this.#heldX !== 0 || this.#heldY !== 0;
-    // **Never while it is urgent.** The dwell exists to absorb noise between
-    // near-equal answers; a situation that has changed enough to be urgent is
-    // not noise, and a commitment that outlives it is one that kills.
-    if (holding && !urgent && situation.nowMs < this.#heldUntilMs) {
-      const held = this.#candidateFor(this.#heldX, this.#heldY, this.#heldScale);
-      if (
-        held >= 0 &&
-        held !== chosen &&
-        (this.#unsafeMs[held] ?? 0) >= (this.#unsafeMs[chosen] ?? 0) &&
-        (this.#clearance[chosen] ?? -Infinity) <
-          (this.#clearance[held] ?? -Infinity) + DWELL_BREAK_TILES
-      ) {
-        chosen = held;
-      }
+    // **Urgency no longer lifts this, and that was the mistake.** The dwell used
+    // to stand down whenever trouble was close — which in a dense pattern is
+    // always, so the one situation that most needs a steady answer was the one
+    // with no hysteresis at all. What makes a long dwell safe is not picking the
+    // moments to apply it, it is {@link #noWorse}: a held course is kept only
+    // while it is no worse than the fresh answer on time-to-trouble,
+    // time-to-impact and room. A course that has gone bad is dropped the plan it
+    // goes bad, urgent or not.
+    if (this.#held && situation.nowMs < this.#heldUntilMs) {
+      const held = this.#heldCandidate(scored);
+      if (held >= 0 && held !== chosen && this.#noWorse(held, chosen)) chosen = held;
     }
 
     const dirX = this.#dirX[chosen] ?? 0;
     const dirY = this.#dirY[chosen] ?? 0;
     const scale = chosen === HOLD ? 0 : (this.#scale[chosen] ?? 1);
-    if (dirX !== this.#heldX || dirY !== this.#heldY || scale !== this.#heldScale) {
-      this.#heldX = dirX;
-      this.#heldY = dirY;
-      this.#heldScale = scale;
+    // Only a *direction* change restarts the clock. Walking the same way a
+    // little slower is the same decision being carried out, not a new one, and
+    // renewing the commitment for it would make a dwell that never expires.
+    if (dirX !== this.#heldX || dirY !== this.#heldY || !this.#held) {
       this.#heldUntilMs = situation.nowMs + DWELL_MS;
     }
+    this.#held = true;
+    this.#heldX = dirX;
+    this.#heldY = dirY;
+    this.#heldScale = scale;
 
     return {
       verdict,
@@ -969,22 +1176,51 @@ export class DodgeController {
     };
   }
 
-  /** Which candidate this plan scored for a course, or -1 if none did. */
-  #candidateFor(dirX: number, dirY: number, scale: number): number {
-    const total = 1 + SPEED_TIERS.length * this.#stride;
-    for (let c = 0; c < total; c += 1) {
-      if (this.#dirX[c] === dirX && this.#dirY[c] === dirY && (this.#scale[c] ?? 1) === scale) {
-        return c;
-      }
+  /**
+   * The candidate carrying on the committed course, or -1 when none does.
+   *
+   * **Bounded by what was actually scored**, which is the whole point of the
+   * question. Most plans score only the first speed tier, and the arrays past it
+   * still hold the *previous* plan's numbers — so searching the whole table
+   * hands back a course whose safety was measured against a field that has since
+   * moved. That is a dwell keeping a commitment nobody re-checked.
+   *
+   * **Matched on direction, not on direction and speed.** The same heading is
+   * offered at three speeds and which of them wins moves with the field, so an
+   * exact match failed constantly and dropped the commitment — the character
+   * kept its bearing and stuttered between full and a third of a step. The speed
+   * the course is walked at is re-decided every plan; the direction is what is
+   * being committed to. The held speed is preferred where it is still an option,
+   * so a steady course does not change pace for nothing.
+   */
+  #heldCandidate(scored: number): number {
+    let best = -1;
+    for (let c = 0; c < scored; c += 1) {
+      if (this.#dirX[c] !== this.#heldX || this.#dirY[c] !== this.#heldY) continue;
+      if ((this.#scale[c] ?? 1) === this.#heldScale) return c;
+      if (best < 0 || this.#survival(c) > this.#survival(best)) best = c;
     }
-    return -1;
+    return best;
+  }
+
+  /**
+   * Whether carrying on is at least as good as the fresh answer.
+   *
+   * The guard that makes a long commitment safe: every measure the choice was
+   * made on has to be no worse, and room is allowed to be worse only by less
+   * than the noise the whole dwell exists to absorb.
+   */
+  #noWorse(held: number, chosen: number): boolean {
+    return (
+      (this.#unsafeMs[held] ?? 0) >= (this.#unsafeMs[chosen] ?? 0) &&
+      (this.#impactMs[held] ?? 0) >= (this.#impactMs[chosen] ?? 0) &&
+      (this.#clearance[chosen] ?? -Infinity) <
+        (this.#clearance[held] ?? -Infinity) + DWELL_BREAK_TILES
+    );
   }
 
   #nothing(verdict: DodgeVerdict, tracked: number): DodgePlan {
-    this.#heldX = 0;
-    this.#heldY = 0;
-    this.#heldScale = 0;
-    this.#heldUntilMs = 0;
+    this.#forget();
     return {
       verdict,
       steer: false,

@@ -24,7 +24,12 @@ constexpr std::array<const char*, 5> kFillPath{
 
 void ScenePatches::Want(const ScenePatchWants& wants) noexcept {
     tint_wanted_.store(wants.health_bar_tint, std::memory_order_relaxed);
-    hitbox_wanted_.store(wants.no_hitbox, std::memory_order_relaxed);
+    // One means "leave it alone", which is what the pass would write if it ever
+    // read this while the switch below said off. It never does — both are this
+    // thread's — and it is still the only harmless value to park here.
+    collision_multiplier_.store(wants.collision_multiplier.value_or(1.0F),
+                                std::memory_order_relaxed);
+    collision_wanted_.store(wants.collision_multiplier.has_value(), std::memory_order_relaxed);
 
     // Compared packed, which is the form the detour reads: two colours that
     // differ by less than the game can render are the same colour, and
@@ -162,7 +167,10 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
     }
 
     const bool tint = tint_wanted_.load(std::memory_order_relaxed);
-    const bool hitbox = hitbox_wanted_.load(std::memory_order_relaxed);
+    const bool wanted = collision_wanted_.load(std::memory_order_relaxed);
+    // A value taken from the game and not yet put back is its own reason to keep
+    // walking: the switch going off is a write, not the absence of one.
+    const bool collision = wanted || collision_.holding();
     if (!tint) {
         // Switched off. The bar goes back to the game's own colour the next
         // time the game paints it, which is the next time it changes.
@@ -173,13 +181,13 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
     // half a second late reads as a counter that skips.
     const bool text = text_.pending() && text_.installed() &&
                       route_ready_.load(std::memory_order_acquire);
-    if (!tint && !hitbox && !text) {
+    if (!tint && !collision && !text) {
         return;
     }
     // Asked only when one of the two switches wants it, because asking advances
     // it — a frame that walked the scene for a message would otherwise consume
     // the tick the switches were waiting for.
-    const bool due = (tint || hitbox) && pass_.Due(now_ms);
+    const bool due = (tint || collision) && pass_.Due(now_ms);
     // A colour that has just changed is shown now rather than on the next pass:
     // half a second between a picker moving and the bar following it is long
     // enough to be read as the picker not working.
@@ -210,8 +218,11 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
         tint_.Paint();
         repaint_ = false;
     }
-    if (hitbox && due) {
-        (void)collision_.Apply(*runtime, scene_);
+    if (collision && due) {
+        (void)collision_.Apply(
+            *runtime, scene_,
+            wanted ? std::optional<float>{collision_multiplier_.load(std::memory_order_relaxed)}
+                   : std::nullopt);
     }
     if (text) {
         // From the player pointer, not from the scene — see `FloatingText.h`.

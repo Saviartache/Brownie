@@ -243,28 +243,42 @@ module. The value is read as *text* whatever its JSON type is — `true`, `1234`
 value of no fixed type, and the feature that consumes it is what knows its
 shape.
 
-Two keys are resolved today:
+Four keys are resolved today:
 
-| key             | value                | meaning                                                     |
-| --------------- | -------------------- | ----------------------------------------------------------- |
-| `player.noclip` | `true` / `false`     | silence the client's own walkability check                  |
-| `cursor.track`  | `true` / `false`     | measure where the cursor points, and send it                |
+| key                         | value                | meaning                                                      |
+| --------------------------- | -------------------- | ------------------------------------------------------------ |
+| `player.noclip`             | `true` / `false`     | silence the client's own walkability check                   |
+| `cursor.track`              | `true` / `false`     | measure where the cursor points, and send it                 |
+| `player.collider`           | `true` / `false`     | scale the player's collision circle, and put it back after   |
+| `player.colliderMultiplier` | `0` … `1`            | what to scale it by, clamped on arrival                      |
 
-**Both are leases rather than flags**, and nothing else here is. Every other
-change the module makes to the game is switched on in the overlay, by a switch
-that cannot go away. These belong to plugins, and a plugin can be disabled, can
-fail, can be unloaded, and the runtime behind it can be killed — each of which
-would otherwise leave the module doing something with nothing left to say stop.
-So the runtime restates `true` once a second while it wants it, the module gives
-the claim three seconds, and `false` ends it at once. A switch that is simply
-switched off is therefore immediate; only the ways a runtime stops *without*
-saying so wait out the lease.
+**The three switches are leases rather than flags**, and nothing else here is.
+Every other change the module makes to the game is switched on in the overlay,
+by a switch that cannot go away. These belong to plugins, and a plugin can be
+disabled, can fail, can be unloaded, and the runtime behind it can be killed —
+each of which would otherwise leave the module doing something with nothing left
+to say stop. So the runtime restates `true` once a second while it wants it, the
+module gives the claim three seconds, and `false` ends it at once. A switch that
+is simply switched off is therefore immediate; only the ways a runtime stops
+*without* saying so wait out the lease.
 
 What is left behind differs, and only one of them is dangerous: a lapsed
 `player.noclip` is a character walking through walls, while a lapsed
-`cursor.track` is three calls a frame into a camera nobody is reading. The
-second is a lease anyway, because a claim that outlives its claimant is a claim
-nobody can revoke.
+`cursor.track` is three calls a frame into a camera nobody is reading, and a
+lapsed `player.collider` is the module writing the game's own multiplier back
+over its own. The last two are leases anyway, because a claim that outlives its
+claimant is a claim nobody can revoke — and because the collider's expiry is
+what actually undoes the write.
+
+`player.colliderMultiplier` is the exception on this table: not a claim but the
+number one of the claims applies. It goes out **ahead of the claim and only when
+it has moved** — the module applies whatever it was last told, so a claim heard
+before its number would act on the previous one, while a number that has not
+changed is one the module already has and the runtime would be repeating for
+nobody. It is stored whether or not the claim is live, because a value refused
+for arriving first would leave the claim acting on whatever came before it. The
+module clamps it to `0` … `1` on arrival rather than trusting the slider it came
+from: above one is a *larger* collision circle than the game built.
 
 ### `playerTelemetry`
 
@@ -318,17 +332,27 @@ kind    plugin     key       label        type  vt v hasMin min hasMax max step 
 Record kinds and their fields are documented with the overlay pages that emit
 them, in `apps/runtime/src/overlay`.
 
-Four kinds are not about drawing at all. Three of them carry integers only — no
-encoding to apply, and nothing to get wrong between two languages:
+A handful of kinds are not about drawing at all. Most of them carry integers
+only — no encoding to apply, and nothing to get wrong between two languages.
+`weapon` and `text` are the two that do not, and each says why below:
 
 | record  | fields                                            | meaning                                                                                               |
 | ------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
+| `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs                   | walk towards here, no faster than this, for this long unless replaced                                 |
 | `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `trail-begin` / `trail-end` | —                     | brackets a set of shot paths, which is committed whole                                                |
 | `trail` | life‰, x·100, y·100, … (pairs)                    | one shot's remaining path, from where it is now to where it stops existing                            |
+
+`weapon` carries one field of text — the item's own id — so unlike its
+neighbours it is percent-encoded and the module reads it with the same splitter
+the control records use. It is sent only when the answer changes, which is when
+the player swaps an item, rather than on the world record's own four-times-a-
+second clock. An item the data files do not describe is still reported, with an
+empty name and its type: "no entry for this type" and "these numbers are wrong"
+look identical on screen otherwise, and want opposite fixes.
 
 `text` is the exception to "integers only", and to the encoding above: **the
 message is the whole of the rest of the record**, separators included, which is

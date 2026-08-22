@@ -152,14 +152,23 @@ void CopyStateAsJson(const OverlayModel& model) {
     // facts are read together or not at all.
     out.append(",\n  \"scene\": ");
     append(
-        "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsCleared\": %u,"
+        "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsWritten\": %u,"
         " \"shotNoclipInstalled\": %s, \"shotsPassed\": %u, \"noclipWanted\": %s,"
-        " \"walkGates\": %d, \"walksAllowed\": %u, \"textInstalled\": %s, \"textsShown\": %u }",
+        " \"walkGates\": %d, \"walksAllowed\": %u, \"textInstalled\": %s, \"textsShown\": %u",
         model.tint_installed ? "true" : "false", model.tinted,
-        model.collision_bound ? "true" : "false", model.collisions_cleared,
+        model.collision_bound ? "true" : "false", model.collisions_written,
         model.shot_noclip_installed ? "true" : "false", model.shots_passed,
         model.walk_noclip_wanted ? "true" : "false", static_cast<int>(model.walk_gates),
         model.walks_allowed, model.text_installed ? "true" : "false", model.texts_shown);
+    // Null rather than absent when nothing is scaling the circle: a report that
+    // drops the key leaves a reader unable to tell "off" from "this build did
+    // not say".
+    if (model.collision_scale.has_value()) {
+        append(", \"collisionScale\": %.2f ", static_cast<double>(*model.collision_scale));
+    } else {
+        out.append(", \"collisionScale\": null ");
+    }
+    out.append("}");
 
     out.append(",\n  \"offsets\": [");
     for (std::size_t i = 0; i < model.offsets.size(); ++i) {
@@ -189,7 +198,10 @@ void CopyStateAsJson(const OverlayModel& model) {
 /// the widest of *these* — which is how a value ends up printed over the label
 /// beside it, and it is not a thing a font size can be guessed around.
 constexpr const char* kTintStatus = "Health bar tint";
-constexpr const char* kHitboxStatus = "No hitbox";
+/// Not "No hitbox", which is what the switch beside it says: the switch is one
+/// of the two things that can ask for this, and the other asks for a fraction
+/// of a circle rather than none of one.
+constexpr const char* kColliderStatus = "Collision radius";
 constexpr const char* kShotWallStatus = "Shots pass walls";
 constexpr const char* kMarkerStatus = "Show where we are walking";
 constexpr const char* kAimMarkerStatus = "Show where we are aiming";
@@ -197,7 +209,7 @@ constexpr const char* kDodgeMarkerStatus = "Show where we are dodging";
 constexpr const char* kNoclipStatus = "Player noclip";
 constexpr const char* kTextStatus = "Floating text";
 
-constexpr const char* kSceneStatuses[] = {kTintStatus,      kHitboxStatus,       kShotWallStatus,
+constexpr const char* kSceneStatuses[] = {kTintStatus,      kColliderStatus,     kShotWallStatus,
                                           kMarkerStatus,    kAimMarkerStatus,    kDodgeMarkerStatus,
                                           kNoclipStatus,    kTextStatus};
 
@@ -262,6 +274,10 @@ void DrawScene(const OverlayModel& model, UiState& state) {
     // "no collision" read as walking through walls, which is not what zeroing
     // the collision radius does. What it stops is what the client decides by
     // that radius, and the one people notice is area damage.
+    //
+    // The whole circle, and this is the switch that asks for that. Part of one
+    // is the runtime's collider plugin, which writes the same field through the
+    // same pass — see `Engine::ColliderWanted` for how the two are settled.
     ImGui::Checkbox("No hitbox", &state.no_hitbox);
     ImGui::Checkbox("Shots pass walls", &state.shots_pass_walls);
     // The two switches here that change nothing about the game — they draw over
@@ -285,12 +301,16 @@ void DrawScene(const OverlayModel& model, UiState& state) {
         StatusLine(column, kTintStatus, "%u call(s) recoloured", model.tinted);
     }
 
-    if (!state.no_hitbox) {
-        StatusLine(column, kHitboxStatus, "off");
+    // Off the model rather than off the checkbox above it: the runtime's
+    // collider plugin asks for the same field, and what this line is for is
+    // saying which number is actually in the game.
+    if (!model.collision_scale.has_value()) {
+        StatusLine(column, kColliderStatus, "off");
     } else if (!model.collision_bound) {
-        StatusLine(column, kHitboxStatus, "waiting for the map data classes");
+        StatusLine(column, kColliderStatus, "waiting for the map data classes");
     } else {
-        StatusLine(column, kHitboxStatus, "%u pass(es) applied", model.collisions_cleared);
+        StatusLine(column, kColliderStatus, "x%.2f, %u write(s)",
+                   static_cast<double>(*model.collision_scale), model.collisions_written);
     }
 
     if (!state.shots_pass_walls) {
@@ -466,6 +486,42 @@ void DrawWorld(const OverlayModel& model) {
         std::snprintf(client, sizeof(client), "%d no owner, %d no definition",
                       model.world.shots_no_owner, model.world.shots_no_definition);
         row("shots dropped", server, client);
+    }
+
+    // Area effects on their way down, and whether the telegraph that predicted
+    // each one was borne out by the detonation. Shown whenever anything has
+    // been seen, because "no bombs here" and "bombs we are failing to read"
+    // look identical without the counts.
+    if (model.world.blast_stats_known &&
+        (model.world.blasts != 0 || model.world.blasts_confirmed != 0 ||
+         model.world.blasts_unmatched != 0)) {
+        std::snprintf(server, sizeof(server), "%d incoming", model.world.blasts);
+        std::snprintf(client, sizeof(client), "%d confirmed, %d unmatched",
+                      model.world.blasts_confirmed, model.world.blasts_unmatched);
+        row("blasts", server, client);
+    }
+
+    // The equipped weapon, entirely in the server column: all of it comes out
+    // of the game's own data files, and the module reads none of it. Shown so
+    // that the range the dodge planner keeps the player inside can be checked
+    // against the item it was read for — see `WeaponStatus`.
+    if (model.weapon.known) {
+        if (model.weapon.object_type < 0) {
+            row("weapon", "none", "");
+        } else if (!model.weapon.described) {
+            std::snprintf(server, sizeof(server), "type 0x%x", model.weapon.object_type);
+            row("weapon", server, "not in objects.xml");
+        } else {
+            std::snprintf(client, sizeof(client), "type 0x%x", model.weapon.object_type);
+            row("weapon", model.weapon.name.c_str(), client);
+
+            std::snprintf(server, sizeof(server), "%.2f tiles",
+                          static_cast<double>(model.weapon.range_hundredths) / 100.0);
+            std::snprintf(client, sizeof(client), "%.1f t/s for %d ms",
+                          static_cast<double>(model.weapon.speed_hundredths) / 100.0,
+                          model.weapon.lifetime_ms);
+            row("shot range", server, client);
+        }
     }
 
     ImGui::EndTable();

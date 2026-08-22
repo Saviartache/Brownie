@@ -1,4 +1,5 @@
 import type { MutablePacket } from '@brownie/plugin-api';
+import { isBlastEffect, THROW_EFFECT } from '../../state/blasts/BlastStore.js';
 import type { WorldState } from '../../state/WorldState.js';
 import { readStats } from '../../state/stats.js';
 import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketPipeline.js';
@@ -129,6 +130,9 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
           const entity = world.entityStore.upsert(objectId, objectType, x, y);
           entity.applyStats(stats);
           if (objectId === world.self.objectId) {
+            // The only statement of which class we are: `CREATESUCCESS` names
+            // the object, and this is the object.
+            world.self.bindClass(objectType);
             world.self.moveTo(x, y);
             world.self.applyStats(stats);
           }
@@ -290,7 +294,52 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         if (x !== undefined && y !== undefined) world.self.moveTo(x, y);
       },
     ],
+    [
+      // **The dodgeable half of an area effect.** A bomb leaving a monster's
+      // hand, a nova winding up, a circle drawn on the ground — announced with
+      // where it will land and how long it takes to get there, which is most of
+      // a second of warning. Everything else this packet carries is decoration.
+      'SHOWEFFECT',
+      (packet, world) => {
+        const effectType = packet.number('effectType');
+        if (effectType === undefined || !isBlastEffect(effectType)) return;
+
+        // A throw lands where it is aimed; everything else goes off where it
+        // was announced. The reference implementation drew the same line.
+        const source = pointOf(packet.get('position'));
+        const target = pointOf(packet.get('targetPosition'));
+        const at = effectType === THROW_EFFECT ? (target ?? source) : source;
+        if (at === undefined) return;
+
+        // The field is a float and the game is inconsistent about its unit, so
+        // it is read the way the reference implementation read it: small
+        // numbers are seconds, large ones are already milliseconds.
+        const duration = packet.number('duration') ?? 0;
+        const armsInMs = duration > 0 && duration <= 120 ? duration * 1000 : duration;
+        world.blastStore.announce(world.gameTimeMs, at.x, at.y, armsInMs);
+      },
+    ],
+    [
+      // The detonation itself, which is far too late to walk out of — the
+      // client answers it with an `AOEACK` saying where the player was. Kept
+      // because it is the only thing that can confirm a telegraph was read
+      // correctly, and because it carries the radius the telegraph never does.
+      'AOE',
+      (packet, world) => {
+        const at = pointOf(packet.get('position'));
+        if (at === undefined) return;
+        world.blastStore.landed(world.gameTimeMs, at.x, at.y, packet.number('radius') ?? 0);
+      },
+    ],
   ]);
+}
+
+/** A `Location` from the wire, when it is one. */
+function pointOf(value: unknown): { x: number; y: number } | undefined {
+  const record = asRecord(value);
+  const x = numberOf(record, 'x');
+  const y = numberOf(record, 'y');
+  return x === undefined || y === undefined ? undefined : { x, y };
 }
 
 // Packet fields are data we were handed, so every read is a check. These

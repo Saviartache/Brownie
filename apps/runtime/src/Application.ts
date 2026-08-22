@@ -8,16 +8,22 @@ import { dirname, join } from 'node:path';
 import type { RuntimeConfig } from './core/config/Config.js';
 import { createAntiDebuffPlugin } from './features/antidebuff/antiDebuffPlugin.js';
 import { createAntiLagPlugin } from './features/antilag/antiLagPlugin.js';
+import { createAutoAbilityPlugin } from './features/autoability/autoAbilityPlugin.js';
 import { createAutoAimPlugin } from './features/autoaim/autoAimPlugin.js';
+import { createAutoDrinkPlugin } from './features/autodrink/autoDrinkPlugin.js';
+import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
+import { createColliderPlugin } from './features/collider/colliderPlugin.js';
 import { createDodgePlugin } from './features/dodge/dodgePlugin.js';
 import { SteerTracker } from './features/dodge/SteerIntent.js';
 import { createGlowPlugin } from './features/glow/glowPlugin.js';
 import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
+import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
+import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
-import { speedTilesPerMs } from './gamedata/projectiles.js';
+import { EquippedWeapon } from './gamedata/EquippedWeapon.js';
 import { Logger, type LogSink } from './core/logging/Logger.js';
 import { CursorTracker } from './native/CursorTracker.js';
 import { NativeLink } from './native/NativeLink.js';
@@ -142,6 +148,13 @@ export class Application {
   // about an object or a tile is answered "I do not know".
   #objects: ObjectCatalog = EMPTY_CATALOG;
   #tiles: TileCatalog = EMPTY_TILE_CATALOG;
+  /**
+   * The weapon slot's own data, resolved once per item.
+   *
+   * Two features ask on a loop and neither may be given the catalog, so the
+   * lookup lives here — once, rather than once per feature and once per tick.
+   */
+  readonly #weapon = new EquippedWeapon(() => this.#objects);
 
   constructor(options: ApplicationOptions) {
     this.#config = options.config;
@@ -276,10 +289,14 @@ export class Application {
           occupies: (type) => this.#objects.occupies(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
+          item: (type) => this.#objects.item(type),
+          container: (type) => this.#objects.container(type),
+          statMaxima: (type) => this.#objects.statMaxima(type),
         },
         tiles: {
           isDamaging: (type) => this.#tiles.isDamaging(type),
           isBlocking: (type) => this.#tiles.isBlocking(type),
+          isPushing: (type) => this.#tiles.isPushing(type),
         },
       },
       buildStages: (session: SessionView, world: WorldState) => [
@@ -293,6 +310,10 @@ export class Application {
           publish: (record) => {
             this.#native.publishRecord(record);
           },
+          // The same resolution the dodge planner reads its range from, so what
+          // the overlay shows is the figure actually in use rather than a
+          // second computation that could quietly disagree with it.
+          weapon: (objectType) => this.#weapon.of(objectType),
         }),
         ...(holder.plugins === undefined
           ? []
@@ -417,6 +438,13 @@ export class Application {
         // And whether anybody is looking at the result. Nothing is predicted
         // for the picture while the box is unticked.
         view: { wanted: () => this.#dodgeView },
+        // How far the equipped weapon reaches, which is the distance the
+        // planner tries not to drift past. Same catalog and same reason as
+        // auto-aim's `weapon`: it is in `objects.xml` and nowhere on the wire.
+        weaponRange: (weaponType) => {
+          const reach = this.#weapon.of(weaponType)?.reachTiles;
+          return reach !== undefined && reach > 0 ? reach : undefined;
+        },
       }),
     );
 
@@ -425,6 +453,12 @@ export class Application {
     // through the public `sendToServer('ESCAPE')` path — but it is built here so
     // its arithmetic lives in tested TypeScript rather than in a plain-JS file.
     this.#plugins.load(createAutoNexusPlugin());
+
+    // Its neighbour in every sense: also combat, also nothing handed over — it
+    // reads what was hit out of the world model and withholds the report — and
+    // also built here because the numbers behind it are a table read out of the
+    // game's own data, which is only trustworthy with tests beside it.
+    this.#plugins.load(createSanctuaryPlugin());
 
     // Same reasoning, and it needs nothing handed over at all: what a shot does
     // to whoever it hits reaches it through the world model, which already
@@ -444,19 +478,9 @@ export class Application {
             );
           },
         },
-        // Read through `this`, so a session that starts before the catalogs
-        // finish loading picks them up when they do.
-        weapon: (weaponType) => {
-          // A weapon declares one `<Projectile>`, which the reader indexes from
-          // zero. A weapon with several — a few do — has them at successive
-          // indices and the first is the one it fires by default.
-          const definition = this.#objects.projectile(weaponType, 0);
-          if (definition === undefined) return undefined;
-          return {
-            speedTilesPerMs: speedTilesPerMs(definition),
-            lifetimeMs: definition.lifetimeMs,
-          };
-        },
+        // Resolved once per weapon and read through `this`, so a session that
+        // starts before the catalogs finish loading picks them up when they do.
+        weapon: (weaponType) => this.#weapon.of(weaponType),
         // The same catalog, and the same reason it is handed over here: a wall
         // in this game is an object with hit points, so to anything ranking
         // enemies by distance it is simply the closest one.
@@ -470,6 +494,19 @@ export class Application {
         // from the wire: where the player is pointing, which is a question only
         // the game's own camera can answer.
         cursorPoint: () => this.#cursor.point(),
+      }),
+    );
+
+    // Auto-aim's neighbour, and it needs the same catalog for the same reason:
+    // what an ability does when it is used — whether it moves the character,
+    // whether it needs a target, what it costs — is in `objects.xml` and
+    // nowhere on the wire. Read through `this`, so a session that starts before
+    // the catalogs finish loading picks them up when they do.
+    this.#plugins.load(
+      createAutoAbilityPlugin({
+        ability: (objectType) => this.#objects.item(objectType)?.ability,
+        isObstacle: (objectType) => this.#objects.occupies(objectType),
+        isInvincible: (objectType) => this.#objects.isInvincible(objectType),
       }),
     );
 
@@ -511,6 +548,42 @@ export class Application {
         holdUplink: (held) => {
           this.#proxy.holdClientTraffic(held);
         },
+      }),
+    );
+
+    // Noclip's neighbour, and the switch it does not need: this one says one
+    // number to the module and the module does the rest, so nothing has to be
+    // handed over. Built here rather than dropped in `plugins/` because what it
+    // claims — and what expiry puts back — is worth having tests for.
+    this.#plugins.load(createColliderPlugin());
+
+    // Movement too, but by rewriting the stream rather than by writing into the
+    // game. It is built here for the one reason auto-aim and anti-lag are:
+    // whether a ground type pushes is in the game's own `tiles.xml` and nowhere
+    // on the wire. Read through `this`, so a session that starts before the
+    // catalogs finish loading picks them up when they do.
+    this.#plugins.load(
+      createPushTileSpoofPlugin({
+        isPushing: (tileType) => this.#tiles.isPushing(tileType),
+      }),
+    );
+
+    // The two that move items, and both are built here for the same reason as
+    // auto-ability: what an object *is* — a potion, a bag, a tier-13 bow — is
+    // in `objects.xml` and nowhere on the wire, and reading it there is what
+    // replaces the reference implementation's four hand-written id tables.
+    this.#plugins.load(
+      createAutoDrinkPlugin({
+        item: (objectType) => this.#objects.item(objectType),
+      }),
+    );
+
+    this.#plugins.load(
+      createAutoLootPlugin({
+        item: (objectType) => this.#objects.item(objectType),
+        container: (objectType) => this.#objects.container(objectType),
+        statMaxima: (objectType) => this.#objects.statMaxima(objectType),
+        displayName: (objectType) => this.#objects.displayName(objectType),
       }),
     );
 
@@ -569,6 +642,9 @@ export class Application {
       const tiles = await loadTileCatalog(join(directory, 'tiles.xml'));
       this.#objects = objects;
       this.#tiles = tiles;
+      // Anything resolved against the empty catalog before this point is an
+      // answer from a different catalog, and there is no reason to keep it.
+      this.#weapon.clear();
       this.#log.info(`game data: ${String(objects.size)} objects, ${String(tiles.size)} tiles`);
 
       // Extracted data is a copy of something the game replaces on its own

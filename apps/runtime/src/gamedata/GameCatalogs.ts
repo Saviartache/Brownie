@@ -1,6 +1,8 @@
 import { createReadStream } from 'node:fs';
 import type { ObjectCatalog } from '../state/ObjectCatalog.js';
 import type { TileCatalog } from '../state/TileMap.js';
+import { readContainerFacts, readItemFacts, type ContainerFacts, type ItemFacts } from './items.js';
+import { readPermanentStatMaxima, type PermanentStatMaxima } from './playerClasses.js';
 import { readProjectiles, type ProjectileDefinition } from './projectiles.js';
 import { attribute, childText, hasChild, parseGameNumber, scanElements } from './xml.js';
 
@@ -17,6 +19,18 @@ export interface ObjectDefinition {
   readonly occupies: boolean;
   /** Indexed by `bulletType`, which is the index the game shoots them by. */
   readonly projectiles: ReadonlyMap<number, ProjectileDefinition>;
+  /**
+   * What it is as an item, for the third of the file that is one.
+   *
+   * Absent — not an empty record — for everything else, so the twenty thousand
+   * monsters, walls and props carry one undefined field rather than six fields
+   * describing an item they are not.
+   */
+  readonly item: ItemFacts | undefined;
+  /** What it holds, for the thirty-one objects that hold things. */
+  readonly container: ContainerFacts | undefined;
+  /** How high its stats go, for the objects that are playable classes. */
+  readonly statMaxima: PermanentStatMaxima | undefined;
 }
 
 /** What the runtime keeps about one ground type. */
@@ -25,6 +39,8 @@ export interface TileDefinition {
   readonly id: string;
   readonly damaging: boolean;
   readonly blocking: boolean;
+  /** Whether standing on one carries the character along — see {@link TileCatalog.isPushing}. */
+  readonly pushing: boolean;
 }
 
 /**
@@ -78,6 +94,18 @@ export class GameObjectCatalog implements ObjectCatalog {
   projectile(objectType: number, bulletType: number): ProjectileDefinition | undefined {
     return this.#byType.get(objectType)?.projectiles.get(bulletType);
   }
+
+  item(objectType: number): ItemFacts | undefined {
+    return this.#byType.get(objectType)?.item;
+  }
+
+  container(objectType: number): ContainerFacts | undefined {
+    return this.#byType.get(objectType)?.container;
+  }
+
+  statMaxima(objectType: number): PermanentStatMaxima | undefined {
+    return this.#byType.get(objectType)?.statMaxima;
+  }
 }
 
 export class GameTileCatalog implements TileCatalog {
@@ -104,6 +132,10 @@ export class GameTileCatalog implements TileCatalog {
   isBlocking(tileType: number): boolean {
     return this.#byType.get(tileType)?.blocking ?? false;
   }
+
+  isPushing(tileType: number): boolean {
+    return this.#byType.get(tileType)?.pushing ?? false;
+  }
 }
 
 /**
@@ -122,13 +154,17 @@ export async function readObjectDefinitions(
     const id = attribute(element, 'id');
     if (type === undefined || id === undefined) continue;
 
+    // Read once and passed on: three of the facts below are decided by it, and
+    // it is a regular expression over a whole element either way.
+    const objectClass = childText(element, 'Class');
+
     definitions.push({
       type,
       id,
       // `<Class>Player</Class>` is how the game marks a playable class, and
       // `<Enemy />` how it marks something that fights back. Neither is
       // derivable from an id range, which is why this file is read at all.
-      isPlayer: childText(element, 'Class') === 'Player',
+      isPlayer: objectClass === 'Player',
       isEnemy: hasChild(element, 'Enemy'),
       // `<Pet />` marks a follower. The `Pet` *class* covers only some of them,
       // which is why the marker is read rather than the class.
@@ -143,6 +179,9 @@ export async function readObjectDefinitions(
       // nothing here needs — for walking they mean the same thing.
       occupies: hasChild(element, 'OccupySquare') || hasChild(element, 'FullOccupy'),
       projectiles: new Map(readProjectiles(element).map((p) => [p.bulletType, p])),
+      item: readItemFacts(element),
+      container: readContainerFacts(element, objectClass),
+      statMaxima: readPermanentStatMaxima(element, objectClass),
     });
   }
   return definitions;
@@ -165,6 +204,11 @@ export async function readTileDefinitions(
       id,
       damaging: minDamage > 0 || maxDamage > 0,
       blocking: hasChild(element, 'NoWalk'),
+      // `<Push />` is the game's own marker, and it is exactly the 36 grounds
+      // the reference implementation listed by name — conveyors, whirlpools,
+      // sludge, flowing sand. Reading the marker instead of the names is what
+      // makes the 37th one work without an edit here.
+      pushing: hasChild(element, 'Push'),
     });
   }
   return definitions;

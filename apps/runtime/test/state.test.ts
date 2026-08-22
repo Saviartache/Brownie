@@ -13,6 +13,12 @@ import { PacketOrigin, type PacketContext } from '../src/pipeline/PacketPipeline
 import { StateStage } from '../src/pipeline/stages/StateStage.js';
 import type { ProjectileDefinition } from '../src/gamedata/projectiles.js';
 import type { ObjectCatalog } from '../src/state/ObjectCatalog.js';
+import {
+  BlastStore,
+  DEFAULT_TELEGRAPH_MS,
+  NOVA_EFFECT,
+  THROW_EFFECT,
+} from '../src/state/blasts/BlastStore.js';
 import { StatType } from '../src/constants/StatType.js';
 import type { TileCatalog } from '../src/state/TileMap.js';
 import { WorldState } from '../src/state/WorldState.js';
@@ -340,6 +346,7 @@ describe('StateStage', () => {
     const { world } = harness();
     void world;
     expect(new StateStage(new WorldState()).trackedPackets).toEqual([
+      'AOE',
       'CREATESUCCESS',
       'ENEMYSHOOT',
       'GOTO',
@@ -348,6 +355,7 @@ describe('StateStage', () => {
       'NEWTICK',
       'OTHERHIT',
       'PLAYERHIT',
+      'SHOWEFFECT',
       'SQUAREHIT',
       'UPDATE',
     ]);
@@ -390,6 +398,9 @@ describe('StateStage', () => {
         occupies: () => false,
         displayName: () => undefined,
         projectile: () => definition,
+        item: () => undefined,
+        container: () => undefined,
+        statMaxima: () => undefined,
       };
     }
 
@@ -511,6 +522,9 @@ describe('classification', () => {
       occupies: () => false,
       displayName: () => undefined,
       projectile: () => undefined,
+      item: () => undefined,
+      container: () => undefined,
+      statMaxima: () => undefined,
     };
     const { world, feed } = harness(catalog);
     feed(
@@ -537,6 +551,7 @@ describe('standing room', () => {
   const tiles: TileCatalog = {
     isDamaging: () => false,
     isBlocking: (tileType) => tileType === WALL,
+    isPushing: () => false,
   };
 
   /** Five tiles of floor with one column of wall through it. */
@@ -580,6 +595,303 @@ describe('WorldState timing', () => {
     // Marking again must not restart the clock — a reconnect is a new session.
     world.markConnected();
     expect(world.gameTimeMs).toBe(750);
+  });
+});
+
+// **The dodgeable half of an area effect.** By the time `AOE` arrives the blast
+// has landed and the client is already answering with where the player was; what
+// can be walked out of is the telegraph the game sends first.
+describe('blasts on their way down', () => {
+  function showEffect(
+    effectType: number,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    duration: number,
+  ): MutablePacket {
+    return packetOf('SHOWEFFECT', {
+      effectType,
+      targetObjectId: 42,
+      position: from,
+      targetPosition: to,
+      color: 0,
+      duration,
+    });
+  }
+
+  it('records a thrown bomb where it will land, not where it was thrown', () => {
+    const { world, feed } = harness();
+    world.markConnected();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
+
+    const blasts = [...world.blasts()];
+    expect(blasts).toHaveLength(1);
+    expect(blasts[0]?.x).toBeCloseTo(12, 5);
+    expect(blasts[0]?.y).toBeCloseTo(9, 5);
+    expect(blasts[0]?.confirmed).toBe(false);
+    // Seconds on the wire, milliseconds here.
+    expect((blasts[0]?.armsAtMs ?? 0) - world.gameTimeMs).toBeGreaterThan(400);
+  });
+
+  // A nova or a ground circle goes off where it is announced; only a throw has
+  // somewhere else to be.
+  it('records a nova where it was announced', () => {
+    const { world, feed } = harness();
+    world.markConnected();
+    feed(showEffect(NOVA_EFFECT, { x: 7, y: 7 }, { x: 0, y: 0 }, 0.5));
+
+    expect([...world.blasts()][0]?.x).toBeCloseTo(7, 5);
+  });
+
+  it('ignores the effects that are only decoration', () => {
+    const { world, feed } = harness();
+    world.markConnected();
+    // A flash, a beam, a trail: reacting to these would have the dodge running
+    // from light.
+    for (const type of [1, 2, 3, 6, 7, 15]) {
+      feed(showEffect(type, { x: 10, y: 10 }, { x: 10, y: 10 }, 0.5));
+    }
+    expect(world.blastStore.size).toBe(0);
+  });
+
+  // The detonation is what proves the telegraph was read correctly, which is
+  // the only check available on a packet body recovered from game metadata.
+  it('confirms a prediction the detonation lands on', () => {
+    const { world, feed } = harness();
+    world.markConnected();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
+    feed(
+      packetOf('AOE', {
+        position: { x: 12.2, y: 9.1 },
+        radius: 3,
+        damage: 200,
+        effect: 0,
+        effectDuration: 0,
+        originType: 0,
+        color: 0,
+        armorPierce: false,
+      }),
+    );
+
+    expect(world.blastStore.confirmed).toBe(1);
+    expect(world.blastStore.unmatched).toBe(0);
+    // And it stops being something to walk out of: it has already gone off.
+    expect([...world.blasts()][0]?.confirmed).toBe(true);
+  });
+
+  it('counts a detonation nothing predicted', () => {
+    const { world, feed } = harness();
+    world.markConnected();
+    feed(
+      packetOf('AOE', {
+        position: { x: 40, y: 40 },
+        radius: 3,
+        damage: 200,
+        effect: 0,
+        effectDuration: 0,
+        originType: 0,
+        color: 0,
+        armorPierce: false,
+      }),
+    );
+
+    expect(world.blastStore.confirmed).toBe(0);
+    expect(world.blastStore.unmatched).toBe(1);
+  });
+
+  it('falls back to a sensible delay when the duration is nonsense', () => {
+    const store = new BlastStore();
+    store.announce(0, 5, 5, Number.NaN);
+    store.announce(0, 6, 6, 999_999);
+    const blasts = [...store.values(0)];
+    expect(blasts).toHaveLength(2);
+    for (const blast of blasts) expect(blast.armsAtMs).toBe(DEFAULT_TELEGRAPH_MS);
+  });
+
+  it('refuses a landing spot that is not a place', () => {
+    const store = new BlastStore();
+    expect(store.announce(0, Number.NaN, 5, 500)).toBe(false);
+    expect(store.size).toBe(0);
+  });
+
+  it('forgets one long after it has gone off', () => {
+    const store = new BlastStore();
+    store.announce(0, 5, 5, 500);
+    expect([...store.values(600)]).toHaveLength(1);
+    expect([...store.values(9000)]).toHaveLength(0);
+  });
+});
+
+/**
+ * The player's bars and slots.
+ *
+ * The stat ids below are written out rather than imported, deliberately: they
+ * are the claim being tested. `state/ItemSlots.ts` records that the two tables
+ * in this repository disagree about the backpack and the belt, so a build that
+ * moves them is a change to that file *and* to these numbers, which is what
+ * makes the change visible instead of silent.
+ */
+describe("the player's own bars and slots", () => {
+  const WIZARD = 0x30e;
+  const HP_BOOST_STAT = 46;
+  const MP_BOOST_STAT = 47;
+  const CARRIED_SLOT_4_STAT = 12;
+  const BACKPACK_SLOT_0_STAT = 135;
+  const BACKPACK_SLOT_8_STAT = 148;
+  const BELT_SLOT_0_STAT = 143;
+
+  const HEALTH_POTION = 2594;
+  const A_BOW = 3010;
+
+  function stacked(id: number, value: number, stackCount: number): PacketFields {
+    return { id, value, stackCount };
+  }
+
+  /** Announces the local player carrying `stats`. */
+  function announceSelf(stats: PacketFields[]): { world: WorldState } {
+    const { world, feed } = harness();
+    feed(packetOf('CREATESUCCESS', { objectId: 42, charId: 1, stats: '' }));
+    feed(
+      packetOf('UPDATE', {
+        position: { x: 0, y: 0 },
+        levelType: 0,
+        tiles: [],
+        newObjs: [{ objectType: WIZARD, status: status(42, 1, 2, stats) }],
+        drops: [],
+      }),
+    );
+    return { world };
+  }
+
+  it('draws the bar against the base plus what the gear adds', () => {
+    const { world } = announceSelf([
+      stat(StatType.Hp, 900),
+      stat(StatType.MaxHp, 770),
+      stat(HP_BOOST_STAT, 250),
+      stat(StatType.Mp, 100),
+      stat(StatType.MaxMp, 400),
+      stat(MP_BOOST_STAT, 60),
+    ]);
+
+    // Health above the base is the ordinary case on a geared character, and is
+    // why the base alone is not a maximum.
+    expect(world.self.maxHp).toBe(1020);
+    expect(world.self.maxMp).toBe(460);
+  });
+
+  it('is the base alone until the gear stat arrives', () => {
+    const { world } = announceSelf([stat(StatType.MaxHp, 770)]);
+    expect(world.self.maxHp).toBe(770);
+  });
+
+  it('names the class the character is', () => {
+    const { world } = announceSelf([stat(StatType.Hp, 1)]);
+    expect(world.self.objectType).toBe(WIZARD);
+  });
+
+  it('records the six stats a potion raises', () => {
+    const { world } = announceSelf([
+      stat(StatType.Attack, 60),
+      stat(StatType.Defense, 25),
+      stat(StatType.Speed, 50),
+      stat(StatType.Dexterity, 75),
+      stat(StatType.Vitality, 40),
+      stat(StatType.Wisdom, 60),
+    ]);
+    expect(world.self.permanentStats).toEqual({
+      attack: 60,
+      defense: 25,
+      speed: 50,
+      dexterity: 75,
+      vitality: 40,
+      wisdom: 60,
+    });
+  });
+
+  it('keeps the same record while none of the six move', () => {
+    const { world, feed } = harness();
+    feed(packetOf('CREATESUCCESS', { objectId: 42, charId: 1, stats: '' }));
+    feed(
+      packetOf('UPDATE', {
+        position: { x: 0, y: 0 },
+        levelType: 0,
+        tiles: [],
+        newObjs: [{ objectType: WIZARD, status: status(42, 1, 2, [stat(StatType.Attack, 60)]) }],
+        drops: [],
+      }),
+    );
+    const before = world.self.permanentStats;
+
+    feed(
+      packetOf('NEWTICK', {
+        tickId: 1,
+        tickTime: 200,
+        serverRealTimeMs: 0,
+        serverLastRttMs: 0,
+        statuses: [status(42, 1, 2, [stat(StatType.Hp, 5)])],
+      }),
+    );
+    expect(world.self.permanentStats).toBe(before);
+  });
+
+  it('reads the carried slots, the backpack and the belt', () => {
+    const { world } = announceSelf([
+      stat(CARRIED_SLOT_4_STAT, A_BOW),
+      stat(CARRIED_SLOT_4_STAT + 1, -1),
+      stat(BACKPACK_SLOT_0_STAT, A_BOW),
+      stat(BACKPACK_SLOT_8_STAT, -1),
+      stacked(BELT_SLOT_0_STAT, HEALTH_POTION, 4),
+    ]);
+    const inventory = world.self.inventory;
+
+    expect(inventory.carried()).toEqual([
+      { slotId: 4, objectType: A_BOW, quantity: 0 },
+      { slotId: 5, objectType: -1, quantity: 0 },
+    ]);
+    expect(inventory.backpack().map((slot) => slot.slotId)).toEqual([12, 20]);
+    expect(inventory.belt()).toEqual([
+      { slotId: 1_000_000, objectType: HEALTH_POTION, quantity: 4 },
+    ]);
+    expect(inventory.at(4)?.objectType).toBe(A_BOW);
+  });
+
+  it('has nothing to say about a slot the server has not stated', () => {
+    const { world } = announceSelf([stat(CARRIED_SLOT_4_STAT, A_BOW)]);
+    // Absent, not empty: a swap aimed at a slot nobody described is a swap
+    // aimed at a slot that may well be full.
+    expect(world.self.inventory.at(5)).toBeUndefined();
+    expect(world.self.inventory.carried()).toHaveLength(1);
+    expect(world.self.inventory.backpack()).toHaveLength(0);
+    expect(world.self.inventory.belt()).toHaveLength(0);
+  });
+
+  it('follows a slot as its contents change', () => {
+    const { world, feed } = harness();
+    feed(packetOf('CREATESUCCESS', { objectId: 42, charId: 1, stats: '' }));
+    feed(
+      packetOf('UPDATE', {
+        position: { x: 0, y: 0 },
+        levelType: 0,
+        tiles: [],
+        newObjs: [
+          { objectType: WIZARD, status: status(42, 1, 2, [stat(CARRIED_SLOT_4_STAT, -1)]) },
+        ],
+        drops: [],
+      }),
+    );
+    expect(world.self.inventory.at(4)?.objectType).toBe(-1);
+
+    feed(
+      packetOf('NEWTICK', {
+        tickId: 1,
+        tickTime: 200,
+        serverRealTimeMs: 0,
+        serverLastRttMs: 0,
+        statuses: [status(42, 1, 2, [stat(CARRIED_SLOT_4_STAT, A_BOW)])],
+      }),
+    );
+    expect(world.self.inventory.at(4)?.objectType).toBe(A_BOW);
+    // The same list, not a longer one: a slot restated is not a new slot.
+    expect(world.self.inventory.carried()).toHaveLength(1);
   });
 });
 

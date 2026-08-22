@@ -159,6 +159,12 @@ class Engine {
     /// three restatements of the second the plugin restates it on.
     static constexpr std::uint64_t kCursorTrackLeaseMs = 3000;
 
+    /// The same again, for the runtime's claim on the player's collision
+    /// circle. A lapsed one is not merely a feature that stops: the module puts
+    /// the game's own multiplier back, so three seconds is how long a killed
+    /// runtime leaves the player smaller than the game built them.
+    static constexpr std::uint64_t kColliderLeaseMs = 3000;
+
     /// How long the next poll may wait: until the soonest job is due, and no
     /// longer than one poll's worth.
     [[nodiscard]] std::uint32_t PollBudgetMs(std::uint64_t now_ms) const noexcept;
@@ -290,6 +296,25 @@ class Engine {
         return now_ms < walk_noclip_until_ms_.load(std::memory_order_relaxed);
     }
 
+    /// What the player's collision circle should be scaled by at `now_ms`, or
+    /// nothing to leave the game's own value alone.
+    ///
+    /// **Where the overlay's switch and the runtime's claim are settled**, and
+    /// there is one field under both: the switch is the whole circle gone, so
+    /// it wins over a plugin asking for part of one.
+    ///
+    /// **Render thread**, because that is the thread the overlay's own state
+    /// belongs to — unlike the two above, which either side may ask.
+    [[nodiscard]] std::optional<float> ColliderWanted(std::uint64_t now_ms) const noexcept {
+        if (frame_ui_.no_hitbox) {
+            return 0.0F;
+        }
+        if (now_ms >= collider_until_ms_.load(std::memory_order_relaxed)) {
+            return std::nullopt;
+        }
+        return collider_multiplier_.load(std::memory_order_relaxed);
+    }
+
     /// Installs the connect redirect once Winsock is loaded. Ordinary to be too
     /// early — the loop is the retry.
     void TryRedirect();
@@ -409,6 +434,9 @@ class Engine {
     /// The latest world the runtime described, and whether it is newer than
     /// what has been published.
     overlay::WorldStatus world_;
+    /// Sent when the player swaps an item, so it lives beside the world status
+    /// and rides the same dirty flag rather than owning one of its own.
+    overlay::WeaponStatus weapon_;
     bool world_dirty_ = false;
     /// The runtime's plugin list, mirrored, and the same question about it.
     overlay::ControlMirror controls_;
@@ -482,6 +510,19 @@ class Engine {
     ///
     /// Written by the IPC thread, read by the game's on every frame.
     std::atomic<std::uint64_t> cursor_track_until_ms_{0};
+
+    /// When the runtime's claim on the player's collision circle runs out, and
+    /// what it asked the circle to be scaled by.
+    ///
+    /// A lease, for the first half of noclip's reason: what lapses here is a
+    /// number written into the game, and the module puts the game's own value
+    /// back when it does — see `game/PlayerCollision.h`. One means "leave it
+    /// alone", so a claim that arrives before any number does nothing rather
+    /// than something drastic.
+    ///
+    /// Written by the IPC thread, read by the game's on every frame.
+    std::atomic<std::uint64_t> collider_until_ms_{0};
+    std::atomic<float> collider_multiplier_{1.0F};
 
     std::thread thread_;
     std::atomic<bool> running_{false};

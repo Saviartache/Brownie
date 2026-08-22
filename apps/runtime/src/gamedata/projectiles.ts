@@ -89,6 +89,27 @@ export function speedTilesPerMs(definition: ProjectileDefinition): number {
   return definition.speed / 10_000;
 }
 
+/**
+ * How far one of these gets before it expires, in tiles.
+ *
+ * Speed times life for an ordinary shot. **Parametric ones are the exception
+ * and would otherwise read as zero**: swords, daggers and every other fixed-arc
+ * weapon leave `Speed` unset and describe the arc with `Magnitude`, which is
+ * the reach itself. The reference implementation's `WeaponProfile` checks the
+ * flag first for exactly that reason, and says so.
+ *
+ * What it cannot see is the player's own multipliers — the game scales a shot's
+ * speed, lifetime and range by buffs held in the client, and none of the three
+ * is on the wire. So this is the item's own reach, which is the right figure for
+ * an unbuffed character and an underestimate for a buffed one. Underestimating
+ * range keeps a planner closer than it needs to be, which is the safe direction
+ * for the thing that reads it.
+ */
+export function reachTiles(definition: ProjectileDefinition): number {
+  if (definition.parametric) return definition.magnitude;
+  return speedTilesPerMs(definition) * definition.lifetimeMs;
+}
+
 /** Reads the `<Projectile>` children of one `<Object>` element. */
 export function readProjectiles(objectElement: string): ProjectileDefinition[] {
   const definitions: ProjectileDefinition[] = [];

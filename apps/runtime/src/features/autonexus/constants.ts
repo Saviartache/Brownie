@@ -59,16 +59,3 @@ export const HP_SYNC_WARMUP_TICKS = 5;
 
 /** Cap on pending area effects, so a burst cannot grow the list without limit. */
 export const MAX_PENDING_AOES = 32;
-
-/** Maps where a hit cannot land, so auto-nexus should never fire. */
-export const SAFE_ZONE_MAPS: ReadonlySet<string> = new Set(
-  [
-    'Nexus',
-    'Vault',
-    'Guild Hall',
-    'Cloth Bazaar',
-    'Pet Yard',
-    'Daily Quest Room',
-    'Daily Login Room',
-  ].map((name) => name.toLowerCase()),
-);

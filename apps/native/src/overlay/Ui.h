@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -69,6 +70,36 @@ struct WorldStatus {
     int shots_announced = 0;
     int shots_no_owner = 0;
     int shots_no_definition = 0;
+    /// Area effects on their way down, and how the telegraph that predicted
+    /// them compared against the detonation that followed. The `SHOWEFFECT`
+    /// body was recovered from the game's own metadata rather than stated by
+    /// it, so confirmations are the only proof the decode is still right after
+    /// a patch — see `overlay/WorldStatusStage.ts`.
+    bool blast_stats_known = false;
+    int blasts = 0;
+    int blasts_confirmed = 0;
+    int blasts_unmatched = 0;
+};
+
+/// The item in the weapon slot, as the game's own data describes it.
+///
+/// **Shown for checking, and nothing here decides anything.** The dodge planner
+/// keeps the player inside their weapon's reach, and that reach is read out of a
+/// 35 MB file nobody looks at — so a range that behaves oddly needs the name it
+/// was read for beside it. `described` separates "the data files do not have
+/// this item" from "the item's numbers are wrong", which look identical from
+/// the outside and want opposite fixes.
+struct WeaponStatus {
+    bool known = false;
+    /// False when the catalog has no entry: the type is still worth showing.
+    bool described = false;
+    std::string name;
+    int object_type = -1;
+    /// Tiles a second, in hundredths, like every other distance on this wire.
+    int speed_hundredths = 0;
+    int lifetime_ms = 0;
+    /// How far one shot gets before it expires, in hundredths of a tile.
+    int range_hundredths = 0;
 };
 
 /// What sort of control a setting is drawn as.
@@ -165,6 +196,7 @@ struct MemoryReading {
 /// Everything the overlay shows, as of the frame it was prepared for.
 struct OverlayModel {
     WorldStatus world;
+    WeaponStatus weapon;
     MemoryReading memory;
     std::vector<PluginRow> plugins;
     /// How many plugin syncs the runtime has published. The overlay watches it
@@ -189,7 +221,12 @@ struct OverlayModel {
     bool tint_installed = false;
     std::uint32_t tinted = 0;
     bool collision_bound = false;
-    std::uint32_t collisions_cleared = 0;
+    std::uint32_t collisions_written = 0;
+    /// What the player's collision circle is being scaled by, or nothing while
+    /// the game's own value is in place. Not read off the switch beside it:
+    /// the runtime's collider plugin asks for this too, and a panel that only
+    /// knew about the checkbox would report a working feature as off.
+    std::optional<float> collision_scale;
     /// Whether the projectile collision detours are in place, and how many
     /// shots have been let through a wall. Same argument as the pair above: a
     /// switch that is on and a feature that is working look identical without

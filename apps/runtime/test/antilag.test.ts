@@ -207,6 +207,8 @@ describe('the anti-lag plugin', () => {
       isPlayer: true,
       conditions: 0,
       guildName: '',
+      stat: () => undefined,
+      text: () => undefined,
       x: 0,
       y: 0,
       ...over,

@@ -17,13 +17,94 @@ export interface Position {
   readonly y: number;
 }
 
+/**
+ * One of the player's own item slots.
+ *
+ * Addressed by the id the item packets address it by — one flat space covering
+ * what the character wears, what it carries, its backpack and its potion belt —
+ * because `SlotObject.slotId` is one field and anything that *moves* an item has
+ * to name the slot the way the packet will.
+ */
+export interface ItemSlotView {
+  /** 0–11 the character's own slots (0–3 worn), 12–27 backpack, belt above. */
+  readonly slotId: number;
+  /** What is in it, or -1 when it is empty. */
+  readonly objectType: number;
+  /** How many are stacked here. 0 for a slot the game does not stack. */
+  readonly quantity: number;
+}
+
+/**
+ * The player's own item slots, as the server last stated them.
+ *
+ * **A slot the server has not stated is absent, not empty**, and that
+ * distinction is the whole reason this is a list of slots rather than a fixed
+ * array with -1 in the gaps. Which stat carries which slot is a fact about a
+ * game build, and the two tables in this repository do not agree about the
+ * backpack or the belt — so a build that moved them leaves this reporting
+ * *nothing* for those slots, and anything reading it does less rather than
+ * something wrong. Treating an unstated slot as empty is how a swap gets aimed
+ * at a slot that is actually full.
+ */
+export interface InventoryView {
+  /** The eight slots the character carries, 4–11. Never the worn ones. */
+  carried(): readonly ItemSlotView[];
+  /** The backpack, 12–27. Empty for a character without one. */
+  backpack(): readonly ItemSlotView[];
+  /** The potion belt. */
+  belt(): readonly ItemSlotView[];
+  /** One slot by the id the item packets use. */
+  at(slotId: number): ItemSlotView | undefined;
+}
+
+/**
+ * The six stats a potion raises permanently, as the server states them.
+ *
+ * Class, level and potions — not the gear bonus and not exaltations, which the
+ * server sends separately. That is what makes them comparable against the
+ * per-class maximum in the game's own data, and the only reason anything here
+ * needs them.
+ *
+ * Kept together, and apart from {@link SelfView.defense}: that one is defence
+ * *as the runtime believes it*, native reading and temporary effects included,
+ * which is the right number for surviving a hit and the wrong one for asking
+ * whether a potion would be wasted.
+ */
+export interface PermanentStats {
+  readonly attack: number;
+  readonly defense: number;
+  readonly speed: number;
+  readonly dexterity: number;
+  readonly vitality: number;
+  readonly wisdom: number;
+}
+
 /** The local player. */
 export interface SelfView extends Position {
   readonly objectId: number;
+  /**
+   * The character's own object type — its class, as `objects.xml` names it.
+   *
+   * Read straight off the object the server sent for us rather than looked up
+   * in the world by id, for the same reason everything else here is: the id is
+   * not set until the server names it, and a lookup that fails then is a
+   * feature that silently does nothing for the first seconds of a session.
+   */
+  readonly objectType: number;
   readonly name: string;
   readonly hp: number;
+  /**
+   * The health bar's maximum — **the base the server states plus the bonus the
+   * gear adds**, which is the number the game itself draws the bar against.
+   *
+   * The two arrive as separate stats, and the base alone is not a maximum of
+   * anything: current health routinely exceeds it, so a threshold taken as a
+   * share of it fires later than it reads. Auto-nexus escaped late for exactly
+   * that reason.
+   */
   readonly maxHp: number;
   readonly mp: number;
+  /** The mana bar's maximum, on the same terms as {@link maxHp}. */
   readonly maxMp: number;
   /** Defence as the runtime believes it, including the native module's reading. */
   readonly defense: number;
@@ -41,6 +122,10 @@ export interface SelfView extends Position {
   readonly alive: boolean;
   /** Bitmask of active condition effects. */
   readonly conditions: number;
+  /** What the character is wearing, carrying and drinking from. */
+  readonly inventory: InventoryView;
+  /** The stats a potion raises permanently, for deciding whether one is wasted. */
+  readonly permanentStats: PermanentStats;
 }
 
 /** Anything with an object id in the current map. */
@@ -72,6 +157,59 @@ export interface EntityView extends Position {
    * two members of one guild compare equal without either side folding case.
    */
   readonly guildName: string;
+  /**
+   * A numeric stat by id, for the ones this view does not name.
+   *
+   * The runtime keeps every stat the server sent for an entity, including ids
+   * nothing in it names — so a feature that needs one does not need the state
+   * layer to learn about it first. That is the whole of what this is for: a
+   * boss phase written into a stat this file has no business enumerating.
+   *
+   * @returns `undefined` for a stat the server has not sent for this entity,
+   *   and for one whose value is a string — those are {@link text}, because a
+   *   stat's type is a property of the id and not something to discover per
+   *   entity.
+   */
+  stat(id: number): number | undefined;
+
+  /**
+   * A text stat by id — the mirror of {@link stat}, for the ids that carry a
+   * string.
+   *
+   * Which those are is fixed per id and listed in the protocol's own stat
+   * table, so a caller asks the accessor that matches what the id holds rather
+   * than discovering the type at runtime. What is behind one of these is
+   * usually not text at all but a packed blob the game encodes as a string —
+   * a container's enchants, for instance — so a caller is expected to decode
+   * it, and to survive a build that encodes it differently.
+   *
+   * @returns `undefined` for a stat the server has not sent, and for one whose
+   *   value is a number.
+   */
+  text(id: number): string | undefined;
+}
+
+/**
+ * One area effect that has been announced.
+ *
+ * A blast is a disc and a deadline, which is a different shape of danger from a
+ * shot: it threatens one place at one instant and nothing at all before or after
+ * it. Reacting to it is therefore not a matter of getting out of a line but of
+ * not being inside a circle at a particular moment.
+ */
+export interface BlastView extends Position {
+  /** How far it reaches from its centre, in tiles. */
+  readonly radiusTiles: number;
+  /** When it lands, on the world's own clock. */
+  readonly armsAtMs: number;
+  /**
+   * Whether the detonation has been seen on the wire.
+   *
+   * False for a telegraph — a prediction of where and when, which is the only
+   * kind worth avoiding. True once it has gone off, at which point it is history
+   * and the safest ground on the screen.
+   */
+  readonly confirmed: boolean;
 }
 
 /** One enemy shot in flight. */
@@ -161,6 +299,21 @@ export interface WorldView {
    * for it here.
    */
   projectiles(): Iterable<ProjectileView>;
+
+  /**
+   * Area effects that have been announced and have not landed yet.
+   *
+   * A thrown bomb, a nova, a circle drawn on the ground — the things the game
+   * telegraphs before they go off. Unlike a shot these are not in flight in any
+   * useful sense: each is a place, a width and a moment, and the only question
+   * worth asking about one is whether you will be standing in it when it lands.
+   *
+   * A blast that has already gone off stays here briefly with
+   * {@link BlastView.confirmed} set, because the packet that reports the
+   * detonation is what proves the telegraph was read correctly. Nothing should
+   * dodge a confirmed one: it is over.
+   */
+  blasts(): Iterable<BlastView>;
 }
 
 /**

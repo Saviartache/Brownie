@@ -79,6 +79,25 @@ export interface ThreatFieldOptions {
    * rather than to the room.
    */
   readonly reachTiles: number;
+  /**
+   * How near a shot has to be *now* before it may take the wheel, in tiles.
+   *
+   * **The distance half of "is this trouble now", and the time half is not
+   * enough on its own.** A shot crossing the room at sixteen tiles a second is
+   * inside a four-hundred-millisecond window from nearly seven tiles away — so a
+   * planner bounded only by time still reacts to fire the player can see is
+   * nowhere near them, and still cannot walk up to the thing that fired it.
+   *
+   * Shots further off than this are predicted and swept exactly as before; they
+   * simply do not set {@link Sweep.unsafeAtMs}. They still shape *which* course
+   * is chosen once something nearby forces a choice, which is the point of
+   * keeping them: reacting late is fine, walking into the wave behind the one
+   * being dodged is not.
+   *
+   * Measured from where the shot is at plan time. A shot that crosses the line
+   * is near on the next plan, twenty milliseconds later.
+   */
+  readonly reactTiles: number;
 }
 
 /** Where a straight walk ends up against the field. Reused; never handed out. */
@@ -100,7 +119,8 @@ export interface Sweep {
    */
   clearanceTiles: number;
   /**
-   * When the walk first has less than the caller's margin of room.
+   * When the walk first has less than the caller's margin of room, counting
+   * only the shots that are already near — see {@link ThreatFieldOptions.reactTiles}.
    *
    * **This is the number that says whether to act, and it is not the same
    * question as how the walk ends.** A shot eight tiles away with a long life
@@ -165,6 +185,8 @@ export class ThreatField {
   #half = new Float64Array(0);
   /** How fast this shot's own prediction stops being believed, per second. */
   #drifts = new Float64Array(0);
+  /** Whether this shot is close enough to be worth taking the wheel over. */
+  #near = new Uint8Array(0);
   #minX = new Float64Array(0);
   #minY = new Float64Array(0);
   #maxX = new Float64Array(0);
@@ -254,6 +276,7 @@ export class ThreatField {
     // Everywhere the player could stand within the horizon, as a square. A shot
     // whose own path never enters it cannot be dodged into or out of.
     const reach = Math.max(0, options.reachTiles);
+    const reactSquared = Math.max(0, options.reactTiles) ** 2;
     const skipBeyond =
       reach +
       (IMPLAUSIBLE_SPEED_TILES_PER_SECOND * horizonMs) / 1000 +
@@ -322,6 +345,9 @@ export class ThreatField {
       this.#sampleCount[slot] = taken;
       this.#half[slot] = half;
       this.#drifts[slot] = drift;
+      const awayX = start.x - selfX;
+      const awayY = start.y - selfY;
+      this.#near[slot] = awayX * awayX + awayY * awayY <= reactSquared ? 1 : 0;
       this.#minX[slot] = minX - widest;
       this.#minY[slot] = minY - widest;
       this.#maxX[slot] = maxX + widest;
@@ -359,11 +385,20 @@ export class ThreatField {
   /**
    * Walks one straight course through the field.
    *
-   * @param leadMs How far into the future the walk starts. A decision made here
-   *   reaches the game a frame later and the server later still, so the player
-   *   is already somewhere else by the time it takes effect — planning from
-   *   where they *will* be is the difference between a dodge that clears a shot
-   *   and one that clears where the shot used to be aimed.
+   * @param leadMs How long before the walk starts. A decision made here reaches
+   *   the game a frame later and the server later still, so for the first
+   *   `leadMs` the player is still standing where they are and the shots are
+   *   not.
+   *
+   *   **It delays the walk; it does not advance it.** This read `v * (t +
+   *   leadMs)` — the player credited with a head start against shots sampled
+   *   from *now* — which is the same error twice over: up to `2 * leadMs * v` of
+   *   displacement nobody makes, about eight tenths of a tile at ordinary walk
+   *   speeds, against an effective half-extent of eight tenths. Every gap looked
+   *   reachable that much sooner than it was, worst at the moment the choice is
+   *   forced, and the flat margins could not begin to absorb it. Nothing
+   *   downstream compensated either: the target the module is given is built
+   *   from where the player is, not from where the lead said they would be.
    * @param untilMs When to stop looking, which is the horizon or sooner.
    * @param maxTravelTiles How far the course can actually go before geometry
    *   stops it. **The walk continues after that, standing still**, which is what
@@ -394,15 +429,18 @@ export class ThreatField {
     const endMs = Math.min(this.#horizonMs, untilMs);
     if (endMs < 0 || this.#tracked === 0) return;
 
-    // When the course stops advancing. Before the walk even begins if the
-    // player is already against something, which makes this a standing sweep.
+    // When the course stops advancing, having run out of ground. Measured from
+    // the moment it starts, which is `leadMs` from now.
     const stopMs =
       maxTravelTiles === Infinity || tilesPerMs <= 0
         ? Infinity
-        : maxTravelTiles / tilesPerMs - leadMs;
+        : maxTravelTiles / tilesPerMs + leadMs;
 
-    const startTravel = Math.min(tilesPerMs * leadMs, maxTravelTiles);
-    const finishTravel = Math.min(tilesPerMs * (leadMs + endMs), maxTravelTiles);
+    // Nothing has been walked yet at the start of the sweep: the command has
+    // not landed. That is the whole of the correction — the player begins where
+    // they actually are.
+    const startTravel = 0;
+    const finishTravel = Math.min(tilesPerMs * Math.max(0, endMs - leadMs), maxTravelTiles);
     const startX = selfX + dirX * startTravel;
     const startY = selfY + dirY * startTravel;
     const finishX = selfX + dirX * finishTravel;
@@ -431,6 +469,8 @@ export class ThreatField {
       const count = this.#sampleCount[i] ?? 0;
       const half = this.#half[i] ?? 0;
       const drift = this.#drifts[i] ?? 0;
+      // Far fire still ranks the courses; it just never starts a dodge.
+      const near = this.#near[i] === 1;
 
       if (count === 1) {
         // Announced and over within one sample. Still a hit if it is on us.
@@ -441,7 +481,7 @@ export class ThreatField {
           ) - half;
         if (room < out.clearanceTiles) out.clearanceTiles = room;
         if (room <= 0 && out.impactMs > 0) out.impactMs = 0;
-        if (room < safeMarginTiles && out.unsafeAtMs > 0) out.unsafeAtMs = 0;
+        if (near && room < safeMarginTiles && out.unsafeAtMs > 0) out.unsafeAtMs = 0;
         continue;
       }
 
@@ -457,18 +497,20 @@ export class ThreatField {
         // 610 ms of a 600 ms horizon still threatens the first 600.
         const segmentEnd = Math.min(segmentAt + stepMs, endMs);
 
-        // Split where the course stops moving, so both halves stay straight in
-        // the player *and* the shot — which is what makes the closed form exact
-        // rather than a very good guess.
-        const split = stopMs > segmentAt && stopMs < segmentEnd ? stopMs : segmentEnd;
-
+        // **Split at every kink in the walk**, so both bodies move in a straight
+        // line across each piece — which is what makes the closed form below
+        // exact rather than a very good guess. The walk has two: the moment the
+        // command lands and it starts moving at all, and the moment geometry
+        // stops it again.
         let from = segmentAt;
         for (;;) {
-          const to = from === segmentAt ? split : segmentEnd;
+          let to = segmentEnd;
+          if (leadMs > from && leadMs < to) to = leadMs;
+          if (stopMs > from && stopMs < to) to = stopMs;
           const alongFrom = (from - segmentAt) / stepMs;
           const alongTo = (to - segmentAt) / stepMs;
-          const travelFrom = Math.min(tilesPerMs * (leadMs + from), maxTravelTiles);
-          const travelTo = Math.min(tilesPerMs * (leadMs + to), maxTravelTiles);
+          const travelFrom = Math.min(tilesPerMs * Math.max(0, from - leadMs), maxTravelTiles);
+          const travelTo = Math.min(tilesPerMs * Math.max(0, to - leadMs), maxTravelTiles);
 
           const closest = minChebyshevOnSegment(
             shotAx + (shotBx - shotAx) * alongFrom - (selfX + dirX * travelFrom),
@@ -481,7 +523,7 @@ export class ThreatField {
           const room = closest - (half + (drift * to) / 1000);
           if (room < out.clearanceTiles) out.clearanceTiles = room;
           if (room <= 0 && from < out.impactMs) out.impactMs = from;
-          if (room < safeMarginTiles && from < out.unsafeAtMs) out.unsafeAtMs = from;
+          if (near && room < safeMarginTiles && from < out.unsafeAtMs) out.unsafeAtMs = from;
 
           if (to >= segmentEnd) break;
           from = to;
@@ -507,6 +549,10 @@ export class ThreatField {
     const sampleCount = new Int32Array(capacity);
     sampleCount.set(this.#sampleCount.subarray(0, Math.min(this.#sampleCount.length, capacity)));
     this.#sampleCount = sampleCount;
+
+    const near = new Uint8Array(capacity);
+    near.set(this.#near.subarray(0, Math.min(this.#near.length, capacity)));
+    this.#near = near;
 
     this.#half = grow(this.#half, capacity);
     this.#drifts = grow(this.#drifts, capacity);

@@ -1,3 +1,5 @@
+import type { ContainerFacts, ItemFacts } from '../gamedata/items.js';
+import type { PermanentStatMaxima } from '../gamedata/playerClasses.js';
 import type { ProjectileDefinition } from '../gamedata/projectiles.js';
 
 /**
@@ -59,6 +61,28 @@ export interface ObjectCatalog {
    * say anything at all about where it is going.
    */
   projectile(objectType: number, bulletType: number): ProjectileDefinition | undefined;
+  /**
+   * What one of these is as an item — its slot, its tier, whether drinking it
+   * does anything.
+   *
+   * Asked of the data file for the same reason as everything above it: none of
+   * it is on the wire. A bag announces the *ids* it holds and nothing else, so
+   * whether one of them is a tier-13 bow or a health potion is a question only
+   * this can answer. `undefined` for an object that is not an item, and for
+   * every object at all while no data file has been read — which is what makes
+   * anything built on it do nothing rather than something wrong.
+   */
+  item(objectType: number): ItemFacts | undefined;
+  /**
+   * What one of these holds, for the loot bags, chests and graves.
+   *
+   * `<Class>Container</Class>` is the marker, and it excludes the vault chest —
+   * which the file classes separately — so nothing looting containers can reach
+   * into the vault by accident.
+   */
+  container(objectType: number): ContainerFacts | undefined;
+  /** How high a playable class's stats go, for deciding a potion is wasted. */
+  statMaxima(objectType: number): PermanentStatMaxima | undefined;
 }
 
 export const EMPTY_CATALOG: ObjectCatalog = {
@@ -69,4 +93,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   occupies: () => false,
   displayName: () => undefined,
   projectile: () => undefined,
+  item: () => undefined,
+  container: () => undefined,
+  statMaxima: () => undefined,
 };

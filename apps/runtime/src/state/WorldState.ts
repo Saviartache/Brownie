@@ -1,5 +1,12 @@
-import type { EntityView, ProjectileView, TileView, WorldView } from '@brownie/plugin-api';
+import type {
+  BlastView,
+  EntityView,
+  ProjectileView,
+  TileView,
+  WorldView,
+} from '@brownie/plugin-api';
 import { PLAYER_HALF_TILES } from '../features/dodge/hitbox.js';
+import { BlastStore } from './blasts/BlastStore.js';
 import { EntityStore } from './EntityStore.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './ObjectCatalog.js';
 import { SelfState } from './SelfState.js';
@@ -40,6 +47,7 @@ export class WorldState implements WorldView {
   readonly entityStore: EntityStore;
   readonly tileMap: TileMap;
   readonly projectileStore = new ProjectileStore();
+  readonly blastStore = new BlastStore();
   /** The catalog in use, so the state stage can look a shot up. */
   readonly objects: ObjectCatalog;
 
@@ -99,8 +107,10 @@ export class WorldState implements WorldView {
     this.#map = info;
     this.entityStore.clear();
     this.tileMap.clear();
-    // Shots from the previous map cannot still be in the air in this one.
+    // Shots from the previous map cannot still be in the air in this one, and
+    // neither can anything that was about to land in it.
     this.projectileStore.clear();
+    this.blastStore.clear();
   }
 
   entities(): Iterable<EntityView> {
@@ -163,5 +173,9 @@ export class WorldState implements WorldView {
 
   projectiles(): Iterable<ProjectileView> {
     return this.projectileStore.values(this.gameTimeMs);
+  }
+
+  blasts(): Iterable<BlastView> {
+    return this.blastStore.values(this.gameTimeMs);
   }
 }

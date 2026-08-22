@@ -18,6 +18,8 @@
  */
 
 import type { MutablePacket } from '@brownie/plugin-api';
+import { buildRecord } from '@brownie/ipc';
+import type { WeaponShot } from '../gamedata/EquippedWeapon.js';
 import type { WorldState } from '../state/WorldState.js';
 import {
   PacketOrigin,
@@ -28,12 +30,34 @@ import {
 /** What the overlay is told about. Kinds it does not know are ignored. */
 export const WORLD_RECORD_KIND = 'world';
 
+/**
+ * The equipped weapon, as the overlay shows it.
+ *
+ * **A separate record because it carries a name.** The world record is integers
+ * only, which is what lets the module read it with a split and a parse; the one
+ * text field in this feature would have cost that whole property. It also
+ * changes on a different clock — once when the player swaps an item, against
+ * four times a second — so sending it alongside would be a name repeated a
+ * quarter of a million times an hour.
+ */
+export const WEAPON_RECORD_KIND = 'weapon';
+
 /** Four times a second: faster than reading, slower than the game ticks. */
 export const MIN_INTERVAL_MS = 250;
 
 export interface WorldStatusOptions {
   readonly publish: (record: string) => void;
   readonly now?: () => number;
+  /**
+   * What the game's data says about the item in the weapon slot.
+   *
+   * **Shown, never used.** The dodge planner takes a weapon's reach as the
+   * distance it tries not to drift past, and that number is read out of a 35 MB
+   * file nobody looks at — so it is worth being able to see, beside the name of
+   * the weapon it was read for. Omitted when nothing is wired up, and the row
+   * simply does not appear.
+   */
+  readonly weapon?: (objectType: number) => WeaponShot | undefined;
 }
 
 export class WorldStatusStage implements PipelineStage {
@@ -53,11 +77,16 @@ export class WorldStatusStage implements PipelineStage {
    * map would pay that four times a second to say nothing.
    */
   #lastRecord = '';
+  /** The same, for the weapon record, which changes far less often still. */
+  #lastWeaponRecord = '';
+
+  readonly #weapon: ((objectType: number) => WeaponShot | undefined) | undefined;
 
   constructor(world: WorldState, options: WorldStatusOptions) {
     this.#world = world;
     this.#publish = options.publish;
     this.#now = options.now ?? (() => Date.now());
+    this.#weapon = options.weapon;
   }
 
   handle(packet: MutablePacket, context: PacketContext): void {
@@ -74,6 +103,8 @@ export class WorldStatusStage implements PipelineStage {
     // shot in the realm, four times a second.
     this.#world.projectileStore.prune(this.#world.gameTimeMs);
     const shots = this.#world.projectileStore.size;
+    this.#world.blastStore.prune(this.#world.gameTimeMs);
+    const blasts = this.#world.blastStore.size;
 
     const record = [
       WORLD_RECORD_KIND,
@@ -94,10 +125,47 @@ export class WorldStatusStage implements PipelineStage {
       this.#world.shots.announced,
       this.#world.shots.noOwner,
       this.#world.shots.noDefinition,
+      // **The telegraph decode checking its own homework.** Where a thrown bomb
+      // will land is read from a `SHOWEFFECT` body whose layout was recovered
+      // from the game's own metadata rather than stated by it, so the only
+      // honest confirmation is the detonation that follows: a prediction the
+      // `AOE` lands on is one the decode got right. A patch that moves the
+      // layout shows up here as confirmations stopping and unmatched climbing,
+      // instead of as a dodge that quietly stopped avoiding bombs.
+      blasts,
+      this.#world.blastStore.confirmed,
+      this.#world.blastStore.unmatched,
     ].join('|');
+
+    this.#sayWeapon(self.weaponType);
 
     if (record === this.#lastRecord) return;
     this.#lastRecord = record;
+    this.#publish(record);
+  }
+
+  /**
+   * Describes the equipped weapon, when there is anything new to say.
+   *
+   * A weapon the catalog does not describe is still reported, with its type and
+   * nothing else: "the data files do not have this item" and "the range is
+   * wrong" look the same from the outside, and this is what tells them apart.
+   */
+  #sayWeapon(objectType: number): void {
+    if (this.#weapon === undefined) return;
+
+    const shot = objectType < 0 ? undefined : this.#weapon(objectType);
+    const record = buildRecord(
+      WEAPON_RECORD_KIND,
+      shot?.name ?? '',
+      objectType,
+      // Tiles a second in hundredths, like every other distance on this wire.
+      Math.round((shot?.speedTilesPerMs ?? 0) * 1000 * 100),
+      Math.round(shot?.lifetimeMs ?? 0),
+      Math.round((shot?.reachTiles ?? 0) * 100),
+    );
+    if (record === this.#lastWeaponRecord) return;
+    this.#lastWeaponRecord = record;
     this.#publish(record);
   }
 }

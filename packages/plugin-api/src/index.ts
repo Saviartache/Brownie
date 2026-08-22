@@ -32,7 +32,11 @@ export {
 
 export type {
   EntityView,
+  InventoryView,
+  ItemSlotView,
+  PermanentStats,
   Position,
+  BlastView,
   ProjectileView,
   SelfView,
   SessionView,

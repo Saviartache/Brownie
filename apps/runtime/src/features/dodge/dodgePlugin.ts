@@ -44,13 +44,14 @@
 import {
   PluginCategory,
   definePlugin,
+  type BlastView,
   type Plugin,
   type Position,
   type SessionView,
   type WorldView,
 } from '@brownie/plugin-api';
 import { DodgeController, type DodgeSettings, type DodgeWorld } from './DodgeController.js';
-import { EnemyBodies } from './EnemyBodies.js';
+import { EnemyBodies, OUT_OF_RANGE_CAP_TILES } from './EnemyBodies.js';
 import { registerHitRedirect } from './hitRedirect.js';
 import { shotPaths, type ShotPath } from './ShotPaths.js';
 
@@ -60,9 +61,10 @@ import { shotPaths, type ShotPath } from './ShotPaths.js';
  * Short enough that a shot entering the action window is acted on within a frame
  * or two of doing so. **Measured rather than assumed**: the worst case this
  * planner has — twenty-five shots arranged so that every part-speed tier has to
- * be scored as well — costs about 1.5 ms, so fifty plans a second is a few per
- * cent of one core and the ordinary case is a fraction of that, because a plan
- * with nothing in reach does no sweeping at all.
+ * be scored, with twenty monsters in range for the standoff term to measure
+ * against — costs about 1.5 ms, so fifty plans a second is a few per cent of one
+ * core and the ordinary case is a fraction of that, because a plan with nothing
+ * in reach does no sweeping at all.
  */
 const PLAN_INTERVAL_MS = 20;
 
@@ -102,6 +104,18 @@ const MIN_COMMAND_SPEED = 0.2;
 const ENEMY_SEARCH_MARGIN_TILES = 2;
 
 /**
+ * What a resolved weapon range is allowed to come out as, in tiles.
+ *
+ * The reference implementation's bounds, and its reason: the figure comes from
+ * data somebody else maintains, and a weapon whose numbers say it reaches sixty
+ * tiles would park the planner on the other side of the map. Melee weapons sit
+ * at the bottom of it — a sword is three and a half tiles — and nothing in the
+ * game reaches the top.
+ */
+const MIN_RANGE_TILES = 1;
+const MAX_RANGE_TILES = 16;
+
+/**
  * How often the drawn shot paths are refreshed.
  *
  * Slower than a plan on purpose: this is a picture for a person, and a person
@@ -121,6 +135,20 @@ const MAX_DRAWN_SHOTS = 48;
 /** A time the plan may report as "never", for the log. */
 function describe(ms: number): string {
   return ms === Infinity ? 'never' : `${ms.toFixed(0)}ms`;
+}
+
+/** A session with the feature switched off, allocated once. */
+const NO_BLASTS: readonly BlastView[] = [];
+
+/**
+ * The blasts still worth walking out of.
+ *
+ * A generator rather than an array: the planner iterates once, and a fight with
+ * a boss throwing bombs would otherwise build a fresh array fifty times a
+ * second to hold three of them.
+ */
+function* liveBlasts(map: WorldView): Iterable<BlastView> {
+  for (const blast of map.blasts()) if (!blast.confirmed) yield blast;
 }
 
 export interface DodgeOutput {
@@ -194,6 +222,20 @@ export interface DodgeInputs {
   readonly cursorWalk: CursorWalkInput;
   readonly steer: SteerInput;
   readonly view: DodgeView;
+  /**
+   * How far the equipped weapon's own shot reaches, in tiles.
+   *
+   * **The distance the planner is trying not to drift past**, because a dodge
+   * that ends out of range is a dodge that turned the damage off. It is in
+   * `objects.xml` and nowhere on the wire, and a plugin is not given the object
+   * catalog — so the composition root hands it over, exactly as it does for
+   * auto-aim. `undefined` for a weapon the catalog does not describe, or for no
+   * weapon at all, and the setting's own figure stands in.
+   *
+   * Asked once a plan and answered from `gamedata/EquippedWeapon`, which
+   * resolves a weapon once and remembers it.
+   */
+  readonly weaponRange: (weaponType: number) => number | undefined;
 }
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
@@ -235,6 +277,21 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         min: 100,
         max: 1200,
         step: 20,
+      });
+      // **The other half of the same question, and the half a clock cannot
+      // answer.** A shot crossing the room at sixteen tiles a second is inside
+      // a four-hundred-millisecond window from nearly seven tiles away — so a
+      // window measured only in time still hands the wheel over for fire that
+      // is plainly nowhere near, and still stops the player closing on whatever
+      // is doing the firing. Past this, a shot is predicted and ranked exactly
+      // as before; it simply cannot be the reason a dodge starts.
+      const reactWithinTiles = context.settings.range('reactWithinTiles', {
+        label: 'Only act on shots within (tiles)',
+        group: 'Reaction',
+        default: 6,
+        min: 2,
+        max: 16,
+        step: 0.5,
       });
       // **Coarser than a stepped planner's step, and that is the point.** The
       // sweep between two samples is exact, so this bounds how far a *curve*
@@ -336,10 +393,70 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         group: 'Safety',
         default: true,
       });
-      const avoidEnemyBodies = context.settings.boolean('avoidEnemyBodies', {
-        label: 'Prefer not to walk through monsters',
+      // **Thrown bombs, novas and telegraphed circles.** A different shape of
+      // danger from a bullet — a disc that goes off at a moment rather than a
+      // point that travels — and it is read from the telegraph the game sends
+      // before it lands, because the packet that reports the blast itself
+      // arrives after the damage. Its own switch because it rests on a packet
+      // body recovered from the game's metadata rather than one the game states,
+      // so there is a way to turn it off if a patch moves it.
+      const avoidBlasts = context.settings.boolean('avoidBlasts', {
+        label: 'Dodge thrown bombs and area effects',
         group: 'Safety',
         default: true,
+      });
+      // **The master switch for the planner knowing where the monsters are.**
+      // Off, it is a pure bullet-dodger: it will thread a perfect gap and finish
+      // standing inside a boss, and it will back out of weapon range answering a
+      // wave it had room to cross. Everything in this group is off with it.
+      const mindMonsters = context.settings.boolean('avoidEnemyBodies', {
+        label: 'Mind where the monsters are',
+        group: 'Spacing',
+        default: true,
+      });
+      // **Room to dodge in, and the reason it is a distance rather than a hit
+      // test.** A monster pressed against the player has already taken the space
+      // every escape needs, so by the time contact damage says so there is
+      // nowhere left to go. Raised on its own to the distance at which the
+      // bodies touch, so nought here still means "not inside it".
+      const keepAway = context.settings.range('keepAwayTiles', {
+        label: 'Keep monsters at least (tiles)',
+        group: 'Spacing',
+        default: 2,
+        min: 0,
+        max: 6,
+        step: 0.25,
+      });
+      // **The far edge, and the point of the whole group.** A dodge is not the
+      // objective; staying alive while shooting is. Every course that gives
+      // ground survives a little longer than every course that does not, so a
+      // planner with nothing to say about range walks itself out of the fight
+      // one safe step at a time.
+      const stayInRange = context.settings.boolean('stayInRange', {
+        label: "Stay within your weapon's range",
+        group: 'Spacing',
+        default: true,
+      });
+      // Nine tenths of it, which is the reference implementation's figure and
+      // its reasoning: parked exactly at maximum range, a shot that leads a
+      // moving target expires before it arrives.
+      const rangePercent = context.settings.range('rangePercent', {
+        label: 'Keep within (% of weapon range)',
+        group: 'Spacing',
+        default: 90,
+        min: 50,
+        max: 100,
+        step: 5,
+      });
+      // What stands in when the weapon is unknown — no data files, or an item
+      // the catalog does not describe. The reference implementation's default.
+      const fallbackRangeTiles = context.settings.range('fallbackRangeTiles', {
+        label: 'Assume a range of (tiles)',
+        group: 'Spacing',
+        default: 5,
+        min: MIN_RANGE_TILES,
+        max: MAX_RANGE_TILES,
+        step: 0.5,
       });
 
       const respectIntent = context.settings.boolean('respectIntent', {
@@ -390,10 +507,19 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       let mapView: WorldView | undefined;
       let clearance = 0;
       let damagingMatters = true;
+      /**
+       * The distances to fight between, rewritten in place each plan.
+       *
+       * One object for the life of the plugin rather than one per plan: it is
+       * read a hundred times a plan and fifty plans a second, and the two
+       * numbers in it change only when the player swaps a weapon or drags a
+       * slider.
+       */
+      const band = { keepAwayTiles: 0, stayWithinTiles: Infinity };
       const world: DodgeWorld = {
         canStand: (x, y) => mapView?.canStandAt(x, y, clearance) ?? false,
         isDamaging: (x, y) => damagingMatters && (mapView?.tileAt(x, y)?.damaging ?? false),
-        enemyRoomAt: (x, y) => bodies.roomAt(x, y),
+        standoffAt: (x, y) => bodies.standoffAt(x, y, band),
       };
 
       let lastPlanAtMs = 0;
@@ -441,6 +567,31 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        */
       const walkSpeedOf = (session: SessionView): number =>
         (session.self.walkSpeedTilesPerSecond * speedPercent.get()) / 100;
+
+      /**
+       * The distances this character should be fighting between.
+       *
+       * The near edge is a setting; the far edge is the weapon's own reach, cut
+       * to leave a little in hand. **Never inverted**: a melee weapon reaches
+       * three and a half tiles, so a keep-away larger than the range would leave
+       * a band with nothing in it and every place equally wrong. Where they
+       * cross, the near edge wins — being able to dodge outranks being able to
+       * shoot, and the planner is a dodge.
+       */
+      const updateBand = (session: SessionView): void => {
+        const keepAwayTiles = Math.max(0, keepAway.get());
+        band.keepAwayTiles = keepAwayTiles;
+        if (!stayInRange.get()) {
+          band.stayWithinTiles = Infinity;
+          return;
+        }
+        const reach = inputs.weaponRange(session.self.weaponType);
+        const usable = Math.min(
+          MAX_RANGE_TILES,
+          Math.max(MIN_RANGE_TILES, reach ?? fallbackRangeTiles.get()),
+        );
+        band.stayWithinTiles = Math.max(keepAwayTiles, (usable * rangePercent.get()) / 100);
+      };
 
       /**
        * The player naming a place, which beats everything else here.
@@ -525,6 +676,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const settings: DodgeSettings = {
           horizonMs: horizonMs.get(),
           reactWithinMs: reactWithinMs.get(),
+          reactWithinTiles: reactWithinTiles.get(),
           sampleStepMs: sampleStepMs.get(),
           headings: headings.get(),
           hitScale: hitScale.get(),
@@ -537,10 +689,17 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           avoidDamagingGround: damagingMatters,
         };
 
-        if (avoidEnemyBodies.get()) {
-          const reach =
-            (speed * (settings.leadMs + settings.horizonMs)) / 1000 + ENEMY_SEARCH_MARGIN_TILES;
-          bodies.collect(map.enemies(), self.x, self.y, reach);
+        if (mindMonsters.get()) {
+          updateBand(session);
+          // Far enough to see the edge of the band as well as the edge of the
+          // walk: a monster just outside weapon range is the one thing this is
+          // meant to notice, and one culled for being far away is one the
+          // planner reads as "nobody here" and drifts away from.
+          const searchTiles = Math.max(
+            (speed * (settings.leadMs + settings.horizonMs)) / 1000,
+            band.stayWithinTiles === Infinity ? 0 : band.stayWithinTiles + OUT_OF_RANGE_CAP_TILES,
+          );
+          bodies.collect(map.enemies(), self.x, self.y, searchTiles + ENEMY_SEARCH_MARGIN_TILES);
         } else {
           bodies.clear();
         }
@@ -558,6 +717,10 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           settings,
           world,
           map.projectiles(),
+          // Only the ones still on their way down. A confirmed blast has landed
+          // and is history — the ground it took is now the safest on the screen,
+          // and walking out of it would be dodging a crater.
+          avoidBlasts.get() ? liveBlasts(map) : NO_BLASTS,
         );
 
         if (plan.verdict !== saidVerdict) {

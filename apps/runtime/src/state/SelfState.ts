@@ -1,5 +1,6 @@
-import type { SelfView } from '@brownie/plugin-api';
+import type { InventoryView, PermanentStats, SelfView } from '@brownie/plugin-api';
 import { StatType } from '../constants/StatType.js';
+import { PlayerInventory } from './PlayerInventory.js';
 import { numericStat, stringStat, type StatEntry } from './stats.js';
 
 /**
@@ -13,6 +14,16 @@ import { numericStat, stringStat, type StatEntry } from './stats.js';
 export const MIN_WALK_TILES_PER_SECOND = 4;
 export const MAX_WALK_TILES_PER_SECOND = 9.6;
 export const MAX_SPEED_STAT = 75;
+
+/** Shared, so a character nobody has told us about costs no allocation. */
+const NO_PERMANENT_STATS: PermanentStats = {
+  attack: 0,
+  defense: 0,
+  speed: 0,
+  dexterity: 0,
+  vitality: 0,
+  wisdom: 0,
+};
 
 /**
  * The local player.
@@ -29,14 +40,59 @@ export const MAX_SPEED_STAT = 75;
  */
 export class SelfState implements SelfView {
   objectId = -1;
+  /** The character's class, as an object type. -1 until the server sends us. */
+  objectType = -1;
   name = '';
   x = 0;
   y = 0;
   hp = 0;
-  maxHp = 0;
   mp = 0;
-  maxMp = 0;
   conditions = 0;
+  readonly #inventory = new PlayerInventory();
+
+  get inventory(): InventoryView {
+    return this.#inventory;
+  }
+
+  /**
+   * The base maximum the server states, and the bonus the gear adds.
+   *
+   * Kept apart and added on the way out, because the server sends them apart
+   * and the base alone is not a maximum: current health routinely exceeds it on
+   * a geared character, so a threshold taken as a share of the base fires later
+   * than it reads — which is how auto-nexus escaped a beat late.
+   *
+   * The bonus is the gear's *and* the exaltations', while the base already
+   * carries the exaltations. So the sum can overstate the maximum by the
+   * exalted slice — around fifty health on a fully exalted character, nothing
+   * on any other. That is the harmless direction for everything reading it: a
+   * larger maximum means a threshold reached sooner, so a drink comes early and
+   * an escape comes early. Subtracting the slice would need a stat id neither
+   * table in this repository agrees on, and being wrong about *that* would
+   * overstate it by hundreds.
+   */
+  #maxHpBase = 0;
+  #maxMpBase = 0;
+  #hpBonus = 0;
+  #mpBonus = 0;
+
+  get maxHp(): number {
+    return this.#maxHpBase + this.#hpBonus;
+  }
+
+  get maxMp(): number {
+    return this.#maxMpBase + this.#mpBonus;
+  }
+
+  /**
+   * The six as the server states them — class, level and potions, with neither
+   * the gear bonus nor the exaltations folded in, which is what makes them
+   * comparable against the per-class ceiling in `objects.xml`.
+   *
+   * One object, replaced rather than mutated, so a caller holding it across a
+   * tick sees the character as it was rather than a record being edited.
+   */
+  permanentStats: PermanentStats = NO_PERMANENT_STATS;
   /** The speed *stat*, as the server states it. Not a speed — see below. */
   speedStat = 0;
   /**
@@ -104,6 +160,11 @@ export class SelfState implements SelfView {
     this.objectId = objectId;
   }
 
+  /** Called when the object the server sent for us names the class it is. */
+  bindClass(objectType: number): void {
+    this.objectType = objectType;
+  }
+
   moveTo(x: number, y: number): void {
     this.x = x;
     this.y = y;
@@ -113,11 +174,17 @@ export class SelfState implements SelfView {
     const hp = numericStat(stats, StatType.Hp);
     if (hp !== undefined) this.hp = hp;
     const maxHp = numericStat(stats, StatType.MaxHp);
-    if (maxHp !== undefined) this.maxHp = maxHp;
+    if (maxHp !== undefined) this.#maxHpBase = maxHp;
+    const hpBonus = numericStat(stats, StatType.HpBoost);
+    if (hpBonus !== undefined) this.#hpBonus = hpBonus;
     const mp = numericStat(stats, StatType.Mp);
     if (mp !== undefined) this.mp = mp;
     const maxMp = numericStat(stats, StatType.MaxMp);
-    if (maxMp !== undefined) this.maxMp = maxMp;
+    if (maxMp !== undefined) this.#maxMpBase = maxMp;
+    const mpBonus = numericStat(stats, StatType.MpBoost);
+    if (mpBonus !== undefined) this.#mpBonus = mpBonus;
+    this.#applyPermanentStats(stats);
+    this.#inventory.applyStats(stats);
     const speed = numericStat(stats, StatType.Speed);
     if (speed !== undefined) this.speedStat = speed;
     const weapon = numericStat(stats, StatType.Inventory0);
@@ -130,19 +197,53 @@ export class SelfState implements SelfView {
     if (name !== undefined) this.name = name;
   }
 
+  /**
+   * Replaces the six only when one of them moved.
+   *
+   * They move when a potion is drunk or a level is gained — a handful of times
+   * in a session — and this runs on every tick, so building the record
+   * unconditionally would allocate one per tick to say what the last one said.
+   */
+  #applyPermanentStats(stats: readonly StatEntry[]): void {
+    const current = this.permanentStats;
+    const next: PermanentStats = {
+      attack: numericStat(stats, StatType.Attack) ?? current.attack,
+      defense: numericStat(stats, StatType.Defense) ?? current.defense,
+      speed: numericStat(stats, StatType.Speed) ?? current.speed,
+      dexterity: numericStat(stats, StatType.Dexterity) ?? current.dexterity,
+      vitality: numericStat(stats, StatType.Vitality) ?? current.vitality,
+      wisdom: numericStat(stats, StatType.Wisdom) ?? current.wisdom,
+    };
+    if (
+      next.attack !== current.attack ||
+      next.defense !== current.defense ||
+      next.speed !== current.speed ||
+      next.dexterity !== current.dexterity ||
+      next.vitality !== current.vitality ||
+      next.wisdom !== current.wisdom
+    ) {
+      this.permanentStats = next;
+    }
+  }
+
   /** Forgets the character, keeping nothing that could describe the next one. */
   reset(): void {
     this.objectId = -1;
+    this.objectType = -1;
     this.name = '';
     this.x = 0;
     this.y = 0;
     this.hp = 0;
-    this.maxHp = 0;
     this.mp = 0;
-    this.maxMp = 0;
+    this.#maxHpBase = 0;
+    this.#maxMpBase = 0;
+    this.#hpBonus = 0;
+    this.#mpBonus = 0;
     this.conditions = 0;
     this.speedStat = 0;
     this.weaponType = -1;
+    this.permanentStats = NO_PERMANENT_STATS;
+    this.#inventory.reset();
     this.#serverDefense = 0;
     this.#nativeDefense = undefined;
   }

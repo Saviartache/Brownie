@@ -160,6 +160,24 @@ export function childText(element: string, name: string): string | undefined {
   return match?.[1] === undefined ? undefined : decodeEntities(match[1].trim());
 }
 
+/**
+ * The text an element holds between its own tags.
+ *
+ * For an element the scanners produced, when what is wanted is both its text
+ * and its attributes — `<Activate stat="ATT">IncrementStat</Activate>` is the
+ * case this exists for, and {@link childText} cannot answer it because the
+ * element *is* the child. Scalar content only, on the same terms.
+ *
+ * @returns `undefined` for a self-closing element, which holds nothing.
+ */
+export function elementText(element: string): string | undefined {
+  const openEnd = element.indexOf('>');
+  if (openEnd === -1 || element[openEnd - 1] === '/') return undefined;
+  const closeStart = element.lastIndexOf('</');
+  if (closeStart <= openEnd) return undefined;
+  return decodeEntities(element.slice(openEnd + 1, closeStart).trim());
+}
+
 /** Whether a marker child such as `<Enemy />` is present. */
 export function hasChild(element: string, name: string): boolean {
   // The boundary matters: `<Enemy />` must not be found by looking for `<Enem`,

@@ -184,6 +184,8 @@ describe('selectTarget', () => {
       isPlayer: false,
       conditions: 0,
       guildName: '',
+      stat: () => undefined,
+      text: () => undefined,
       x,
       y,
     }) satisfies EntityView;
@@ -341,7 +343,7 @@ describe('the auto-aim plugin', () => {
   };
 
   /** A bow-like weapon: 0.008 tiles a millisecond for 750 ms, so six tiles. */
-  const WEAPON: WeaponProjectile = { speedTilesPerMs: 0.008, lifetimeMs: 750 };
+  const WEAPON: WeaponProjectile = { speedTilesPerMs: 0.008, lifetimeMs: 750, reachTiles: 6 };
 
   /** The only wall in these tests, so "is scenery" is one object type. */
   const WALL_TYPE = 99;
@@ -478,6 +480,8 @@ describe('the auto-aim plugin', () => {
       isPlayer: false,
       conditions: 0,
       guildName: '',
+      stat: () => undefined,
+      text: () => undefined,
       x,
       y,
       ...over,
@@ -604,10 +608,22 @@ describe('the auto-aim plugin', () => {
 
   it('ignores an enemy beyond what the weapon can reach', () => {
     const { aimAt, enemies, tick } = harness();
-    // The weapon reaches six tiles; the setting allows eight.
+    // Six tiles is the whole of it — there is no setting to widen it with.
     enemies.push(enemy(1, 7, 0));
     tick();
     expect(aimAt).not.toHaveBeenCalled();
+  });
+
+  // The slider that used to bound this defaulted to eight tiles, which was too
+  // short for a wand and too long for a sword. A longer weapon has to reach
+  // further without anyone changing a setting.
+  it('reaches as far as the weapon does, whatever weapon that is', () => {
+    const { aimAt, enemies, tick } = harness({
+      weapon: { speedTilesPerMs: 0.008, lifetimeMs: 1500, reachTiles: 12 },
+    });
+    enemies.push(enemy(1, 11, 0));
+    tick();
+    expect(aimAt).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing at all while switched off', () => {

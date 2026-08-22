@@ -1,8 +1,23 @@
-// The local player's collision radius, held at zero.
+// The local player's collision radius, scaled, and put back afterwards.
 //
 // One number, on one object, and the game does the rest: `collisionRadiusMultiplier`
-// is what the client scales the player's collision circle by, so zero leaves
-// every test the client makes against that circle with nothing to hit.
+// is what the client scales the player's collision circle by, so a smaller value
+// leaves every test the client makes against that circle with less to hit, and
+// zero leaves it with nothing.
+//
+// **Two switches ask for it and neither owns the number.** The overlay's "no
+// hitbox" is zero — the whole circle gone, which is what HPBarMod did — and the
+// runtime's collider plugin is whatever its slider says. They arrive here as one
+// value because there is one field, and a field with two writers disagreeing
+// twice a second is a field nobody can put back.
+//
+// **Putting it back is the reason this remembers anything at all.** The game's
+// own value is taken once per properties object and written back when the last
+// switch goes off, so a plugin that was disabled — or whose lease ran out with
+// the runtime behind it — leaves the client testing against the circle it built.
+// Only through a pointer a *fresh* walk has just handed over: the object is
+// freed between realms, and a value put back through a remembered address is a
+// float written into whatever the allocator put there next.
 //
 // **What that stops is whatever the client decides by the circle, and the
 // visible one is area damage.** HPBarMod's own operators report shots that
@@ -41,6 +56,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +78,49 @@ namespace brownie::game {
 /// worth testing: it decides where a write lands.
 [[nodiscard]] std::vector<std::uint32_t> PropertyFieldOffsets(
     const std::vector<FieldDescription>& fields, std::string_view type_name, std::size_t limit);
+
+/// The game's own multiplier, held so it can be put back, and the whole of the
+/// decision about what a pass writes.
+///
+/// Free of the game for the same reason `PropertyFieldOffsets` is: it is handed
+/// an address and the number that address currently holds, and answers with the
+/// number to write. Nothing here reads or writes the game's memory, which is
+/// what makes the one rule worth getting right — *what counts as the game's own
+/// value* — testable at a desk.
+///
+/// **The original is taken when the object changes and not before.** A pass
+/// writes the wanted value every time it runs, so the second pass would read the
+/// module's own write back and remember that as the game's value. Keyed on the
+/// address, the answer is taken once and carried until the address is not the
+/// one the walk hands over any more.
+///
+/// **Game thread only**, like the pass that owns it.
+class CollisionMemory {
+  public:
+    /// What to write to `properties` this pass, or nothing to leave it alone.
+    ///
+    /// @param current what the field holds right now, which is the game's own
+    ///   value on the first sight of an object and the module's own write after
+    ///   that
+    /// @param wanted what the circle should be scaled by, or nothing to put the
+    ///   game's value back — which happens only through the object it was taken
+    ///   from, so an address that is not that one answers nothing and leaves
+    ///   what is held alone
+    [[nodiscard]] std::optional<float> Decide(const void* properties, float current,
+                                              std::optional<float> wanted) noexcept;
+
+    /// Whether a value taken from the game has yet to be put back. The pass
+    /// keeps running while this is true even with every switch off.
+    [[nodiscard]] bool holding() const noexcept { return tracked_ != nullptr; }
+
+    /// Drops what was taken without putting it back — for when the object it
+    /// came from is gone, which is every realm change.
+    void Forget() noexcept { tracked_ = nullptr; }
+
+  private:
+    const void* tracked_ = nullptr;
+    float original_ = 0.0F;
+};
 
 class PlayerCollision {
   public:
@@ -88,18 +147,27 @@ class PlayerCollision {
     /// Whether {@link Bind} has happened. Callable from either thread.
     [[nodiscard]] bool bound() const noexcept { return bound_.load(std::memory_order_acquire); }
 
-    /// Finds the player's properties and zeroes the radius. **Game thread
-    /// only**, and behind a cadence: the scene walk it starts with is Unity's
+    /// Finds the player's properties and scales the radius by `multiplier`, or
+    /// puts the game's own value back when there is none. **Game thread only**,
+    /// and behind a cadence: the scene walk it starts with is Unity's
     /// `GameObject.Find`, which is not a per-frame call.
+    ///
+    /// A pass with nothing wanted and nothing held does nothing at all, so a
+    /// caller may call it whenever it walks the scene for something else.
     ///
     /// @returns whether the write happened. False is the ordinary answer at the
     ///   login screen, between realms and while a map is being rebuilt — there
     ///   is no player node then, and nothing to write to.
-    bool Apply(const Il2CppRuntime& game, const UnityScene& scene);
+    bool Apply(const Il2CppRuntime& game, const UnityScene& scene,
+               std::optional<float> multiplier);
 
-    /// How many times the radius has been zeroed, for the overlay to show. One
-    /// per pass while the feature is on, because the game writes the property
-    /// back as it rebuilds the entity.
+    /// Whether a value taken from the game has yet to be put back — see
+    /// {@link CollisionMemory::holding}.
+    [[nodiscard]] bool holding() const noexcept { return memory_.holding(); }
+
+    /// How many times the radius has been written, for the overlay to show. One
+    /// per pass while a switch is on, because the game writes the property back
+    /// as it rebuilds the entity.
     [[nodiscard]] std::uint32_t applied() const noexcept { return applied_; }
 
   private:
@@ -112,10 +180,10 @@ class PlayerCollision {
     [[nodiscard]] const std::vector<std::uint32_t>& OffsetsFor(const Il2CppRuntime& game,
                                                                ClassRef klass);
 
-    /// Zeroes the radius on the first of `offsets` that leads to the player's
-    /// own properties.
-    [[nodiscard]] bool ZeroThroughEntity(void* entity,
-                                         const std::vector<std::uint32_t>& offsets) const;
+    /// Writes the radius on the first of `offsets` that leads to the player's
+    /// own properties, with {@link CollisionMemory} deciding what.
+    [[nodiscard]] bool WriteThroughEntity(void* entity, const std::vector<std::uint32_t>& offsets,
+                                          std::optional<float> multiplier);
 
     ClassRef view_handler_ = nullptr;
     std::string properties_type_;
@@ -129,6 +197,7 @@ class PlayerCollision {
     /// Game thread only, like everything it caches.
     ClassRef scanned_class_ = nullptr;
     std::vector<std::uint32_t> scanned_offsets_;
+    CollisionMemory memory_;
     std::uint32_t applied_ = 0;
 };
 

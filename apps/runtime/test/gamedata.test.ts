@@ -5,14 +5,19 @@ import {
   readObjectDefinitions,
   readTileDefinitions,
 } from '../src/gamedata/GameCatalogs.js';
+import { EquippedWeapon } from '../src/gamedata/EquippedWeapon.js';
+import { reachTiles, type ProjectileDefinition } from '../src/gamedata/projectiles.js';
+import { PotionKind } from '../src/gamedata/items.js';
 import {
   GameDataError,
   attribute,
   childText,
+  elementText,
   hasChild,
   parseGameNumber,
   scanElements,
 } from '../src/gamedata/xml.js';
+import { EMPTY_CATALOG } from '../src/state/ObjectCatalog.js';
 
 /** Feeds a document to the scanner in chunks of a given size. */
 function chunked(text: string, size = text.length): AsyncIterable<string> {
@@ -201,11 +206,19 @@ describe('tile catalog', () => {
     expect(catalog.get(0x70)?.id).toBe('Lava');
   });
 
+  it('reads the push marker, which is what makes a conveyor a conveyor', async () => {
+    const catalog = new GameTileCatalog(await readTileDefinitions(chunked(TILES)));
+
+    expect(catalog.isPushing(0x70)).toBe(true);
+    expect(catalog.isPushing(0x222f)).toBe(false);
+  });
+
   it('answers "no" for an unknown tile, which is the safe direction', async () => {
     const catalog = new GameTileCatalog(await readTileDefinitions(chunked(TILES)));
     // A feature that avoids damaging tiles avoids none, rather than the wrong ones.
     expect(catalog.isDamaging(0xdead)).toBe(false);
     expect(catalog.isBlocking(0xdead)).toBe(false);
+    expect(catalog.isPushing(0xdead)).toBe(false);
   });
 
   it('treats damage on either bound as damaging', async () => {
@@ -259,5 +272,312 @@ describe('projectiles', () => {
     // Parsed so the model can learn about it without a data change; stated in
     // `positionAt` so nothing treats an accelerating shot's path as exact.
     expect(catalog.projectile(1, 0)?.acceleration).toBe(80);
+  });
+});
+
+describe('how far a shot gets', () => {
+  // The game's own encoding: speed is ten-thousandths of a tile a millisecond,
+  // so a bow at 160 for 440 ms reaches just over seven tiles — which is what
+  // the item does in the game.
+  const BOW = `<Object type="0xb06" id="Bow of Covert Havens">
+    <Projectile id="0"><Speed>160</Speed><LifetimeMS>440</LifetimeMS></Projectile>
+  </Object>`;
+  // A fixed-arc weapon: no speed at all, and the arc is the reach.
+  const SWORD = `<Object type="0xb0b" id="Sword of Acclaim">
+    <Projectile id="0"><Parametric /><Magnitude>3.5</Magnitude><LifetimeMS>350</LifetimeMS></Projectile>
+  </Object>`;
+
+  async function catalogOf(...objects: string[]): Promise<GameObjectCatalog> {
+    return new GameObjectCatalog(
+      await readObjectDefinitions(chunked(`<Objects>${objects.join('')}</Objects>`)),
+    );
+  }
+
+  it('is speed times life for an ordinary shot', async () => {
+    const catalog = await catalogOf(BOW);
+    const definition = catalog.projectile(0xb06, 0);
+    expect(definition).toBeDefined();
+    expect(reachTiles(definition as ProjectileDefinition)).toBeCloseTo(7.04, 6);
+  });
+
+  // Reading a parametric weapon as speed × life gives nought, which would read
+  // as "this weapon has no range" for every sword and dagger in the game.
+  it('is the magnitude for a fixed-arc weapon', async () => {
+    const catalog = await catalogOf(SWORD);
+    const definition = catalog.projectile(0xb0b, 0);
+    expect(definition).toBeDefined();
+    expect(reachTiles(definition as ProjectileDefinition)).toBeCloseTo(3.5, 6);
+  });
+
+  describe('resolved once per weapon', () => {
+    it('names the item and works out its reach', async () => {
+      const catalog = await catalogOf(BOW);
+      const shot = new EquippedWeapon(() => catalog).of(0xb06);
+
+      expect(shot?.name).toBe('Bow of Covert Havens');
+      expect(shot?.speedTilesPerMs).toBeCloseTo(0.016, 9);
+      expect(shot?.lifetimeMs).toBe(440);
+      expect(shot?.reachTiles).toBeCloseTo(7.04, 6);
+    });
+
+    it('answers the second time without reading the catalog again', async () => {
+      const catalog = await catalogOf(BOW);
+      let reads = 0;
+      const weapon = new EquippedWeapon(() => {
+        reads += 1;
+        return catalog;
+      });
+
+      const first = weapon.of(0xb06);
+      expect(weapon.of(0xb06)).toBe(first);
+      expect(reads).toBe(1);
+    });
+
+    // The catalogs are read from disk while the proxy is already serving, so a
+    // miss during the first seconds of a session means "not yet".
+    it('does not remember that it did not know', async () => {
+      const catalog = await catalogOf(BOW);
+      let loaded = false;
+      const weapon = new EquippedWeapon(() => (loaded ? catalog : EMPTY_CATALOG));
+
+      expect(weapon.of(0xb06)).toBeUndefined();
+      loaded = true;
+      expect(weapon.of(0xb06)?.name).toBe('Bow of Covert Havens');
+    });
+
+    it('has nothing to say about an empty hand', async () => {
+      const catalog = await catalogOf(BOW);
+      expect(new EquippedWeapon(() => catalog).of(-1)).toBeUndefined();
+    });
+  });
+});
+
+/**
+ * The item, container and class facts the two item features read.
+ *
+ * Every fixture below is copied verbatim out of the shipped `objects.xml`,
+ * trimmed of the parts nothing here reads. The point is to prove the readers
+ * against the document's real shape rather than against a shape invented to
+ * suit them — the reference implementation's item classifier was written
+ * against an older extraction and misread this one.
+ */
+describe('what the catalog says about items', () => {
+  const HEALTH_POTION = `<Object type="0xa22" id="Health Potion">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>10</SlotType>
+    <Tier>1</Tier>
+    <Activate amount="100">Heal</Activate>
+    <Consumable />
+    <Potion />
+    <QuickslotAllowed maxstack="6" />
+    <Labels>EQUIPMENT,CONSUMABLE,TIERED,LOOTABLE,T1,TRADEABLE</Labels>
+  </Object>`;
+
+  const ATTACK_POTION = `<Object type="0xa1f" id="Potion of Attack">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>10</SlotType>
+    <Tier>2</Tier>
+    <Activate stat="ATT" amount="1">IncrementStat</Activate>
+    <Consumable />
+    <Potion />
+    <Labels>EQUIPMENT,CONSUMABLE,STATPOTION</Labels>
+  </Object>`;
+
+  const LIFE_POTION = `<Object type="0xae9" id="Potion of Life">
+    <Class>Equipment</Class>
+    <Item />
+    <Tier>4</Tier>
+    <SlotType>10</SlotType>
+    <Activate stat="MAXHP" amount="5">IncrementStat</Activate>
+    <Consumable />
+    <Potion />
+    <Labels>EQUIPMENT,CONSUMABLE,STATPOTION</Labels>
+  </Object>`;
+
+  const XP_POTION = `<Object type="0xb28" id="XP Booster">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>10</SlotType>
+    <Activate stat="XP" amount="1">IncrementStat</Activate>
+    <Consumable />
+    <Potion />
+  </Object>`;
+
+  // Activates `Heal` and is not a potion: a tome is the reason the marker is
+  // read rather than the effect alone.
+  const HEALING_TOME = `<Object type="0xa5c" id="Tome of Purification">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>4</SlotType>
+    <Tier>3</Tier>
+    <Activate>Heal</Activate>
+    <Labels>EQUIPMENT,ABILITY,TIERED</Labels>
+  </Object>`;
+
+  const TIERED_BOW = `<Object type="0xb02" id="Bow of Covert Havens">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>3</SlotType>
+    <Tier>12</Tier>
+    <Labels>EQUIPMENT,WEAPON,BOW,TIERED,LOOTABLE,T12,T12_WEAPON</Labels>
+  </Object>`;
+
+  const UNTIERED_BOW = `<Object type="0x2301" id="Bow of the Morning Star">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>3</SlotType>
+    <Labels>EQUIPMENT,WEAPON,BOW,UT,TAB_UT,POWERTIER_B,TRADEABLE</Labels>
+  </Object>`;
+
+  const SET_ABILITY = `<Object type="0x2f4a" id="Toxin Sting">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>11</SlotType>
+    <Labels>EQUIPMENT,ABILITY,POISON,ST,TAB_ST,ST_ABILITY,STGEN_2</Labels>
+  </Object>`;
+
+  const SHARED_BAG = `<Object type="0x0500" id="Loot Bag 0">
+    <Class>Container</Class>
+    <Container />
+    <CanPutNormalObjects />
+    <Loot />
+    <Size>80</Size>
+    <SlotTypes>0, 0, 0, 0, 0, 0, 0, 0</SlotTypes>
+  </Object>`;
+
+  const SOULBOUND_BAG = `<Object type="0x0503" id="Soulbound Loot Bag">
+    <Class>Container</Class>
+    <Container />
+    <CanPutSoulboundObjects />
+    <Loot />
+    <Size>80</Size>
+    <SlotTypes>0, 0, 0, 0, 0, 0, 0, 0</SlotTypes>
+  </Object>`;
+
+  const VAULT_CHEST = `<Object type="0x0504" id="Vault Chest">
+    <Class>VaultContainer</Class>
+    <Container />
+    <CanPutNormalObjects />
+    <SlotTypes>0, 0, 0, 0, 0, 0, 0, 0</SlotTypes>
+  </Object>`;
+
+  const WIZARD = `<Object type="0x030e" id="Wizard">
+    <Class>Player</Class>
+    <Player />
+    <MaxHitPoints max="700">100</MaxHitPoints>
+    <MaxMagicPoints max="400">150</MaxMagicPoints>
+    <Attack max="60">23</Attack>
+    <Defense max="25">0</Defense>
+    <Speed max="50">17</Speed>
+    <Dexterity max="75">17</Dexterity>
+    <HpRegen max="40">5</HpRegen>
+    <MpRegen max="60">23</MpRegen>
+  </Object>`;
+
+  const EVERYTHING = [
+    HEALTH_POTION,
+    ATTACK_POTION,
+    LIFE_POTION,
+    XP_POTION,
+    HEALING_TOME,
+    TIERED_BOW,
+    UNTIERED_BOW,
+    SET_ABILITY,
+    SHARED_BAG,
+    SOULBOUND_BAG,
+    VAULT_CHEST,
+    WIZARD,
+  ];
+
+  async function catalog(): Promise<GameObjectCatalog> {
+    return new GameObjectCatalog(
+      await readObjectDefinitions(chunked(`<Objects>${EVERYTHING.join('')}</Objects>`)),
+    );
+  }
+
+  it('reads a text and an attribute off the same element', () => {
+    expect(elementText('<Activate stat="ATT" amount="1">IncrementStat</Activate>')).toBe(
+      'IncrementStat',
+    );
+    expect(elementText('<Potion />')).toBeUndefined();
+  });
+
+  it('names what each potion does, and which stat it raises', async () => {
+    const objects = await catalog();
+    expect(objects.item(0xa22)?.potion).toEqual({ kind: PotionKind.Heal, raises: undefined });
+    expect(objects.item(0xa1f)?.potion).toEqual({
+      kind: PotionKind.Permanent,
+      raises: 'attack',
+    });
+    expect(objects.item(0xae9)?.potion).toEqual({
+      kind: PotionKind.LifeOrMana,
+      raises: undefined,
+    });
+  });
+
+  it('does not call an experience booster a stat potion', async () => {
+    // `XP` arrives through the same effect as the six and is not one of them.
+    expect((await catalog()).item(0xb28)?.potion).toBeUndefined();
+  });
+
+  it('does not mistake a healing ability for a potion', async () => {
+    const tome = (await catalog()).item(0xa5c);
+    expect(tome).toBeDefined();
+    expect(tome?.potion).toBeUndefined();
+  });
+
+  it('reads the tier, and the untiered and set markers, from the labels', async () => {
+    const objects = await catalog();
+    expect(objects.item(0xb02)).toMatchObject({ slotType: 3, tier: 12, untiered: false });
+    expect(objects.item(0x2301)).toMatchObject({ slotType: 3, tier: undefined, untiered: true });
+    expect(objects.item(0x2f4a)).toMatchObject({ setItem: true, untiered: false });
+  });
+
+  it('reads how many of an item the potion belt will hold', async () => {
+    const objects = await catalog();
+    expect(objects.item(0xa22)?.beltStack).toBe(6);
+    // Everything the belt refuses says so by carrying no marker at all.
+    expect(objects.item(0xa1f)?.beltStack).toBe(0);
+    expect(objects.item(0xb02)?.beltStack).toBe(0);
+  });
+
+  it('says nothing about an object that is not an item', async () => {
+    const objects = await catalog();
+    expect(objects.item(0x0500)).toBeUndefined();
+    expect(objects.item(0x030e)).toBeUndefined();
+  });
+
+  it('counts a container"s slots and knows who may take from it', async () => {
+    const objects = await catalog();
+    expect(objects.container(0x0500)).toEqual({ slots: 8, shared: true });
+    expect(objects.container(0x0503)).toEqual({ slots: 8, shared: false });
+  });
+
+  it('leaves the vault chest out, because the file classes it apart', async () => {
+    // Anything looting containers would otherwise empty the vault.
+    expect((await catalog()).container(0x0504)).toBeUndefined();
+  });
+
+  it('reads a class"s stat ceilings, mapping vitality and wisdom to the regens', async () => {
+    expect((await catalog()).statMaxima(0x030e)).toEqual({
+      attack: 60,
+      defense: 25,
+      speed: 50,
+      dexterity: 75,
+      vitality: 40,
+      wisdom: 60,
+    });
+  });
+
+  it('has no ceilings for anything that is not a playable class', async () => {
+    expect((await catalog()).statMaxima(0xb02)).toBeUndefined();
+  });
+
+  it('answers nothing for everything before a data file is read', () => {
+    expect(EMPTY_CATALOG.item(0xa22)).toBeUndefined();
+    expect(EMPTY_CATALOG.container(0x0500)).toBeUndefined();
+    expect(EMPTY_CATALOG.statMaxima(0x030e)).toBeUndefined();
   });
 });

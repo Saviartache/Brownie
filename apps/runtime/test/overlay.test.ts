@@ -12,6 +12,8 @@ import {
 import { createPacket, decodeFrame, encodePacket } from '@brownie/protocol';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import { describe, expect, it } from 'vitest';
+import { StatType } from '../src/constants/StatType.js';
+import type { WeaponShot } from '../src/gamedata/EquippedWeapon.js';
 import { OverlayControlPlane, type OverlayTransport } from '../src/overlay/OverlayControlPlane.js';
 import { WorldStatusStage } from '../src/overlay/WorldStatusStage.js';
 import { PacketOrigin } from '../src/pipeline/PacketPipeline.js';
@@ -401,7 +403,7 @@ describe('WorldStatusStage', () => {
     return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
   }
 
-  function harness(): {
+  function harness(weapon?: (objectType: number) => WeaponShot | undefined): {
     world: WorldState;
     stage: WorldStatusStage;
     records: string[];
@@ -416,6 +418,7 @@ describe('WorldStatusStage', () => {
     const stage = new WorldStatusStage(world, {
       publish: (record) => records.push(record),
       now: () => box.at,
+      ...(weapon === undefined ? {} : { weapon }),
     });
     return {
       world,
@@ -460,5 +463,56 @@ describe('WorldStatusStage', () => {
 
     expect(h.records).toHaveLength(2);
     expect(h.records[1]).toContain('|300|400|');
+  });
+
+  // What the planner keeps the player inside comes out of a 35 MB data file
+  // nobody reads. Being able to see it next to the name it was read for is the
+  // whole point of the record.
+  describe('the weapon it reports', () => {
+    const BOW: WeaponShot = {
+      name: 'Bow of Covert Havens',
+      speedTilesPerMs: 0.016,
+      lifetimeMs: 440,
+      reachTiles: 7.04,
+    };
+    const holding = (world: WorldState, objectType: number): void => {
+      world.self.applyStats([{ id: StatType.Inventory0, value: objectType, stackCount: 0 }]);
+    };
+
+    it('names it, with the numbers the range was worked out from', () => {
+      const h = harness(() => BOW);
+      holding(h.world, 0xb06);
+      h.stage.handle(newtick(), context);
+
+      expect(h.records).toContain('weapon|Bow%20of%20Covert%20Havens|2822|1600|440|704');
+    });
+
+    it('says it once and not on every tick after it', () => {
+      const h = harness(() => BOW);
+      holding(h.world, 0xb06);
+      h.stage.handle(newtick(), context);
+      const said = h.records.filter((record) => record.startsWith('weapon|')).length;
+
+      h.at = 10_000;
+      h.world.self.moveTo(3, 4);
+      h.stage.handle(newtick(), context);
+
+      expect(h.records.filter((record) => record.startsWith('weapon|'))).toHaveLength(said);
+    });
+
+    it('reports an item the catalog does not describe, with its type', () => {
+      const h = harness(() => undefined);
+      holding(h.world, 0xb06);
+      h.stage.handle(newtick(), context);
+
+      expect(h.records).toContain('weapon||2822|0|0|0');
+    });
+
+    it('reports an empty hand as no weapon at all', () => {
+      const h = harness(() => BOW);
+      h.stage.handle(newtick(), context);
+
+      expect(h.records).toContain('weapon||-1|0|0|0');
+    });
   });
 });

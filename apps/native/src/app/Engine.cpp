@@ -1,7 +1,10 @@
 #include "app/Engine.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include <Windows.h>
@@ -143,7 +146,34 @@ constexpr float kMaxCursorWalkTiles = 30.0F;
 /// the token. See `Engine::AcceptFeature`.
 constexpr std::string_view kPlayerNoclipFeature = "player.noclip";
 constexpr std::string_view kCursorTrackFeature = "cursor.track";
+constexpr std::string_view kColliderFeature = "player.collider";
+constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultiplier";
 constexpr std::string_view kFeatureOn = "true";
+
+/// The number a feature value carries, or nothing when it does not carry one.
+///
+/// **Copied before it is parsed, because a view off the wire has no
+/// terminator** and `strtof` needs one. The buffer is longer than any number
+/// this reads and shorter than anything worth scanning: a value that does not
+/// fit is a value that is not a number.
+///
+/// A trailing character is a refusal rather than a prefix accepted — "0.5x" is
+/// not 0.5 — and so is anything the parse could not make finite.
+[[nodiscard]] std::optional<float> FeatureNumber(std::string_view value) noexcept {
+    constexpr std::size_t kMaxDigits = 31;
+    if (value.empty() || value.size() > kMaxDigits) {
+        return std::nullopt;
+    }
+    std::array<char, kMaxDigits + 1> text{};
+    std::memcpy(text.data(), value.data(), value.size());
+
+    char* end = nullptr;
+    const float parsed = std::strtof(text.data(), &end);
+    if (end != text.data() + value.size() || !std::isfinite(parsed)) {
+        return std::nullopt;
+    }
+    return parsed;
+}
 
 /// How much of a chunk to fill before sending it.
 ///
@@ -215,6 +245,10 @@ void Engine::AcceptRecord(std::string_view record) {
         world_dirty_ = true;
         return;
     }
+    if (overlay::ParseWeaponRecord(record, weapon_)) {
+        world_dirty_ = true;
+        return;
+    }
     // Stored, not acted on. Acting means calling into the game, and this is not
     // the thread that may — see `PlayerControl::Apply`.
     if (overlay::MoveCommand move; overlay::ParseMoveRecord(record, move)) {
@@ -255,11 +289,16 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     // "true" is what a boolean sent by a plugin arrives as. Anything else is
     // off, which is the safe answer for a switch nobody can see from here.
     //
-    // Both of these are *claims that expire*, and both for the same reason: on
-    // renews the lease, off ends it now, so switching the plugin off is
-    // immediate and only the ways it can stop *without* saying so wait the
-    // lease out. A key this build has never heard of is neither — the runtime
-    // replays every key it holds whenever the link comes up.
+    // Three of the four keys are *claims that expire*, and all three for the
+    // same reason: on renews the lease, off ends it now, so switching the
+    // plugin off is immediate and only the ways it can stop *without* saying so
+    // wait the lease out. A key this build has never heard of is neither — the
+    // runtime replays every key it holds whenever the link comes up.
+    //
+    // The fourth is not a claim but the number one of the claims applies, and
+    // it is stored whether or not that claim is live: it arrives ahead of the
+    // claim, and only when it has changed, so a value refused for arriving
+    // first would leave the claim acting on the number before it.
     const bool on = value == kFeatureOn;
     const std::uint64_t now = ::GetTickCount64();
 
@@ -270,6 +309,21 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     if (key == kCursorTrackFeature) {
         cursor_track_until_ms_.store(on ? now + kCursorTrackLeaseMs : 0,
                                      std::memory_order_relaxed);
+        return;
+    }
+    if (key == kColliderFeature) {
+        collider_until_ms_.store(on ? now + kColliderLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kColliderMultiplierFeature) {
+        // Clamped rather than trusted. The plugin's slider cannot leave this
+        // range, but the module is not the plugin's to believe: a value above
+        // one is a *larger* collision circle than the game built, which is the
+        // one outcome nobody could ask for on purpose.
+        const auto parsed = FeatureNumber(value);
+        if (parsed.has_value()) {
+            collider_multiplier_.store(std::clamp(*parsed, 0.0F, 1.0F), std::memory_order_relaxed);
+        }
     }
 }
 
@@ -977,6 +1031,7 @@ void Engine::PublishModel() {
 
     overlay::OverlayModel model;
     model.world = world_;
+    model.weapon = weapon_;
     model.memory = binding_.reading();
     model.plugins = controls_.plugins();
     model.controls_version = controls_.version();
@@ -1052,10 +1107,14 @@ void Engine::DrawFrame() {
     // The same argument, and the same thread: what the operator switched on is
     // held in the overlay's own state, but a switch that only acted while the
     // window happened to be open would be a switch that turns itself off.
+    // And the collision circle, which is the one thing here both sides can ask
+    // for: `ColliderWanted` is where the overlay's switch and the runtime's
+    // claim become the single number there is a single field for.
+    const std::optional<float> collider = ColliderWanted(now);
     patches_.Want({frame_ui_.health_bar_tint,
                    game::UiColor{frame_ui_.tint_colour[0], frame_ui_.tint_colour[1],
                                  frame_ui_.tint_colour[2], frame_ui_.tint_colour[3]},
-                   frame_ui_.no_hitbox});
+                   collider});
     patches_.Apply(now);
 
     // The same argument again, and this one is a store: what the switch says is
@@ -1085,7 +1144,11 @@ void Engine::DrawFrame() {
     frame_model_.tint_installed = patches_.tint_installed();
     frame_model_.tinted = patches_.tinted();
     frame_model_.collision_bound = patches_.collision_bound();
-    frame_model_.collisions_cleared = patches_.collisions_cleared();
+    frame_model_.collisions_written = patches_.collisions_written();
+    // What is being asked for, not merely that something is: with two askers
+    // and one of them a plugin, "on" without the number says nothing about
+    // which of them the panel is describing.
+    frame_model_.collision_scale = collider;
     frame_model_.shot_noclip_installed = shot_noclip_.installed();
     frame_model_.shots_passed = shot_noclip_.passed();
     frame_model_.walk_noclip_wanted = walk_wanted;

@@ -72,11 +72,19 @@ const CURSOR_FEATURE_KEY = 'cursor.track';
  */
 const CURSOR_CLAIM_INTERVAL_MS = 1000;
 
-/** How the player's own shots move, from the game's own data. */
+/**
+ * How the player's own shots move, from the game's own data.
+ *
+ * Resolved once per weapon by `gamedata/EquippedWeapon` — the reach in
+ * particular is worked out there rather than here, because it is not always the
+ * product of the other two and two features want the same answer.
+ */
 export interface WeaponProjectile {
   /** Tiles per millisecond. */
   readonly speedTilesPerMs: number;
   readonly lifetimeMs: number;
+  /** How far one gets before it expires, in tiles. */
+  readonly reachTiles: number;
 }
 
 export interface AimOutput {
@@ -140,13 +148,6 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
     },
 
     setup(context) {
-      const maxRange = context.settings.range('maxRangeTiles', {
-        label: 'Maximum range (tiles)',
-        default: 8,
-        min: 1,
-        max: 15,
-        step: 0.5,
-      });
       const priority = context.settings.select<TargetPriority>('priority', {
         label: 'Aim at',
         default: TargetPriority.Closest,
@@ -269,11 +270,15 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const projectile = self.weaponType < 0 ? undefined : options.weapon(self.weaponType);
         if (projectile === undefined) return;
 
-        // The shot's own reach bounds the setting rather than the other way
-        // round: a range longer than the weapon has is an aim at something the
-        // shot expires before reaching.
-        const reach = projectile.speedTilesPerMs * projectile.lifetimeMs;
-        const range = Math.min(maxRange.get(), reach);
+        // **The weapon's own reach, and there is no setting.** How far to aim is
+        // not a preference: a target further off than the shot travels is one
+        // the shot expires before reaching, and a target nearer than that is one
+        // there was never a reason to skip. There was a slider here, defaulting
+        // to eight tiles, which was simply wrong for every weapon in the game
+        // that is not eight tiles — short for a wand, long for a sword, and
+        // silently either way. The figure comes from `objects.xml` and can be
+        // read off the World tab beside the name of the weapon it came from.
+        const range = projectile.reachTiles;
         const lead = leadPercent.get() / 100;
 
         const aimPointFor = (enemy: EntityView): { x: number; y: number } | undefined => {

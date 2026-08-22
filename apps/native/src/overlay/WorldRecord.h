@@ -3,7 +3,8 @@
 // The record is `|`-separated and its fields are integers only — see
 // `apps/runtime/src/overlay/WorldStatusStage.ts`, which is where the decision to
 // send numbers rather than text was made. That is what lets this be a split and
-// a parse instead of a percent-decoder.
+// a parse instead of a percent-decoder. The weapon record at the bottom is the
+// one exception, and says why.
 //
 // **A record this does not recognise is ignored.** `docs/ipc.md` makes that a
 // rule rather than a courtesy: a newer runtime describing something this build
@@ -26,6 +27,18 @@ namespace brownie::overlay {
 /// worse than none: it would draw a position of zero as though the player were
 /// standing at the corner of the map.
 [[nodiscard]] bool ParseWorldRecord(std::string_view record, WorldStatus& out) noexcept;
+
+/// Parses `weapon|<name>|<type>|<speed>|<lifetimeMs>|<range>`.
+///
+/// **The one status record with text in it**, so unlike the rest of this file it
+/// goes through `SplitRecord` and its percent-decoding. Kept here anyway because
+/// it is the same kind of thing — the runtime describing the player's state for
+/// the overlay to show — and a third file for one parser is a worse trade than
+/// one exception stated out loud.
+///
+/// A weapon the runtime could not describe still parses: the name is empty and
+/// the numbers are nought, which is what `WeaponStatus::described` reports.
+[[nodiscard]] bool ParseWeaponRecord(std::string_view record, WeaponStatus& out);
 
 /// Where to walk, how fast the step may be, and how long the target stands.
 struct MoveCommand {

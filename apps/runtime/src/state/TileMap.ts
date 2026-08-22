@@ -11,11 +11,21 @@ import type { TileView } from '@brownie/plugin-api';
 export interface TileCatalog {
   isDamaging(tileType: number): boolean;
   isBlocking(tileType: number): boolean;
+  /**
+   * Whether standing on one of these carries the character along.
+   *
+   * `<Push />` in `tiles.xml`, and nothing on the wire says so: a conveyor
+   * arrives as an ordinary ground type and the *client* is what reads the
+   * marker and moves the player. Which is why a feature that does not want to
+   * be moved changes what the client is told the ground is.
+   */
+  isPushing(tileType: number): boolean;
 }
 
 export const EMPTY_TILE_CATALOG: TileCatalog = {
   isDamaging: () => false,
   isBlocking: () => false,
+  isPushing: () => false,
 };
 
 /**
