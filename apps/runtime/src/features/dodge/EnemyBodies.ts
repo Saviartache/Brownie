@@ -90,6 +90,22 @@ export const OUT_OF_RANGE_CAP_TILES = 2;
  */
 export const MAX_BODY_LOOKAHEAD_MS = 600;
 
+/**
+ * How fast a body has to be coming at you before it counts as coming at you.
+ *
+ * **The line between "it is chasing me" and "I walked over there".** Both close
+ * the gap and only the first is the planner's business — a player heading for a
+ * portal, a bag or the next room walks past monsters the whole way, and a dodge
+ * that reads their own approach as danger is one that will not let them
+ * navigate. What separates the two is which body is doing the closing, and that
+ * is a question about the *monster's* velocity alone.
+ *
+ * Above the noise a smoothed per-tick velocity carries and below anything that
+ * is actually walking at somebody: a server tick moves an entity in one jump,
+ * so a monster standing still still reports a twitch.
+ */
+export const MIN_CLOSING_TILES_PER_SECOND = 1;
+
 /** The distances a place is judged against. See the file's note. */
 export interface StandoffBand {
   /** Never nearer to a monster than this. Raised to the contact distance. */
@@ -198,6 +214,37 @@ export class EnemyBodies {
       return Math.min(nearest - band.stayWithinTiles, OUT_OF_RANGE_CAP_TILES);
     }
     return 0;
+  }
+
+  /**
+   * Whether anything already inside the near edge is walking towards a place.
+   *
+   * **Not "is the gap closing" — "is something closing it".** The gap between a
+   * player and a monster shrinks just as fast when the player walks at it, and
+   * that is a route, not a threat. Only the body's own velocity is read here,
+   * so a boss standing where the player chose to stand next to it says no and a
+   * minion running them down says yes.
+   *
+   * Any body inside the near edge will do rather than the nearest one: being
+   * run down by the second-closest of two is being run down.
+   */
+  closingOn(x: number, y: number, band: StandoffBand): boolean {
+    const keepAway = Math.max(band.keepAwayTiles, CONTACT_TILES);
+    const closing = MIN_CLOSING_TILES_PER_SECOND / 1000;
+
+    for (let i = 0; i < this.#count; i += 1) {
+      const dx = x - (this.#x[i] ?? 0);
+      const dy = y - (this.#y[i] ?? 0);
+      const distance = Math.hypot(dx, dy);
+      if (distance >= keepAway) continue;
+      // On top of us already, so there is no direction to be closing along and
+      // nothing left to wait for.
+      if (distance === 0) return true;
+      // How fast it is eating the gap, which is its velocity along the line
+      // between the two.
+      if (((this.#vx[i] ?? 0) * dx + (this.#vy[i] ?? 0) * dy) / distance > closing) return true;
+    }
+    return false;
   }
 
   #grow(): void {

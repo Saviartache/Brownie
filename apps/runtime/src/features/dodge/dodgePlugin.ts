@@ -731,6 +731,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         canStand: (x, y) => mapView?.canStandAt(x, y, clearance) ?? false,
         isDamaging: (x, y) => damagingMatters && (mapView?.tileAt(x, y)?.damaging ?? false),
         standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
+        closingOn: (x, y) => bodies.closingOn(x, y, band),
       };
 
       let lastPlanAtMs = 0;

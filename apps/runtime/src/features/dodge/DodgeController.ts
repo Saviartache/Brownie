@@ -196,6 +196,17 @@ export interface DodgeWorld extends Ground {
    *   walked up to from one that is walking up to the player.
    */
   standoffAt(x: number, y: number, aheadMs: number): number;
+  /**
+   * Whether anything already inside the near edge is walking towards a place.
+   *
+   * **The one question that decides whether being crowded may overrule the
+   * player's own walking.** A gap closing because they are heading somewhere is
+   * a route — to a portal, a bag, the next room — and a planner that reads it as
+   * danger cannot be navigated past a monster. A gap closing because something
+   * is running them down is not theirs to have chosen. See
+   * `EnemyBodies.closingOn`.
+   */
+  closingOn(x: number, y: number): boolean;
 }
 
 /** The course that stays put. Always index nought, always considered. */
@@ -446,6 +457,17 @@ export class DodgeController {
   #hereStandoff = 0;
 
   /**
+   * Whether being crowded is something the player is doing to themselves.
+   *
+   * True while they are steering and nothing inside the bubble is coming at
+   * them — which is what walking somewhere past a monster looks like. Read by
+   * the release test and by {@link #choose}, and both have to agree: releasing
+   * on it while the bar in the scoring still insisted on leaving the bubble
+   * would hand the wheel back on one plan and take it on the next.
+   */
+  #yielding = false;
+
+  /**
    * The course last committed to, and until when it stands.
    *
    * **Held is a flag rather than "the direction is not nought", because holding
@@ -605,6 +627,14 @@ export class DodgeController {
     this.#hereStandoff = world.standoffAt(situation.x, situation.y, 0);
     this.#crowded = this.#hereStandoff < 0;
     const crowded = this.#crowded;
+    // **Their own route, and it is not the planner's business.** Crowding used
+    // to stand down whenever a key was down, which meant it never acted at all;
+    // the correction to that then read *any* shrinking gap as trouble, so a
+    // player walking to a portal was steered off it every time their path went
+    // near a monster. What separates the two is which of the pair is doing the
+    // closing, and only the monster's own velocity can say. A player with their
+    // hands off the keys has chosen nothing, so nothing is yielded to.
+    this.#yielding = steering && !world.closingOn(situation.x, situation.y);
     const tracked = this.#field.tracked;
     // Shots in flight and blasts on their way down. Either is a reason to think.
     const incoming = tracked + this.#blasts.count;
@@ -669,19 +699,11 @@ export class DodgeController {
     // something close and being about to be hit by anything at all are both
     // reasons to stay.
     const ownImpact = this.#impactMs[own] ?? Infinity;
-    // **Being crowded only keeps the wheel while their own walking is not
-    // dealing with it.** Somebody stepping away from a monster that closed on
-    // them is already doing the right thing and must not be argued with;
-    // somebody walking into one, along one, or standing still is not, and that
-    // is the case the whole band exists for. Measured as "does this course end
-    // better placed than standing here does" rather than by asking which keys
-    // are down.
-    const makingRoom = (this.#standoff[own] ?? 0) < standoffCost(this.#hereStandoff);
     if (
       ownUnsafeAt > releaseBar &&
       ownImpact > releaseBar &&
       ownHazard > HAZARD_GUARD_MS &&
-      (!crowded || makingRoom) &&
+      (!crowded || this.#yielding) &&
       !committed
     ) {
       // Their course is fine for as long as this decision is about. Nothing to
@@ -1024,17 +1046,19 @@ export class DodgeController {
     this.#bars.windowMs = reactWithinMs;
     this.#bars.impactMs = reactWithinMs;
     this.#bars.roomTiles = -Infinity;
-    // **And when something is inside the bubble, a course has to be getting out
-    // of it.** This is the branch a crowded player reaches, and every term that
-    // measures where a course leaves us sits below the one that prefers the
-    // heading they are pressing — so their own course won outright and the
+    // **And when something is walking onto us, a course has to be getting out
+    // of the way.** This is the branch a crowded player reaches, and every term
+    // that measures where a course leaves us sits below the one that prefers
+    // the heading they are pressing — so their own course won outright and the
     // planner watched a monster walk onto them without a word. A bar rather
     // than a reordering, because that is what the other three are: survival
     // still comes first, and among the courses that survive *and* make room,
-    // theirs is still preferred.
-    this.#bars.standoff = this.#crowded
-      ? inQuanta(standoffCost(this.#hereStandoff), STANDOFF_QUANTUM_TILES)
-      : Infinity;
+    // theirs is still preferred. Lifted entirely while they are the ones
+    // closing the gap: that is a route, not a mistake to correct.
+    this.#bars.standoff =
+      this.#crowded && !this.#yielding
+        ? inQuanta(standoffCost(this.#hereStandoff), STANDOFF_QUANTUM_TILES)
+        : Infinity;
     return this.#mostAligned(scored, situation, true);
   }
 

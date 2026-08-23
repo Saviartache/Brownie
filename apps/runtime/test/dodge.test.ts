@@ -105,6 +105,7 @@ const OPEN_GROUND: DodgeWorld = {
   canStand: () => true,
   isDamaging: () => false,
   standoffAt: () => 0,
+  closingOn: () => false,
 };
 
 /** Open ground with monsters in it, judged against one band. */
@@ -113,6 +114,7 @@ function standingOff(bodies: EnemyBodies, band: StandoffBand): DodgeWorld {
     canStand: () => true,
     isDamaging: () => false,
     standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
+    closingOn: (x, y) => bodies.closingOn(x, y, band),
   };
 }
 
@@ -945,6 +947,7 @@ describe('where it refuses to go', () => {
     canStand: () => true,
     isDamaging: (x) => x > edge,
     standoffAt: () => 0,
+    closingOn: () => false,
   });
 
   it('steers the player around ground that is about to hurt them', () => {
@@ -993,6 +996,7 @@ describe('where it refuses to go', () => {
       canStand: (_x, y) => y <= 10.2,
       isDamaging: () => false,
       standoffAt: () => 0,
+      closingOn: () => false,
     };
     const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
 
@@ -1167,6 +1171,29 @@ describe('the distance to fight from', () => {
     expect(bodies.standoffAt(0, 0, BAND, 600)).toBeCloseTo(-0.6, 6);
   });
 
+  // **Which of the pair is closing the gap, which is a different question from
+  // whether it is closing.** A player walking at a monster shrinks the distance
+  // exactly as fast as a monster walking at the player.
+  it('tells something walking at you from something you walked at', () => {
+    const chased = new EnemyBodies();
+    chased.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
+    expect(chased.closingOn(0, 0, BAND)).toBe(true);
+
+    const still = new EnemyBodies();
+    still.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, ANY_BODY);
+    expect(still.closingOn(0, 0, BAND)).toBe(false);
+
+    const leaving = new EnemyBodies();
+    leaving.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, chasing(6, 0));
+    expect(leaving.closingOn(0, 0, BAND)).toBe(false);
+  });
+
+  it('is not alarmed by something charging about outside the near edge', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
+    expect(bodies.closingOn(0, 0, BAND)).toBe(false);
+  });
+
   // A velocity carried a whole second is a claim about a decision the monster
   // has not made yet.
   it('stops believing a velocity long before the horizon does', () => {
@@ -1256,6 +1283,27 @@ describe('keeping the fight', () => {
     // is the most it should. Still broadly the way they were going.
     expect(plan.dirY).not.toBe(0);
     expect(plan.dirX).toBeGreaterThan(0);
+  });
+
+  // **Walking somewhere is not a mistake to correct.** A route to a portal, a
+  // bag or the next room goes past monsters the whole way, and the gap closing
+  // because the player is heading that way reads exactly like the gap closing
+  // because something is heading at them — until you ask which of the two is
+  // moving. Live report: "why will you not let me get to the portals?"
+  it('lets the player walk past a monster that is standing still', () => {
+    const controller = new DodgeController();
+    const bodies = new EnemyBodies();
+    // Right beside the route, well inside the band, and going nowhere.
+    bodies.collect([{ x: 12, y: 10.5 } as EntityView], 11, 10, 12, ANY_BODY);
+
+    const plan = controller.plan(
+      situation({ x: 11, y: 10, intentX: 1, intentY: 0 }),
+      SETTINGS,
+      standingOff(bodies, CLOSE_BAND),
+      [],
+    );
+
+    expect(plan.steer).toBe(false);
   });
 
   // And the other side of the same test: something standing still is something
