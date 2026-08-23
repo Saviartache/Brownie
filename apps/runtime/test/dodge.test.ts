@@ -2387,6 +2387,12 @@ describe('when the plugin decides', () => {
       enemies?: readonly EntityView[];
       /** Which types the catalog calls scenery — a lever, a pot, a monument. */
       scenery?: (objectType: number) => boolean;
+      /**
+       * Which types the catalog says have an attack. An ordinary monster does,
+       * which is why that is the default; a spawner is exactly the thing that
+       * does not.
+       */
+      shots?: (objectType: number) => boolean;
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -2440,6 +2446,7 @@ describe('when the plugin decides', () => {
         isObstacle: () => false,
         isInvincible: () => false,
         isScenery: map.scenery ?? ((): boolean => false),
+        hasShots: map.shots ?? ((): boolean => true),
         bodyTiles: () => undefined,
       }),
     );
@@ -2468,6 +2475,19 @@ describe('when the plugin decides', () => {
         );
       },
     };
+  }
+
+  /**
+   * How many monsters the last published picture drew a body for.
+   *
+   * The circles are the complaint itself — "there is a no-go ring round empty
+   * floor" — so what the culling rule is asserted against is the picture rather
+   * than the move it happened to produce, which is a decision several other
+   * settings also have a say in.
+   */
+  function bodiesDrawn(showPicture: ReturnType<typeof vi.fn>): number {
+    const marks = (showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    return marks.filter((mark) => mark.kind === DodgeMarkKind.Body).length;
   }
 
   it('acts on a shot that has come close enough, with no packet to prompt it', () => {
@@ -2674,6 +2694,66 @@ describe('when the plugin decides', () => {
     const crowded = underFire(0, { enemies: [lever] });
     crowded.plan();
     expect(crowded.moveBy).toHaveBeenCalled();
+  });
+
+  // **The live report: a room full of no-go circles around empty floor.** A
+  // spawner is `<Enemy/>` with a health bar, is not a wall, is not a structure
+  // kill, is not marked invincible, and the game draws it as nothing — so it
+  // passed every cull there was and the planner spent the fight walking around
+  // places where there was nobody. What gives it away is that it has no attack
+  // in the game's own data *and* has never gone anywhere.
+  it('keeps no distance from a spawner that has never moved and cannot fire', () => {
+    const spawner = {
+      objectId: 9,
+      objectType: 700,
+      x: 11,
+      y: 10,
+      hp: 4000,
+      maxHp: 4000,
+    } as EntityView;
+
+    const beside = underFire(0, { enemies: [spawner], shots: (type) => type !== 700 });
+    beside.view.on = true;
+    beside.tick();
+    beside.tick();
+    beside.plan();
+    // Nothing drawn on the ground where there is nothing, and no reason to
+    // leave a place that is empty.
+    expect(bodiesDrawn(beside.showPicture)).toBe(0);
+    expect(beside.moveBy).not.toHaveBeenCalled();
+
+    // The same entity in the same place, and the only difference is that the
+    // catalog says this one shoots.
+    const crowded = underFire(0, { enemies: [spawner] });
+    crowded.tick();
+    crowded.tick();
+    crowded.plan();
+    expect(crowded.moveBy).toHaveBeenCalled();
+  });
+
+  // Either half alone describes an ordinary monster: a melee minion has no
+  // shots of its own, and anything at all has yet to move on the tick it comes
+  // into view. So one step is all it takes to become a body again.
+  it('starts keeping its distance the moment the thing takes a step', () => {
+    const walker = { objectId: 9, objectType: 700, x: 12, y: 10, hp: 4000, maxHp: 4000 };
+    const { plan, tick, clock, showPicture, view } = underFire(0, {
+      enemies: [walker as EntityView],
+      shots: () => false,
+    });
+    view.on = true;
+
+    tick();
+    plan();
+    expect(bodiesDrawn(showPicture)).toBe(0);
+
+    // A tile east over one server tick, which is a minion closing.
+    walker.x = 11;
+    clock.ms = 200;
+    tick();
+    // Twice, because the picture goes out slower than a plan is made.
+    plan();
+    plan();
+    expect(bodiesDrawn(showPicture)).toBe(1);
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
@@ -2920,6 +3000,7 @@ describe('the hit redirect', () => {
         isObstacle: () => false,
         isInvincible: () => false,
         isScenery: () => false,
+        hasShots: () => true,
         bodyTiles: () => undefined,
       }),
     );

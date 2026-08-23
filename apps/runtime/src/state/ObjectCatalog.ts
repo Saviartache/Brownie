@@ -106,6 +106,20 @@ export interface ObjectCatalog {
    */
   projectile(objectType: number, bulletType: number): ProjectileDefinition | undefined;
   /**
+   * Whether one of these has any attack at all.
+   *
+   * **The game's own answer to "could this thing ever hurt anybody".** A
+   * spawner, a spawn anchor, an emitter and a room controller declare no
+   * `<Projectile>` between them, because firing is not what they are for — and
+   * nothing else in the file separates them from a monster, since they carry
+   * `<Enemy />` and a health bar exactly as it does.
+   *
+   * Not a licence to ignore one on its own: plenty of real monsters are melee
+   * and declare no shots either. It is half of a test, and the other half is
+   * whether the thing has ever been seen to move — see `DodgeScene`.
+   */
+  hasShots(objectType: number): boolean;
+  /**
    * What one of these is as an item — its slot, its tier, whether drinking it
    * does anything.
    *
@@ -140,6 +154,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   bodyTiles: () => undefined,
   displayName: () => undefined,
   projectile: () => undefined,
+  hasShots: () => false,
   item: () => undefined,
   container: () => undefined,
   statMaxima: () => undefined,

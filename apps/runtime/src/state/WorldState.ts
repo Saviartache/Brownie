@@ -56,7 +56,7 @@ export class WorldState implements WorldView {
   // what a plugin reads through.
   readonly entityStore: EntityStore;
   readonly tileMap: TileMap;
-  readonly projectileStore = new ProjectileStore();
+  readonly projectileStore: ProjectileStore;
   readonly blastStore: BlastStore;
   /** The catalog in use, so the state stage can look a shot up. */
   readonly objects: ObjectCatalog;
@@ -83,9 +83,32 @@ export class WorldState implements WorldView {
     this.objects = options.objects ?? EMPTY_CATALOG;
     this.entityStore = new EntityStore(this.objects);
     this.tileMap = new TileMap(options.tiles ?? EMPTY_TILE_CATALOG);
+    // Built here rather than as a field, because a shot's flight is worked out
+    // against the two stores above and a field initialiser runs before they
+    // exist.
+    this.projectileStore = new ProjectileStore(this.#stopsShots);
     this.blastStore = new BlastStore(options.blastRadii);
     this.#now = options.now ?? Date.now;
   }
+
+  /**
+   * Whether a shot entering this square is stopped by it.
+   *
+   * **The same two sources as {@link canStandAt}, and deliberately not the same
+   * question.** That one is about a body, so it asks whether the player's
+   * corners fit and refuses ground nobody has described; a bullet is a point
+   * that dies in the square it enters, and ground nobody has described is not a
+   * wall — the server sends the tiles around the player and no further, so
+   * calling the edge of what is known a wall would delete every shot fired from
+   * beyond it. The safe direction here is the opposite one: a shot believed a
+   * moment too long costs a needless sidestep, a shot deleted while it is still
+   * flying costs the run.
+   */
+  readonly #stopsShots = (tileX: number, tileY: number): boolean => {
+    const tile = this.tileMap.at(tileX, tileY);
+    if (tile === undefined) return false;
+    return tile.blocking || this.entityStore.blocksAt(tileX, tileY);
+  };
 
   get map(): MapInfo {
     return this.#map;

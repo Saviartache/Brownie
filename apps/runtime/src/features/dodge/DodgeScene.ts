@@ -249,6 +249,19 @@ export class DodgeScene {
   readonly #read = (enemy: EntityView): BodySighting | undefined => {
     if (this.#catalog.isScenery(enemy.objectType)) return undefined;
     if (!isShootable(enemy, this.#shootable)) return undefined;
+    // **A spawner passes every one of the culls above, and there is nothing
+    // there.** It answers to `<Enemy/>`, it carries a health bar, it is neither
+    // a wall nor a structure kill nor marked invincible, and the game draws it
+    // as empty floor — so the live report was a room full of no-go circles
+    // around nothing, in the middle of the fight the player was trying to walk
+    // through. What gives it away is the pair: it declares no shot in the
+    // game's own data, and it has never gone anywhere. Either alone is an
+    // ordinary monster — a melee minion has no shots, and anything standing
+    // still has not moved yet — so a body has to fail both before it is
+    // dropped, and a fixture that ever takes a step becomes one from then on.
+    if (!this.#catalog.hasShots(enemy.objectType) && !this.#motion.hasMoved(enemy.objectId)) {
+      return undefined;
+    }
 
     // **Where it is now, not where the last tick put it.** Sightings arrive five
     // times a second and a plan is made fifty, so the raw sample is a body

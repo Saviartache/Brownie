@@ -412,6 +412,7 @@ describe('StateStage', () => {
         bodyTiles: () => undefined,
         displayName: () => undefined,
         projectile: () => definition,
+        hasShots: () => true,
         item: () => undefined,
         container: () => undefined,
         statMaxima: () => undefined,
@@ -471,6 +472,63 @@ describe('StateStage', () => {
       const { world, feed } = fired(shooter({ multiHit: true }));
       feed(packetOf('PLAYERHIT', { bulletId: 7, objectId: 42 }), FROM_CLIENT);
       expect(world.projectileStore.size).toBe(1);
+    });
+
+    // **The acknowledgement only ever covers the shots the client resolved, and
+    // it arrives a round trip late.** Where the walls are is already known, and
+    // so is the curve, so the flight is worked out when the shot is announced
+    // rather than waited for.
+    it('ends a shot at the wall it flies into without being told', () => {
+      const WALL = 2;
+      const tiles: TileCatalog = {
+        isDamaging: () => false,
+        isBlocking: (type) => type === WALL,
+        isPushing: () => false,
+      };
+      const world = new WorldState({ objects: shooter({ speed: 100 }), tiles });
+      const stage = new StateStage(world);
+      const feed = (packet: MutablePacket): void => {
+        stage.handle(packet, FROM_SERVER);
+      };
+
+      feed(
+        packetOf('UPDATE', {
+          position: { x: 0, y: 0 },
+          levelType: 0,
+          // Five tiles east of the shooter, straight across its line of fire.
+          tiles: [{ x: 5, y: 0, type: WALL }],
+          newObjs: [{ objectType: 1000, status: status(42, 0.5, 0.5) }],
+          drops: [],
+        }),
+      );
+      feed(
+        packetOf('ENEMYSHOOT', {
+          bulletId: 7,
+          ownerId: 42,
+          bulletType: 0,
+          position: { x: 0.5, y: 0.5 },
+          angle: 0,
+          damage: 10,
+          numShots: 1,
+          angleInc: 0,
+        }),
+      );
+
+      // Four and a half tiles at a hundredth of a tile a millisecond, out of a
+      // four-second life it will never see the end of.
+      const [shot] = [...world.projectileStore.values(0)];
+      expect(shot?.expiresAtMs).toBeGreaterThan(400);
+      expect(shot?.expiresAtMs).toBeLessThan(460);
+      expect(shot?.positionAt(1000)).toBeUndefined();
+    });
+
+    // The server sends the tiles around the player and no further, so the edge
+    // of what is known is not a wall. Reading it as one would delete every shot
+    // fired from off screen — which is the dangerous direction.
+    it('flies a shot straight through ground nobody has described', () => {
+      const { world } = fired(shooter({ speed: 100 }));
+      const [shot] = [...world.projectileStore.values(0)];
+      expect(shot?.expiresAtMs).toBe(4000);
     });
 
     // The acknowledgement is the *client* speaking. One arriving the other way
@@ -539,6 +597,7 @@ describe('classification', () => {
       bodyTiles: () => undefined,
       displayName: () => undefined,
       projectile: () => undefined,
+      hasShots: () => false,
       item: () => undefined,
       container: () => undefined,
       statMaxima: () => undefined,
@@ -764,6 +823,7 @@ describe('blasts on their way down', () => {
     bodyTiles: () => undefined,
     displayName: () => undefined,
     projectile: () => undefined,
+    hasShots: () => false,
     item: () => undefined,
     container: () => undefined,
     statMaxima: () => undefined,

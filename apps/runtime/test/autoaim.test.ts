@@ -162,6 +162,37 @@ describe('MotionTracker', () => {
     expect(carried).toBeLessThan(2 + 0.01 * 1000);
   });
 
+  // **Not the same claim as having a velocity.** Two sightings of a thing that
+  // has not budged derive a velocity of nought perfectly well, and what tells a
+  // monster from a spawn anchor is whether it has ever gone anywhere at all.
+  it('tells a thing that has walked from one that has only been measured', () => {
+    const tracker = new MotionTracker();
+    tracker.observe(1, 5, 5, 0);
+    expect(tracker.hasMoved(1)).toBe(false);
+
+    tracker.observe(1, 5, 5, 200);
+    expect(tracker.motionAt(1, 200)).toBeDefined();
+    expect(tracker.hasMoved(1)).toBe(false);
+
+    tracker.observe(1, 6, 5, 400);
+    expect(tracker.hasMoved(1)).toBe(true);
+    // And it stays true once it stops: having walked is a fact about what the
+    // thing is, not about what it is doing this tick.
+    tracker.observe(1, 6, 5, 600);
+    expect(tracker.hasMoved(1)).toBe(true);
+  });
+
+  it('does not call a rounding a step', () => {
+    const tracker = new MotionTracker();
+    tracker.observe(1, 5, 5, 0);
+    tracker.observe(1, 5.01, 4.99, 200);
+    expect(tracker.hasMoved(1)).toBe(false);
+  });
+
+  it('knows nothing about an entity it has never seen', () => {
+    expect(new MotionTracker().hasMoved(99)).toBe(false);
+  });
+
   it('forgets what it has not seen, so it cannot grow without bound', () => {
     const tracker = new MotionTracker();
     tracker.observe(1, 0, 0, 0);

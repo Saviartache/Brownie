@@ -42,6 +42,16 @@ const BLEND = 0.5;
 const STALE_MS = 1000;
 
 /**
+ * How far an entity has to shift before it counts as having moved, in tiles.
+ *
+ * Positions arrive as the server's own floats and a thing standing still
+ * reports the same pair every tick, so this is not noise filtering — it is the
+ * guard against a rounding or a server correction of a hundredth of a tile
+ * reading as "this thing walks".
+ */
+const MOVED_TILES = 0.05;
+
+/**
  * How far past its last sighting a track may be carried.
  *
  * A little over one server tick: filling the gap between two sightings is what
@@ -58,6 +68,15 @@ interface Track {
   velocityY: number;
   /** Whether a velocity has been derived at all, as against assumed to be nil. */
   moving: boolean;
+  /**
+   * Whether it has ever actually gone anywhere.
+   *
+   * Not the same claim as {@link moving}, which is true the moment two
+   * sightings can be subtracted and stays true of something that has never
+   * shifted a tile. This one is what tells a monster from a fixture — see
+   * {@link MotionTracker.hasMoved}.
+   */
+  moved: boolean;
 }
 
 /**
@@ -87,12 +106,26 @@ export class MotionTracker {
   observe(objectId: number, x: number, y: number, atMs: number): void {
     const track = this.#tracks.get(objectId);
     if (track === undefined) {
-      this.#tracks.set(objectId, { x, y, atMs, velocityX: 0, velocityY: 0, moving: false });
+      this.#tracks.set(objectId, {
+        x,
+        y,
+        atMs,
+        velocityX: 0,
+        velocityY: 0,
+        moving: false,
+        moved: false,
+      });
       return;
     }
 
     const elapsed = atMs - track.atMs;
     if (elapsed <= 0) return;
+    // Kept across a stale gap and across a stop, unlike the velocity: having
+    // walked once is a fact about what the thing is, and the answer wanted is
+    // "can this go anywhere", not "is it going somewhere this instant".
+    if (Math.abs(x - track.x) > MOVED_TILES || Math.abs(y - track.y) > MOVED_TILES) {
+      track.moved = true;
+    }
     if (elapsed > STALE_MS) {
       track.x = x;
       track.y = y;
@@ -144,6 +177,25 @@ export class MotionTracker {
       velocityX: track.velocityX,
       velocityY: track.velocityY,
     };
+  }
+
+  /**
+   * Whether this one has ever been seen to go anywhere.
+   *
+   * **The one thing that tells a monster from a fixture without asking the
+   * catalog**, and the catalog cannot answer it: a spawn anchor, an emitter and
+   * a room controller are `<Enemy />` with a health bar, exactly as the thing
+   * chasing the player is, and better than a quarter of the file's enemies are
+   * one. What separates them is that they stand still forever, and that is
+   * visible from two sightings.
+   *
+   * False for something seen only once, which every entity is on the tick it
+   * comes into view. Reading it as "harmless" would be wrong; reading it as "no
+   * evidence yet" is what it means, and a caller acting on it should want the
+   * evidence rather than its absence.
+   */
+  hasMoved(objectId: number): boolean {
+    return this.#tracks.get(objectId)?.moved ?? false;
   }
 
   /**

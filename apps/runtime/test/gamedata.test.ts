@@ -174,6 +174,30 @@ describe('object catalog', () => {
     expect(catalog.isInvincible(0x0d59)).toBe(false);
   });
 
+  // **The half of "there is nothing there" that the catalog knows.** A spawn
+  // anchor is `<Enemy/>` with a health bar and no attack of any kind, so the
+  // planner walked around empty floor all fight; a boss declares its shots.
+  it('says which enemies have an attack at all', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+  <Object type="0x01" id="Anchor"><Enemy /><MaxHitPoints>4000</MaxHitPoints></Object>
+  <Object type="0x02" id="Archer">
+    <Enemy />
+    <Projectile id="0"><Speed>100</Speed><LifetimeMS>1000</LifetimeMS><Damage>50</Damage></Projectile>
+  </Object>
+</Objects>`),
+      ),
+    );
+
+    expect(catalog.hasShots(0x02)).toBe(true);
+    expect(catalog.hasShots(0x01)).toBe(false);
+    // Not "no" for a type it has never heard of either — it simply has nothing
+    // to say, and the caller pairing this with "has it ever moved" is what
+    // stops that being read as harmless.
+    expect(catalog.hasShots(0xffff)).toBe(false);
+  });
+
   it('marks the bosses from the arrow the game draws over them', async () => {
     const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
 

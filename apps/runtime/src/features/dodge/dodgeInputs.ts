@@ -148,6 +148,20 @@ export interface DodgeCatalog {
    */
   readonly isScenery: (objectType: number) => boolean;
   /**
+   * Whether one of these has any attack at all, from `objects.xml`.
+   *
+   * **The live report is a room full of circles around nothing.** A spawner is
+   * `<Enemy />`, carries a health bar, is neither a wall nor scenery nor marked
+   * invincible, and is drawn as nothing at all — so it passed every cull there
+   * was and the planner spent the fight walking around empty floor. What it is
+   * not is dangerous: it declares no `<Projectile>`, and it never moves. Either
+   * one of those alone describes plenty of real monsters — a melee minion has
+   * no shots, a boss between phases is not walking — so it is the pair that
+   * says "there is nothing here", and this is the half the catalog knows. See
+   * `DodgeScene` for the other.
+   */
+  readonly hasShots: (objectType: number) => boolean;
+  /**
    * How wide one of these is, in tiles.
    *
    * **The distance that keeps a minion at arm's length puts you inside a boss**,

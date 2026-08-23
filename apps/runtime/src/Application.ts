@@ -362,6 +362,7 @@ export class Application {
           bodyTiles: (type) => this.#objects.bodyTiles(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
+          hasShots: (type) => this.#objects.hasShots(type),
           item: (type) => this.#objects.item(type),
           container: (type) => this.#objects.container(type),
           statMaxima: (type) => this.#objects.statMaxima(type),
@@ -603,6 +604,12 @@ export class Application {
         // unkillable: a lever carries a health bar, is meant to be shot, and
         // never hurts anybody.
         isScenery: (objectType) => this.#objects.isScenery(objectType),
+        // And the one none of the three catches: a spawner is `<Enemy/>` with a
+        // health bar, is not a wall, is not a structure kill, is not marked
+        // invincible, and is drawn as nothing at all — so the planner walked
+        // around empty floor all fight. Whether it declares a shot is half of
+        // what gives it away; the scene supplies the other half.
+        hasShots: (objectType) => this.#objects.hasShots(objectType),
         // And the third thing it cannot work without: how big the monster
         // actually is. The distance that keeps an ordinary one at arm's length
         // leaves the player standing well inside a boss four times the width.

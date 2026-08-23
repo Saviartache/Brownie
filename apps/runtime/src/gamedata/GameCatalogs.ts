@@ -120,6 +120,11 @@ export class GameObjectCatalog implements ObjectCatalog {
     return this.#byType.get(objectType)?.projectiles.get(bulletType);
   }
 
+  hasShots(objectType: number): boolean {
+    const projectiles = this.#byType.get(objectType)?.projectiles;
+    return projectiles !== undefined && projectiles.size > 0;
+  }
+
   item(objectType: number): ItemFacts | undefined {
     return this.#byType.get(objectType)?.item;
   }

@@ -1,10 +1,20 @@
 import type { Position, ProjectileView } from '@brownie/plugin-api';
 import { projectileHalfTiles } from '../../features/dodge/hitbox.js';
 import { motionModelled, type ProjectileDefinition } from '../../gamedata/projectiles.js';
+import { flightEndMs, type StopsShots } from './flightEnd.js';
 import { positionAt, type ShotOrigin } from './positionAt.js';
 
 /** One shot in flight. */
 class TrackedShot implements ProjectileView {
+  /**
+   * When it stops existing — its lifetime, or the wall it flies into.
+   *
+   * Settled once, when the shot is announced, because that is when the map it
+   * is crossing is known and because every reader wants the same answer. See
+   * {@link flightEndMs}.
+   */
+  readonly expiresAtMs: number;
+
   constructor(
     readonly ownerId: number,
     readonly bulletId: number,
@@ -12,7 +22,10 @@ class TrackedShot implements ProjectileView {
     readonly firedAtMs: number,
     readonly origin: ShotOrigin,
     readonly definition: ProjectileDefinition,
-  ) {}
+    stopsShots: StopsShots,
+  ) {
+    this.expiresAtMs = firedAtMs + flightEndMs(definition, origin, stopsShots);
+  }
 
   get damage(): number {
     return this.definition.damage;
@@ -37,11 +50,12 @@ class TrackedShot implements ProjectileView {
     return this.origin.y;
   }
 
-  get expiresAtMs(): number {
-    return this.firedAtMs + this.definition.lifetimeMs;
-  }
-
   positionAt(gameTimeMs: number): Position | undefined {
+    // Past the end of the flight there is no shot, whether the lifetime ran out
+    // or a wall took it. Everything that predicts one reads this — the threat
+    // field stops sampling here, and the drawn path ends here — so the wall is
+    // answered in one place rather than by every caller learning about walls.
+    if (gameTimeMs > this.expiresAtMs) return undefined;
     return positionAt(this.definition, this.origin, gameTimeMs - this.firedAtMs);
   }
 }
@@ -51,10 +65,12 @@ class TrackedShot implements ProjectileView {
  *
  * Shots are not entities: the server announces them once, they follow a curve
  * the game's data describes, and they are never mentioned again. Nothing tells
- * us when one ends — so the store expires them by their own lifetime, and a
- * shot whose definition it does not have is not tracked at all rather than
- * tracked as a straight line. A dodge built on a wrong curve is worse than one
- * that knows it is blind.
+ * us when one ends — so the store works it out: a shot lives until its lifetime
+ * runs out or until it flies into a wall, whichever comes first, and a shot
+ * whose definition it does not have is not tracked at all rather than tracked
+ * as a straight line. A dodge built on a wrong curve is worse than one that
+ * knows it is blind. See {@link flightEndMs} for why the wall is settled here
+ * rather than waited for.
  *
  * **"In flight" is the whole contract, and it is shorter than it looks.**
  * Lifetimes are 600–2000 ms, and `WorldStatusStage` prunes on every packet, so
@@ -67,6 +83,16 @@ class TrackedShot implements ProjectileView {
  */
 export class ProjectileStore {
   readonly #shots = new Map<number, TrackedShot>();
+  readonly #stopsShots: StopsShots;
+
+  /**
+   * @param stopsShots The map, as far as a bullet is concerned. Nothing stops
+   *   anything by default, which is what a test asking about a curve wants and
+   *   what the store did before it could be told about walls.
+   */
+  constructor(stopsShots: StopsShots = () => false) {
+    this.#stopsShots = stopsShots;
+  }
 
   get size(): number {
     return this.#shots.size;
@@ -100,6 +126,7 @@ export class ProjectileStore {
         shot.firedAtMs,
         { bulletId: shot.bulletId, x: shot.x, y: shot.y, angle: shot.angle },
         definition,
+        this.#stopsShots,
       ),
     );
     return true;
@@ -116,6 +143,12 @@ export class ProjectileStore {
    * for the rest of its declared life, and everything reading it keeps dodging a
    * bullet nobody can see. Reported live, and it is the one failure of this
    * store that looks exactly like the planner being wrong.
+   *
+   * **Still taken, now that the walls are worked out in advance.** An
+   * acknowledgement that arrives is a fact and arrives for reasons
+   * {@link flightEndMs} cannot see: a shot landing on a character, a door that
+   * closed after it was fired, and every shot whose curve the model declines to
+   * predict. It is the late confirmation, not the mechanism.
    *
    * @param obstacle Whether it hit the map rather than a character. The two are
    *   survived by different shots — one passes through people, the other through

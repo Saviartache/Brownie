@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectileDefinition } from '../src/gamedata/projectiles.js';
+import { flightEndMs } from '../src/state/projectiles/flightEnd.js';
 import { ProjectileStore } from '../src/state/projectiles/ProjectileStore.js';
 import { positionAt } from '../src/state/projectiles/positionAt.js';
 
@@ -98,6 +99,64 @@ describe('positionAt', () => {
 
   it('refuses a definition that says nothing about how long it lives', () => {
     expect(positionAt(definition({ lifetimeMs: 0 }), ORIGIN, 0)).toBeUndefined();
+  });
+});
+
+describe('flightEndMs', () => {
+  /** A tenth of a tile every ten milliseconds, so ten tiles is its whole life. */
+  const SLOW = definition({ speed: 100, lifetimeMs: 1000 });
+  const WEST_TO_EAST = { bulletId: 0, x: 0.5, y: 0.5, angle: 0 };
+  const wallAt =
+    (at: number) =>
+    (tileX: number): boolean =>
+      tileX === at;
+
+  it('lets a shot with nothing in its way live out its lifetime', () => {
+    expect(flightEndMs(SLOW, WEST_TO_EAST, () => false)).toBe(1000);
+  });
+
+  // The bullet was five tiles from the wall's near edge, which is four and a
+  // half tiles of flight at a hundredth of a tile a millisecond.
+  it('ends the flight at the wall rather than at the lifetime', () => {
+    const end = flightEndMs(SLOW, WEST_TO_EAST, wallAt(5));
+
+    expect(end).toBeGreaterThan(400);
+    expect(end).toBeLessThan(450);
+    // And the shot is nowhere inside the wall it died against.
+    expect(positionAt(SLOW, WEST_TO_EAST, end)!.x).toBeLessThan(5);
+  });
+
+  // Monsters stand in doorways, on the far side of destructibles and inside the
+  // objects they guard. A shot deleted at its own muzzle is a shot nothing ever
+  // dodges, which is the one failure worse than the one this fixes.
+  it('is never stopped by the square it was fired from', () => {
+    expect(flightEndMs(SLOW, WEST_TO_EAST, wallAt(0))).toBe(1000);
+  });
+
+  it('flies a shot that passes cover straight through the wall', () => {
+    const ghost = definition({ speed: 100, lifetimeMs: 1000, passesCover: true });
+    expect(flightEndMs(ghost, WEST_TO_EAST, wallAt(5))).toBe(1000);
+  });
+
+  // The path this would walk is not the path the bullet takes, so a wall found
+  // along it is a wall the shot was never going to reach. Believing a shot too
+  // long costs a sidestep; deleting a live one costs the run.
+  it('leaves a shot whose curve is not modelled alone', () => {
+    const turning = definition({ speed: 100, lifetimeMs: 1000, turnRate: 90 });
+    expect(flightEndMs(turning, WEST_TO_EAST, wallAt(5))).toBe(1000);
+
+    const accelerating = definition({ speed: 100, lifetimeMs: 1000, acceleration: 200 });
+    expect(flightEndMs(accelerating, WEST_TO_EAST, wallAt(5))).toBe(1000);
+  });
+
+  // A boomerang turns round at the halfway point and retraces its path, so the
+  // wall it meets is the one on the way out.
+  it('walks the path the shot really takes, not the line it points along', () => {
+    const boomerang = definition({ speed: 100, lifetimeMs: 1000, boomerang: true });
+    // It only ever reaches five tiles out, so a wall six tiles away is one it
+    // never touches.
+    expect(flightEndMs(boomerang, WEST_TO_EAST, wallAt(7))).toBe(1000);
+    expect(flightEndMs(boomerang, WEST_TO_EAST, wallAt(3))).toBeLessThan(500);
   });
 });
 
@@ -238,6 +297,31 @@ describe('ProjectileStore', () => {
     });
 
     expect(store.retire(4, 0xfffe, false)).toBe(true);
+  });
+
+  // **The live report: it keeps dodging bullets that are already gone.** The
+  // client tells the server about a shot it destroyed against the map, but only
+  // about the ones it bothered to resolve and only a round trip later — so the
+  // store works the wall out for itself, once, when the shot is announced.
+  it('stops a shot at the wall it flies into, for everyone reading it', () => {
+    const store = new ProjectileStore((tileX) => tileX === 5);
+    store.add(definition({ speed: 100, lifetimeMs: 1000 }), {
+      ownerId: 4,
+      bulletId: 0,
+      bulletType: 0,
+      x: 0.5,
+      y: 0.5,
+      angle: 0,
+      firedAtMs: 1000,
+    });
+
+    const [shot] = [...store.values(1000)];
+    expect(shot?.expiresAtMs).toBeLessThan(1450);
+    // Nothing predicts it past the wall — which is what the drawn path and the
+    // threat field are both built out of.
+    expect(shot?.positionAt(1500)).toBeUndefined();
+    // And it is gone from the store by the time it would have got there.
+    expect([...store.values(1500)]).toHaveLength(0);
   });
 
   it('clears everything, as a map change requires', () => {
