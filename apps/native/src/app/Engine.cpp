@@ -625,21 +625,8 @@ void Engine::LetGo() noexcept {
 }
 
 void Engine::InstallAimHook() {
-    const auto added = control_.InstallAim(
-        binding_.MethodAddress(game::kComputeShootAngle).value_or(nullptr),
-        binding_.MethodAddress(game::kShootWithAngle).value_or(nullptr));
-
-    // Said out loud, once per detour, into the runtime's log. A hook is the one
-    // thing this module does that can take the game down with it, so which
-    // methods it went onto is not a detail to leave to a panel somebody may not
-    // open — and a game that stops starting is a game whose overlay nobody can
-    // read.
-    if (added.compute_added) {
-        Say("aim hook: detoured " + std::string{game::kComputeShootAngle});
-    }
-    if (added.shoot_added) {
-        Say("aim hook: detoured " + std::string{game::kShootWithAngle});
-    }
+    control_.InstallAim(binding_.MethodAddress(game::kComputeShootAngle).value_or(nullptr),
+                        binding_.MethodAddress(game::kShootWithAngle).value_or(nullptr));
 }
 
 void Engine::InstallProjectileNoclip() {
@@ -665,9 +652,8 @@ void Engine::InstallPlayerNoclip() {
         return;
     }
 
-    // Once, on the turn the detours go in. Which methods a hook went onto
-    // belongs in the log for the reason the two above give — and here the names
-    // are also the key to the counters the overlay shows, in this order.
+    // Once, on the turn the detours go in. The names are the key to the
+    // counters the overlay shows, in this order.
     std::string line = "player noclip: detoured";
     for (const auto& gate : gates) {
         line += ' ';

@@ -233,13 +233,6 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
       const tracker = new MotionTracker();
 
-      // **Said once, and only because silence is otherwise ambiguous.** The
-      // cursor is measured against a camera this build has to find in an
-      // obfuscated game; if it is never found, the mode picks nothing and looks
-      // exactly like a mode with no enemies to pick. One line in the log is the
-      // difference between those two, and it is the only thing that is.
-      let cursorSeen = false;
-
       // **The module does each of these only while somebody is asking**, so
       // whatever reads one has to ask — and keep asking. The claim expires on
       // the far side, which is what stops a plugin that was disabled or
@@ -375,10 +368,6 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const chosen = priority.get();
         const cursor =
           chosen === TargetPriority.ClosestToCursor ? options.cursorPoint() : undefined;
-        if (cursor !== undefined && !cursorSeen) {
-          cursorSeen = true;
-          context.log.info('the module is reporting where you point; cursor aim can follow it');
-        }
 
         const target = selectTarget(world.enemies(), {
           shooterX: self.x,

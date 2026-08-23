@@ -40,20 +40,11 @@ void PlayerControl::Bind(const game::Il2CppRuntime& game,
     ready_.store(true, std::memory_order_release);
 }
 
-PlayerControl::AimInstall PlayerControl::InstallAim(void* compute_shoot_angle,
-                                                    void* shoot_with_angle) {
-    AimInstall added;
+void PlayerControl::InstallAim(void* compute_shoot_angle, void* shoot_with_angle) {
     if (compute_shoot_angle == nullptr && shoot_with_angle == nullptr) {
-        return added;
+        return;
     }
-
-    const bool had_compute = aim_.compute_installed();
-    const bool had_shoot = aim_.shoot_installed();
     (void)aim_.Install(compute_shoot_angle, shoot_with_angle);
-
-    added.compute_added = aim_.compute_installed() != had_compute;
-    added.shoot_added = aim_.shoot_installed() != had_shoot;
-    return added;
 }
 
 bool PlayerControl::Locate(game::PlayerLocation& out) const {

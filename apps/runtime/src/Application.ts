@@ -888,8 +888,7 @@ export class Application {
       return;
     }
 
-    const restored = this.#blastRadii.restore(parsed);
-    this.#log.info(`blast radii: ${String(restored)} measured`);
+    this.#blastRadii.restore(parsed);
   }
 
   /**

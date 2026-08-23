@@ -73,10 +73,6 @@ class AimHook {
         return compute_.installed() || shoot_.installed();
     }
 
-    /// Which of the two are, so a caller can say which it just put in place.
-    [[nodiscard]] bool compute_installed() const noexcept { return compute_.installed(); }
-    [[nodiscard]] bool shoot_installed() const noexcept { return shoot_.installed(); }
-
     /// Whether both are, which is when there is nothing left to install.
     [[nodiscard]] bool complete() const noexcept {
         return compute_.installed() && shoot_.installed();

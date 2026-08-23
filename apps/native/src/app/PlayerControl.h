@@ -120,16 +120,10 @@ class PlayerControl {
     void BindMover(void* move_to) noexcept { mover_.Bind(move_to); }
     [[nodiscard]] bool mover_bound() const noexcept { return mover_.bound(); }
 
-    /// Which aim detours went in that were not in before.
-    struct AimInstall {
-        bool compute_added = false;
-        bool shoot_added = false;
-    };
-
     /// Puts the aim detours in place. IPC thread. A no-op for one already live,
     /// so it can be called again until both are: IL2CPP builds the two classes
     /// whenever it gets round to them, rarely on the same turn.
-    [[nodiscard]] AimInstall InstallAim(void* compute_shoot_angle, void* shoot_with_angle);
+    void InstallAim(void* compute_shoot_angle, void* shoot_with_angle);
 
     [[nodiscard]] bool aim_complete() const noexcept { return aim_.complete(); }
 

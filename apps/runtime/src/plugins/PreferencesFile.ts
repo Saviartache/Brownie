@@ -89,8 +89,7 @@ export class PreferencesFile {
       this.#log.warn(`${this.#path} is not a preferences file this build understands; ignoring it`);
       return;
     }
-    const restored = this.#preferences.load(document.plugins);
-    this.#log.info(`restored preferences for ${String(restored)} plugin(s)`);
+    this.#preferences.load(document.plugins);
   }
 
   /** Cancels the pending write and performs it. Safe to call more than once. */
