@@ -75,9 +75,15 @@ export class HpTracker {
     this.#hp -= damage;
   }
 
-  /** Whether simulated health is at or below a share of the maximum. */
-  atOrBelowPercent(percent: number): boolean {
+  /**
+   * Whether simulated health is at or below a share of the maximum.
+   *
+   * @param pendingDamage Damage that has not been taken — a forecast of shots
+   *   still in flight. Left out for the question "are we there now", which is
+   *   what every acknowledgement asks.
+   */
+  atOrBelowPercent(percent: number, pendingDamage = 0): boolean {
     if (this.#maxHp <= 0) return false;
-    return this.#hp <= (this.#maxHp * percent) / 100;
+    return this.#hp - pendingDamage <= (this.#maxHp * percent) / 100;
   }
 }

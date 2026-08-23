@@ -33,6 +33,36 @@ export const DEFAULT_THRESHOLD_PERCENT = 25;
 /** Default radius within which a freshly spawned shot triggers an escape. */
 export const DEFAULT_CLOSE_SPAWN_TILES = 0.15;
 
+/**
+ * Default window a predicted hit has to land in to be worth escaping, in
+ * milliseconds.
+ *
+ * Long enough that the escape is on the wire well before the client
+ * acknowledges the hit, and short enough that "the player stands still" is
+ * nearly true — the assumption `impact.ts` forecasts on. A wider window does
+ * not find more lethal shots, only earlier ones, and an earlier one is one the
+ * player had more time to walk out of.
+ */
+export const DEFAULT_PREDICT_WITHIN_MS = 300;
+
+/**
+ * Spacing of the predicted positions the forecast sweeps between.
+ *
+ * The dodge planner's default, and the same trade-off: the sweep between two
+ * samples is exact, so this bounds how far a *curve* may bend rather than how
+ * far a shot may travel.
+ */
+export const FORECAST_SAMPLE_STEP_MS = 60;
+
+/**
+ * How often the forecast is taken when nothing prompts one.
+ *
+ * A shot enters the window by time passing, not by a packet arriving, so this
+ * is what decides how promptly one is noticed — everything an announcement can
+ * do is bring the same check forward for the shot that has just appeared.
+ */
+export const FORECAST_INTERVAL_MS = 25;
+
 /** Assumed damage of a shot never announced by an `ENEMYSHOOT` we saw. */
 export const UNKNOWN_SHOT_DAMAGE = 200;
 

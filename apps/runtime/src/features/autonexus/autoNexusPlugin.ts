@@ -1,19 +1,23 @@
 /**
- * Auto-nexus: leave before a hit the server has not applied yet becomes fatal.
+ * Auto-nexus: leave before the hit lands, and refuse to acknowledge it if it
+ * already has.
  *
- * **The model is reactive, not predictive.** An earlier version simulated where
- * shots *would* be and escaped on a forecast; that was wrong. A hit that has
- * not connected is not damage, and a forecast over a bullet-hell fires escapes
- * that were never needed. What matters is the hit the client has *already*
- * taken and acknowledged but the server has not processed — the packet in
- * flight. Caught there, the escape can still beat the damage; caught on the
- * server's next tick, it is already too late.
+ * **Two moments, and the earlier one leads.** The last moment an escape can
+ * still work is the acknowledgement: `PLAYERHIT` and its siblings are
+ * client→server, so a fatal one can be **dropped and the escape sent in its
+ * place** — the server never applies the hit, because it never receives it.
+ * That is where this feature used to begin, and it is a round trip later than
+ * it needs to be. The same hit was in the air for most of a second first, as a
+ * shot whose curve and size the runtime already knows, so a hit that is *about*
+ * to happen can be read off the world and left before the client says a word.
+ * See {@link strikesWithin} for why forecasting is safe here when an earlier
+ * attempt at it was not: what is predicted is not danger but the health left if
+ * these particular shots land, against the same threshold as every other path.
  *
- * So this tracks health that runs ahead of the server (see {@link HpTracker}),
- * decrements it the instant a hit-acknowledgement crosses the wire, and — when
- * that would drop it to the floor — **drops the acknowledgement and escapes**.
- * The server never applies the hit, because it never receives it, and the
- * escape reaches it in the hit's place.
+ * So health is tracked ahead of the server (see {@link HpTracker}), the shots on
+ * their way in are counted against it every few milliseconds, and either half
+ * crossing the threshold escapes — after which every acknowledgement is dropped,
+ * so the hits the escape was racing never reach the server at all.
  *
  * The acknowledgements are all client→server: `PLAYERHIT` for a shot,
  * `AOEACK` for an area effect, `GROUNDDAMAGE` for a damaging tile. `ENEMYSHOOT`
@@ -41,10 +45,14 @@ import { isSafeZone } from '../../constants/SafeZones.js';
 import { BulletLog } from './BulletLog.js';
 import { HpTracker } from './HpTracker.js';
 import { damageTaken } from './damage.js';
+import { strikesWithin } from './impact.js';
 import {
   AOE_MAX_AGE_MS,
   DEFAULT_CLOSE_SPAWN_TILES,
+  DEFAULT_PREDICT_WITHIN_MS,
   DEFAULT_THRESHOLD_PERCENT,
+  FORECAST_INTERVAL_MS,
+  FORECAST_SAMPLE_STEP_MS,
   GROUND_DAMAGE_ESTIMATE,
   MAX_PENDING_AOES,
   MAX_VOLLEY_SHOTS,
@@ -94,6 +102,23 @@ export function createAutoNexusPlugin(): Plugin {
         max: 0.5,
         step: 0.05,
       });
+      const predictHits = context.settings.boolean('predictHits', {
+        label: 'Leave before the hit lands',
+        default: true,
+      });
+      // **The knob that decides how early is too early.** Every millisecond
+      // here is a millisecond of head start for the escape and a millisecond
+      // the player had to walk out of the shot instead — see
+      // {@link DEFAULT_PREDICT_WITHIN_MS}.
+      const predictWithinMs = context.settings.range('predictWithinMs', {
+        label: 'Count shots landing within (ms)',
+        advanced: true,
+        default: DEFAULT_PREDICT_WITHIN_MS,
+        min: 100,
+        max: 800,
+        step: 20,
+        visibleWhen: { key: 'predictHits', equals: [true] },
+      });
 
       // One record per session: the host holds a single plugin instance and
       // hands the session in with every packet, so state cannot live in a
@@ -137,26 +162,73 @@ export function createAutoNexusPlugin(): Plugin {
 
       const conditionsOf = (session: SessionView): number => session.self.conditions;
 
-      // ── Recording the other side's fire ─────────────────────────────────
+      // ── Leaving before the hit lands ────────────────────────────────────
 
-      context.packets.onFirst('ENEMYSHOOT', (packet, session) => {
+      /**
+       * Escapes if the shots already in flight would take health to the floor.
+       *
+       * Nothing here is charged to {@link HpTracker}: a shot that has not
+       * connected is not damage, and the acknowledgement — which may never come,
+       * because the player may walk out of it — is what pays for it. This only
+       * ever asks what health *would* be.
+       *
+       * Silent without the game's projectile data, which is what
+       * `world.projectiles()` is built from. That is why the acknowledgement
+       * paths below are not merely a backstop: they are the whole feature for a
+       * session running without those files.
+       */
+      const forecast = (session: SessionView): void => {
+        if (!predictHits.get()) return;
         const state = stateFor(session);
         if (state.escaped) return;
+        const self = session.self;
+        if (!self.alive || inSafeZone(session)) return;
 
-        const ownerId = packet.number('ownerId');
-        const bulletId = packet.number('bulletId');
-        const damage = packet.number('damage');
-        if (ownerId === undefined || bulletId === undefined || damage === undefined) return;
-
-        const raw = packet.number('numShots') ?? 1;
-        const count = raw > 0 && raw < MAX_VOLLEY_SHOTS ? raw : 1;
         const now = session.world.gameTimeMs;
-        state.bullets.add(ownerId, bulletId, damage, count, now);
-        state.bullets.prune(now);
+        const withinMs = predictWithinMs.get();
+        const percent = thresholdPercent.get();
+        let damage = 0;
+        let shots = 0;
 
-        // A shot that spawns on top of the player leaves no time for the
-        // PLAYERHIT round trip. Escape on the announcement itself if the whole
-        // volley would drop health to the floor.
+        for (const shot of session.world.projectiles()) {
+          if (!strikesWithin(now, self, shot, withinMs, FORECAST_SAMPLE_STEP_MS)) continue;
+          // The damage the shot was *announced* with, which is what the server
+          // will apply, in preference to the figure in its data file. Not
+          // treated as piercing: unlike an unidentified acknowledgement this is
+          // a shot we have seen, and assuming armour does nothing would invent
+          // damage rather than round towards safety.
+          const announced = state.bullets.damageOf(shot.ownerId, shot.bulletId);
+          damage += damageTaken(announced ?? shot.damage, {
+            defense: self.defense,
+            conditions: conditionsOf(session),
+            piercing: false,
+          });
+          shots += 1;
+          if (!state.hp.atOrBelowPercent(percent, damage)) continue;
+          const what = shots === 1 ? 'an inbound shot' : `${String(shots)} inbound shots`;
+          escape(session, state, `${what} for ${String(damage)}`);
+          return;
+        }
+      };
+
+      // ── Recording the other side's fire ─────────────────────────────────
+
+      /**
+       * Escapes on a volley that spawned on top of the player.
+       *
+       * **The path that works with nothing but the packet.** A shot fired at
+       * point-blank range leaves no time for the `PLAYERHIT` round trip, and
+       * {@link forecast} would catch it — but only in a session that has the
+       * game's projectile data. This one reads the announcement itself, so it
+       * holds either way.
+       */
+      const escapeOnPointBlank = (
+        packet: MutablePacket,
+        session: SessionView,
+        state: SessionNexus,
+        damage: number,
+        count: number,
+      ): void => {
         const radius = closeSpawnTiles.get();
         if (radius <= 0) return;
         const origin = pointOf(packet.get('position'));
@@ -175,6 +247,28 @@ export function createAutoNexusPlugin(): Plugin {
         ) {
           escape(session, state, `point-blank ${String(count)}-shot volley`);
         }
+      };
+
+      context.packets.onFirst('ENEMYSHOOT', (packet, session) => {
+        const state = stateFor(session);
+        if (state.escaped) return;
+
+        const ownerId = packet.number('ownerId');
+        const bulletId = packet.number('bulletId');
+        const damage = packet.number('damage');
+        if (ownerId === undefined || bulletId === undefined || damage === undefined) return;
+
+        const raw = packet.number('numShots') ?? 1;
+        const count = raw > 0 && raw < MAX_VOLLEY_SHOTS ? raw : 1;
+        const now = session.world.gameTimeMs;
+        state.bullets.add(ownerId, bulletId, damage, count, now);
+        state.bullets.prune(now);
+
+        escapeOnPointBlank(packet, session, state, damage, count);
+        // The state stage runs ahead of the plugins, so the shot just announced
+        // is already in the world: the forecast can see it now rather than up to
+        // an interval later, which on a fast shot is most of its flight.
+        forecast(session);
       });
 
       context.packets.onFirst('AOE', (packet, session) => {
@@ -307,6 +401,14 @@ export function createAutoNexusPlugin(): Plugin {
       });
 
       // ── Lifecycle ───────────────────────────────────────────────────────
+
+      // What makes a shot worth escaping is time passing, not a packet
+      // arriving: one announced outside the window is the same shot inside it a
+      // moment later, with nothing said on the wire in between.
+      context.timers.setInterval(() => {
+        const session = context.sessions.current();
+        if (session !== undefined) forecast(session);
+      }, FORECAST_INTERVAL_MS);
 
       // A new map is a clean slate: health, shots and the escape latch all
       // belong to the map they were seen in.

@@ -1,6 +1,7 @@
 import {
   MutablePacket,
   type NativeApi,
+  type ProjectileView,
   type SessionApi,
   type SessionView,
 } from '@brownie/plugin-api';
@@ -10,12 +11,15 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { damageTaken } from '../src/features/autonexus/damage.js';
 import {
+  FORECAST_SAMPLE_STEP_MS,
   HP_DRIFT_SNAP,
   HP_SYNC_WARMUP_TICKS,
   MIN_DAMAGE_MULTIPLIER,
 } from '../src/features/autonexus/constants.js';
 import { HpTracker } from '../src/features/autonexus/HpTracker.js';
 import { BulletLog } from '../src/features/autonexus/BulletLog.js';
+import { strikesWithin, type ForecastShot } from '../src/features/autonexus/impact.js';
+import { DEFAULT_PROJECTILE_HALF_TILES } from '../src/features/dodge/hitbox.js';
 import { ConditionEffect } from '../src/constants/ConditionEffect.js';
 import { createAutoNexusPlugin } from '../src/features/autonexus/autoNexusPlugin.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
@@ -134,6 +138,60 @@ describe('BulletLog', () => {
   });
 });
 
+describe('strikesWithin', () => {
+  const player = { x: 0, y: 0 };
+
+  /** A shot on a straight course, in tiles per millisecond. */
+  function flying(
+    x: number,
+    y: number,
+    tilesPerMsX: number,
+    over: Partial<{ collisionHalfTiles: number; expiresAtMs: number }> = {},
+  ): ForecastShot {
+    const expiresAtMs = over.expiresAtMs ?? 2000;
+    return {
+      collisionHalfTiles: over.collisionHalfTiles ?? DEFAULT_PROJECTILE_HALF_TILES,
+      expiresAtMs,
+      positionAt: (at) => (at > expiresAtMs ? undefined : { x: x + tilesPerMsX * at, y }),
+    };
+  }
+
+  it('sees a shot that reaches the player inside the window', () => {
+    // Four tiles out at twenty tiles a second: two hundred milliseconds away.
+    expect(strikesWithin(0, player, flying(-4, 0, 0.02), 300, FORECAST_SAMPLE_STEP_MS)).toBe(true);
+  });
+
+  it('leaves one arriving after the window to a later forecast', () => {
+    expect(strikesWithin(0, player, flying(-4, 0, 0.02), 100, FORECAST_SAMPLE_STEP_MS)).toBe(false);
+  });
+
+  it('catches a shot that crosses the player between two samples', () => {
+    // Fast enough to clear the player's square well inside one sample step.
+    expect(strikesWithin(0, player, flying(-10, 0, 0.5), 300, FORECAST_SAMPLE_STEP_MS)).toBe(true);
+  });
+
+  it('reports a miss for one passing to the side', () => {
+    expect(strikesWithin(0, player, flying(-4, 2, 0.02), 300, FORECAST_SAMPLE_STEP_MS)).toBe(false);
+  });
+
+  it("measures against the shot's own hitbox", () => {
+    const past = (collisionHalfTiles: number): ForecastShot =>
+      flying(-4, 1.5, 0.02, { collisionHalfTiles });
+    const step = FORECAST_SAMPLE_STEP_MS;
+    expect(strikesWithin(0, player, past(DEFAULT_PROJECTILE_HALF_TILES), 300, step)).toBe(false);
+    expect(strikesWithin(0, player, past(2), 300, step)).toBe(true);
+  });
+
+  it('counts a shot already on top of the player', () => {
+    expect(strikesWithin(0, player, flying(0, 0, 0.02), 0, FORECAST_SAMPLE_STEP_MS)).toBe(true);
+  });
+
+  it('ignores one that has expired', () => {
+    const spent = flying(-4, 0, 0.02, { expiresAtMs: 400 });
+    expect(strikesWithin(500, player, spent, 300, FORECAST_SAMPLE_STEP_MS)).toBe(false);
+  });
+});
+
 // The plugin, driven through the real host so the priority hook and the enable
 // gate run as they do in production.
 describe('the auto-nexus plugin', () => {
@@ -149,8 +207,38 @@ describe('the auto-nexus plugin', () => {
     onDisconnected: () => () => undefined,
   };
 
+  /**
+   * One shot in flight, six tiles west of the player and closing at twenty
+   * tiles a second — two hundred milliseconds from a hit unless `y` moves it
+   * off the line.
+   */
+  function inFlight(
+    over: Partial<{ ownerId: number; bulletId: number; damage: number; y: number }> = {},
+  ): ProjectileView {
+    const y = over.y ?? 10;
+    return {
+      ownerId: over.ownerId ?? 5,
+      bulletId: over.bulletId ?? 100,
+      bulletType: 0,
+      damage: over.damage ?? 100,
+      collisionHalfTiles: DEFAULT_PROJECTILE_HALF_TILES,
+      motionModelled: true,
+      firedAtMs: 0,
+      expiresAtMs: 2000,
+      x: 6,
+      y,
+      positionAt: (at) => (at > 2000 ? undefined : { x: 6 + 0.02 * at, y }),
+    };
+  }
+
   function fakeSession(
-    over: Partial<{ hp: number; maxHp: number; defense: number; map: string }> = {},
+    over: Partial<{
+      hp: number;
+      maxHp: number;
+      defense: number;
+      map: string;
+      shots: readonly ProjectileView[];
+    }> = {},
   ): {
     session: SessionView;
     self: {
@@ -179,7 +267,11 @@ describe('the auto-nexus plugin', () => {
     const session = {
       id: 's1',
       self,
-      world: { gameTimeMs: 0, mapName: over.map ?? 'Dungeon' },
+      world: {
+        gameTimeMs: 0,
+        mapName: over.map ?? 'Dungeon',
+        projectiles: () => over.shots ?? [],
+      },
       sendToServer,
       notify: () => undefined,
     } as unknown as SessionView;
@@ -300,6 +392,67 @@ describe('the auto-nexus plugin', () => {
       session,
     );
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  it('escapes on a shot that is going to land, before any acknowledgement', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({
+      hp: 300,
+      maxHp: 1000,
+      shots: [inFlight({ damage: 100 })],
+    });
+    host.dispatchPacket(newtick(), session); // tracker adopts 300
+    // 300 - 100 = 200, at or below 25% (250) — and nothing has hit yet.
+    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  it('refuses the acknowledgement of a hit it has already left', () => {
+    const host = loadEnabled();
+    const { session } = fakeSession({ hp: 300, maxHp: 1000, shots: [inFlight({ damage: 100 })] });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+
+    const hit = playerHit(100, 5);
+    host.dispatchPacket(hit, session);
+    expect(hit.verdict).toBe('drop');
+  });
+
+  it('adds up everything on its way in', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({
+      hp: 400,
+      maxHp: 1000,
+      // Either alone leaves 300, above the floor; both together leave 200.
+      shots: [inFlight({ bulletId: 100, damage: 100 }), inFlight({ bulletId: 101, damage: 100 })],
+    });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 100, 2), session);
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  it('stays for a predicted hit that is survivable', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({
+      hp: 1000,
+      maxHp: 1000,
+      shots: [inFlight({ damage: 100 })],
+    });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('stays for a shot that will miss, however low health is', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({
+      hp: 300,
+      maxHp: 1000,
+      shots: [inFlight({ damage: 100, y: 13 })], // three tiles off the line
+    });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    expect(sendToServer).not.toHaveBeenCalled();
   });
 
   it('escapes on a server-confirmed lethal DAMAGE, dropping it', () => {
