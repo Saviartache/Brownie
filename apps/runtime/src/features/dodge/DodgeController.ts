@@ -149,6 +149,17 @@ export interface DodgeSituation {
   readonly gameTimeMs: number;
   /** Wall-clock, for hysteresis and the ground cache. */
   readonly nowMs: number;
+  /**
+   * Whether the player is standing on ground that is costing them health.
+   *
+   * **A fact about the player, and deliberately not a question put to the
+   * ground.** The game charges for the one tile the character's centre is on;
+   * what the planner refuses is the body plus a margin — see
+   * {@link DodgeWorld.isDamaging} — and reading "am I in it" off that wider
+   * answer had the planner announcing an escape from ground nobody was being
+   * hurt by, every time a player chose to stand at the edge of a pool.
+   */
+  readonly onDamagingGround: boolean;
 }
 
 export interface DodgePlan {
@@ -607,7 +618,7 @@ export class DodgeController {
       reactWithinMs,
     );
 
-    const onHazard = settings.avoidDamagingGround && world.isDamaging(situation.x, situation.y);
+    const onHazard = settings.avoidDamagingGround && situation.onDamagingGround;
     // Something has walked inside the bubble. Not damage yet, and still a reason
     // to speak: the room being taken is the room a dodge needs, so waiting until
     // it is damage is waiting until there is nowhere left to go.
@@ -820,7 +831,10 @@ export class DodgeController {
     // *fits* where they already stand is not a useful question — refusing it
     // would leave a character wedged in geometry with no candidate at all.
     this.#wallTiles[HOLD] = Infinity;
-    this.#hazardMs[HOLD] = world.isDamaging(situation.x, situation.y) ? 0 : Infinity;
+    // The same question as `onHazard`, and it has to be answered the same way:
+    // holding still costs health exactly when the game is already charging for
+    // this tile, not when the margin around it is being touched.
+    this.#hazardMs[HOLD] = situation.onDamagingGround ? 0 : Infinity;
     this.#exitMs[HOLD] = Infinity;
 
     if (!settings.avoidWalls && !settings.avoidDamagingGround) {

@@ -23,7 +23,17 @@
 export interface Ground {
   /** Whether the player's whole body fits here — walls, objects, unknown map. */
   canStand(x: number, y: number): boolean;
-  /** Whether standing here costs health. */
+  /**
+   * Whether a course reaching here should be treated as walking into damage.
+   *
+   * **Not "is the game charging for this tile", which is a different question
+   * and is answered by {@link DodgeSituation.onDamagingGround}.** This one is
+   * about somewhere the player is not yet: the body is nearly half a tile
+   * across, and asking about the point at the middle of it let a course put
+   * three quarters of the character over lava and call it clear. It carries a
+   * margin as well, because damaging ground is the one hazard worth standing
+   * well clear of rather than merely outside. See `damagingGround.ts`.
+   */
   isDamaging(x: number, y: number): boolean;
 }
 

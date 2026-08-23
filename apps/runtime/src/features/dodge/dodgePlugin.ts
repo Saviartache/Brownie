@@ -68,6 +68,7 @@ import {
   type DodgePresetChoice,
   type DodgeTuning,
 } from './dodgePresets.js';
+import { overDamagingGround } from './damagingGround.js';
 import { EnemyBodies, OUT_OF_RANGE_CAP_TILES } from './EnemyBodies.js';
 import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
 import { isBlastEffect } from '../../state/blasts/BlastStore.js';
@@ -482,6 +483,24 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         advanced: true,
         default: true,
       });
+      // **Wider than the wall margin, and for a reason walls do not have.**
+      // Walking into a wall costs a step; standing in lava costs health every
+      // tick, and there is nothing to dodge once you are in it. The planner also
+      // has no way to be sure where the character will actually end up — the
+      // server has its own opinion, the command lands a frame late — so a course
+      // planned to stop exactly at the edge is a course that gets a toe in it.
+      // Dropped when the player is already standing that close, exactly as the
+      // wall margin is, so it can never be the thing holding them there.
+      const hazardClearanceTiles = context.settings.range('hazardClearanceTiles', {
+        label: 'Keep clear of lava and damaging ground by (tiles)',
+        group: 'Safety',
+        advanced: true,
+        default: 0.5,
+        min: 0,
+        max: 2,
+        step: 0.05,
+        visibleWhen: { key: 'avoidDamagingGround', equals: [true] },
+      });
       // **Thrown bombs, novas and telegraphed circles.** A different shape of
       // danger from a bullet — a disc that goes off at a moment rather than a
       // point that travels — and it is read from the telegraph the game sends
@@ -719,6 +738,8 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       let mapView: WorldView | undefined;
       let clearance = 0;
       let damagingMatters = true;
+      /** How far off damaging ground a *course* is planned, this plan. */
+      let hazardClearance = 0;
       /**
        * The distances to fight between, rewritten in place each plan.
        *
@@ -730,7 +751,10 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const band = { keepAwayTiles: 0, stayWithinTiles: Infinity };
       const world: DodgeWorld = {
         canStand: (x, y) => mapView?.canStandAt(x, y, clearance) ?? false,
-        isDamaging: (x, y) => damagingMatters && (mapView?.tileAt(x, y)?.damaging ?? false),
+        isDamaging: (x, y) =>
+          damagingMatters &&
+          mapView !== undefined &&
+          overDamagingGround(mapView, x, y, hazardClearance),
         standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
         closingOn: (x, y) => bodies.closingOn(x, y, band),
       };
@@ -892,6 +916,18 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         clearance = wanted > 0 && map.canStandAt(self.x, self.y, wanted) ? wanted : 0;
         damagingMatters = avoidDamagingGround.get();
 
+        // **And the same rule for the margin around lava**, for the same
+        // reason: a player who has chosen to fight at the edge of a pool is
+        // inside it, and a margin that refuses every square they could step to
+        // is a margin that holds them there. Measured against the body alone,
+        // so being inside the *margin* drops it and being inside the *pool* is
+        // a different question — see `onDamagingGround` below.
+        const wantedFromHazards = hazardClearanceTiles.get();
+        hazardClearance =
+          wantedFromHazards > 0 && !overDamagingGround(map, self.x, self.y, wantedFromHazards)
+            ? wantedFromHazards
+            : 0;
+
         const settings: DodgeSettings = {
           horizonMs: horizonMs.get(),
           reactWithinMs: reactWithinMs.get(),
@@ -940,6 +976,12 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             speedTilesPerSecond: speed,
             gameTimeMs: map.gameTimeMs,
             nowMs: Date.now(),
+            // The one tile the game charges for, with no body and no margin
+            // around it. Whether to *walk* somewhere is the wider question and
+            // is `world.isDamaging`; whether health is going down right now is
+            // this one, and answering it with the wider test had the planner
+            // escaping ground nobody was being hurt by.
+            onDamagingGround: damagingMatters && (map.tileAt(self.x, self.y)?.damaging ?? false),
           },
           settings,
           world,

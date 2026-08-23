@@ -29,6 +29,7 @@ import { Blasts, type BlastView } from '../src/features/dodge/Blasts.js';
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
 import { ThreatField, type DodgeShot, type Sweep } from '../src/features/dodge/ThreatField.js';
+import { overDamagingGround } from '../src/features/dodge/damagingGround.js';
 import { createDodgePlugin } from '../src/features/dodge/dodgePlugin.js';
 import {
   DODGE_PRESETS,
@@ -143,6 +144,7 @@ function situation(overrides: Partial<DodgeSituation> = {}): DodgeSituation {
     y: 10,
     intentX: 0,
     intentY: 0,
+    onDamagingGround: false,
     speedTilesPerSecond: 6,
     gameTimeMs: 0,
     nowMs: 1_000_000,
@@ -941,6 +943,46 @@ describe('a wall of shots with a window in it', () => {
   });
 });
 
+// **A tile is not a point, and neither is a player.** The ground was probed by
+// asking about the single point at the middle of the character, so a course
+// that put most of the body over lava and the centre a hair outside it read as
+// clear — and then the next thing that moved the character put them in it.
+describe('how near damaging ground a course may pass', () => {
+  /** One damaging tile at (5, 5), and safe ground everywhere else. */
+  const pool = {
+    tileAt: (x: number, y: number) => ({
+      type: 0,
+      blocking: false,
+      damaging: Math.floor(x) === 5 && Math.floor(y) === 5,
+    }),
+  };
+
+  it('refuses a place whose body overlaps it, margin or no margin', () => {
+    // Centre in tile 4, body reaching into tile 5.
+    expect(overDamagingGround(pool, 4.9, 5.5, 0)).toBe(true);
+    // And the same centre with the whole body clear of it.
+    expect(overDamagingGround(pool, 4.5, 5.5, 0)).toBe(false);
+  });
+
+  it('refuses a place the margin reaches into', () => {
+    expect(overDamagingGround(pool, 4.5, 5.5, 0)).toBe(false);
+    expect(overDamagingGround(pool, 4.5, 5.5, 0.5)).toBe(true);
+  });
+
+  it('sweeps the whole box rather than its corners', () => {
+    // A margin wide enough that the box spans three tiles across, with the
+    // damaging one in the middle column where no corner lands.
+    expect(overDamagingGround(pool, 5.5, 3.7, 1.5)).toBe(true);
+  });
+
+  // The server sends tiles around the player and no further, and refusing what
+  // has not been described is `canStandAt`'s job.
+  it('does not call ground it has never been told about damaging', () => {
+    const unknown = { tileAt: (): undefined => undefined };
+    expect(overDamagingGround(unknown, 5, 5, 1)).toBe(false);
+  });
+});
+
 describe('where it refuses to go', () => {
   /** Lava everywhere east of a line, and open ground behind it. */
   const lavaEastOf = (edge: number): DodgeWorld => ({
@@ -981,12 +1023,32 @@ describe('where it refuses to go', () => {
 
   it('gets off damaging ground it is already standing on', () => {
     const controller = new DodgeController();
-    // Standing in it, with the clean edge to the west.
-    const plan = controller.plan(situation(), SETTINGS, lavaEastOf(9.5), []);
+    // Standing in it, with the clean edge to the west. Said by the caller
+    // rather than read off the ground: what the game charges for is the tile
+    // under the character, and what a course is refused for is the body and a
+    // margin around it — two questions with two answers.
+    const plan = controller.plan(
+      situation({ onDamagingGround: true }),
+      SETTINGS,
+      lavaEastOf(9.5),
+      [],
+    );
 
     expect(plan.verdict).toBe('escape');
     expect(plan.steer).toBe(true);
     expect(plan.dirX).toBeLessThan(0);
+  });
+
+  // **The margin, and why standing beside a pool is not standing in one.** A
+  // player fighting at the edge of the lava has chosen to be there; the planner
+  // keeps *courses* well clear of it and never announces an escape from ground
+  // that is not costing them anything.
+  it('does not call the edge of a pool an escape', () => {
+    const controller = new DodgeController();
+    const plan = controller.plan(situation(), SETTINGS, lavaEastOf(10.1), []);
+
+    expect(plan.verdict).toBe('clear');
+    expect(plan.steer).toBe(false);
   });
 
   it('does not walk through a wall to dodge', () => {
@@ -1461,6 +1523,7 @@ describe('when the plugin decides', () => {
     gameTimeMs: number,
     map: {
       canStandAt?: (x: number, y: number, clearanceTiles?: number) => boolean;
+      damagingAt?: (x: number, y: number) => boolean;
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -1481,7 +1544,11 @@ describe('when the plugin decides', () => {
         blasts: () => [],
         enemies: () => [],
         canStandAt: map.canStandAt ?? ((): boolean => true),
-        tileAt: () => ({ type: 0, blocking: false, damaging: false }),
+        tileAt: (x: number, y: number) => ({
+          type: 0,
+          blocking: false,
+          damaging: map.damagingAt?.(x, y) ?? false,
+        }),
       },
       sendToServer: () => undefined,
     } as unknown as SessionView;
@@ -1683,6 +1750,42 @@ describe('when the plugin decides', () => {
     plan();
 
     expect(moveTo).toHaveBeenCalled();
+  });
+
+  // **Standing beside a pool is not standing in one.** The margin keeps
+  // *courses* well clear of lava; reading "am I in it" off that same widened
+  // answer would have the planner hauling a player off ground that is costing
+  // them nothing, every time they chose to fight at the edge of one.
+  it('does not haul the player off the tile next to the lava', () => {
+    // Damaging everywhere east of the player's own tile, so their body is
+    // inside the margin and their feet are not.
+    const { moveTo, plan } = underFire(0, { damagingAt: (x) => x >= 11 });
+
+    plan();
+
+    expect(moveTo).not.toHaveBeenCalled();
+  });
+
+  // The complaint, end to end: a shot forces a sidestep and one of the two
+  // sides is a lava pool the planner used to be happy to stop at the edge of.
+  it('takes the sidestep that is not into the lava', () => {
+    const { moveTo, plan } = underFire(900, { damagingAt: (_x, y) => y >= 11 });
+
+    plan();
+
+    const [, y] = moveTo.mock.calls[0] as [number, number];
+    expect(moveTo).toHaveBeenCalled();
+    expect(y).toBeLessThan(10);
+  });
+
+  it('still walks them out of it once they are actually in it', () => {
+    const { moveTo, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
+
+    plan();
+
+    const [x] = moveTo.mock.calls[0] as [number, number];
+    expect(moveTo).toHaveBeenCalled();
+    expect(x).toBeLessThan(10);
   });
 
   // **Twenty-odd numbers is homework, not a feature.** They all earn their
