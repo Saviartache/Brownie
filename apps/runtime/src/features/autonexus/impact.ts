@@ -12,9 +12,11 @@
  * **Escaping on a forecast was a mistake once, and what changed is what the
  * forecast is for.** An earlier version of this feature predicted *danger* and
  * left whenever something was inbound, which in a bullet-hell is always. What is
- * predicted here is arithmetic: the health left if these particular shots land,
- * compared against the same threshold every other path in the feature uses. A
- * forecast that leaves health above it changes nothing at all.
+ * predicted here is arithmetic — the health left if these particular shots land
+ * — and it answers to a floor of its own, far below the one a hit that has
+ * actually landed is measured against. Shots that will land and leave health
+ * standing are the ordinary state of a fight, and the whole of what the caller
+ * does with them is nothing.
  *
  * **The hit test is the game's own, and it is exact.** The same axis-aligned
  * square the dodge planner sweeps — see `dodge/hitbox.ts`, which is where the

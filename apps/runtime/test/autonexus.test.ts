@@ -394,24 +394,42 @@ describe('the auto-nexus plugin', () => {
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
   });
 
-  it('escapes on a shot that is going to land, before any acknowledgement', () => {
+  // A thousand maximum health puts the acknowledged floor at 250 (25%) and the
+  // forecast's own at 100 (10%), so every case below starts above the first and
+  // can only be decided by the second.
+  it('escapes on a forecast that is nearly lethal, before any acknowledgement', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({
+      hp: 300,
+      maxHp: 1000,
+      shots: [inFlight({ damage: 250 })],
+    });
+    host.dispatchPacket(newtick(), session); // tracker adopts 300
+    // 300 - 250 = 50, at or below the forecast's floor, and nothing has hit yet.
+    host.dispatchPacket(enemyShoot(100, 5, 250), session);
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  it('stays for shots that will land but leave health well up', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
       hp: 300,
       maxHp: 1000,
       shots: [inFlight({ damage: 100 })],
     });
-    host.dispatchPacket(newtick(), session); // tracker adopts 300
-    // 300 - 100 = 200, at or below 25% (250) — and nothing has hit yet.
+    host.dispatchPacket(newtick(), session);
+    // 300 - 100 = 200: under the acknowledged floor, nowhere near the forecast's.
+    // A hit that is going to land is not a reason to leave, only a reason to be
+    // counted when it does.
     host.dispatchPacket(enemyShoot(100, 5, 100), session);
-    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+    expect(sendToServer).not.toHaveBeenCalled();
   });
 
   it('refuses the acknowledgement of a hit it has already left', () => {
     const host = loadEnabled();
-    const { session } = fakeSession({ hp: 300, maxHp: 1000, shots: [inFlight({ damage: 100 })] });
+    const { session } = fakeSession({ hp: 300, maxHp: 1000, shots: [inFlight({ damage: 250 })] });
     host.dispatchPacket(newtick(), session);
-    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    host.dispatchPacket(enemyShoot(100, 5, 250), session);
 
     const hit = playerHit(100, 5);
     host.dispatchPacket(hit, session);
@@ -423,23 +441,29 @@ describe('the auto-nexus plugin', () => {
     const { session, sendToServer } = fakeSession({
       hp: 400,
       maxHp: 1000,
-      // Either alone leaves 300, above the floor; both together leave 200.
-      shots: [inFlight({ bulletId: 100, damage: 100 }), inFlight({ bulletId: 101, damage: 100 })],
+      // Either alone leaves 200, above the forecast's floor; both leave nothing.
+      shots: [inFlight({ bulletId: 100, damage: 200 }), inFlight({ bulletId: 101, damage: 200 })],
     });
     host.dispatchPacket(newtick(), session);
-    host.dispatchPacket(enemyShoot(100, 5, 100, 2), session);
+    host.dispatchPacket(enemyShoot(100, 5, 200, 2), session);
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
   });
 
-  it('stays for a predicted hit that is survivable', () => {
+  it('does not count a shot the client has already answered for', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
-      hp: 1000,
+      hp: 500,
       maxHp: 1000,
-      shots: [inFlight({ damage: 100 })],
+      shots: [inFlight({ damage: 200 })],
     });
     host.dispatchPacket(newtick(), session);
-    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    host.dispatchPacket(enemyShoot(100, 5, 200), session);
+    host.dispatchPacket(playerHit(100, 5), session); // 500 → 300, and it is spent
+
+    // A multi-hit shot stays in the world after it lands. Announcing another
+    // one only serves to take the forecast again: counting the spent shot would
+    // charge its 200 twice and leave 100, at the forecast's floor.
+    host.dispatchPacket(enemyShoot(101, 5, 1), session);
     expect(sendToServer).not.toHaveBeenCalled();
   });
 
@@ -448,10 +472,10 @@ describe('the auto-nexus plugin', () => {
     const { session, sendToServer } = fakeSession({
       hp: 300,
       maxHp: 1000,
-      shots: [inFlight({ damage: 100, y: 13 })], // three tiles off the line
+      shots: [inFlight({ damage: 250, y: 13 })], // three tiles off the line
     });
     host.dispatchPacket(newtick(), session);
-    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+    host.dispatchPacket(enemyShoot(100, 5, 250), session);
     expect(sendToServer).not.toHaveBeenCalled();
   });
 

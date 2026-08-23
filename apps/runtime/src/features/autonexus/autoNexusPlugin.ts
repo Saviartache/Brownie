@@ -10,14 +10,23 @@
  * it needs to be. The same hit was in the air for most of a second first, as a
  * shot whose curve and size the runtime already knows, so a hit that is *about*
  * to happen can be read off the world and left before the client says a word.
- * See {@link strikesWithin} for why forecasting is safe here when an earlier
- * attempt at it was not: what is predicted is not danger but the health left if
- * these particular shots land, against the same threshold as every other path.
  *
- * So health is tracked ahead of the server (see {@link HpTracker}), the shots on
- * their way in are counted against it every few milliseconds, and either half
- * crossing the threshold escapes — after which every acknowledgement is dropped,
- * so the hits the escape was racing never reach the server at all.
+ * **The two answer to different floors, and that is what keeps the earlier one
+ * honest.** Health that has actually gone is a fact, and the ordinary threshold
+ * is what it is measured against. A forecast is not: shots are inbound
+ * constantly, and most are dodged, walked out of, or predicted wrong, so a
+ * forecast has to be *nearly fatal* — a fraction of that threshold, see
+ * {@link DEFAULT_PREDICTED_THRESHOLD_PERCENT} — before it is worth a map on.
+ * The reference implementation splits the same rule the same way, and its
+ * predicted threshold is a quarter of its force threshold. Escaping on a
+ * forecast at the ordinary one is the mistake that made this feature leave a
+ * dungeon at 87% health with five shots inbound, none of them lethal.
+ *
+ * So health is tracked ahead of the server (see {@link HpTracker}), decremented
+ * the instant the client acknowledges a hit, and the shots on their way in are
+ * counted against it — but against its own floor — every few milliseconds.
+ * Either crossing escapes, after which every acknowledgement is dropped, so the
+ * hits the escape was racing never reach the server at all.
  *
  * The acknowledgements are all client→server: `PLAYERHIT` for a shot,
  * `AOEACK` for an area effect, `GROUNDDAMAGE` for a damaging tile. `ENEMYSHOOT`
@@ -49,6 +58,7 @@ import { strikesWithin } from './impact.js';
 import {
   AOE_MAX_AGE_MS,
   DEFAULT_CLOSE_SPAWN_TILES,
+  DEFAULT_PREDICTED_THRESHOLD_PERCENT,
   DEFAULT_PREDICT_WITHIN_MS,
   DEFAULT_THRESHOLD_PERCENT,
   FORECAST_INTERVAL_MS,
@@ -106,9 +116,21 @@ export function createAutoNexusPlugin(): Plugin {
         label: 'Leave before the hit lands',
         default: true,
       });
-      // **The knob that decides how early is too early.** Every millisecond
-      // here is a millisecond of head start for the escape and a millisecond
-      // the player had to walk out of the shot instead — see
+      // **The knob that decides whether this is a safety net or a panic
+      // button**, and it is not the same one as above — see
+      // {@link DEFAULT_PREDICTED_THRESHOLD_PERCENT}. Shots that are going to
+      // land are the ordinary state of a dungeon; only a forecast that is
+      // nearly fatal is worth a map on.
+      const predictedThresholdPercent = context.settings.range('predictedThresholdPercent', {
+        label: 'Escape on a forecast at or below (% health)',
+        default: DEFAULT_PREDICTED_THRESHOLD_PERCENT,
+        min: 1,
+        max: 95,
+        step: 1,
+        visibleWhen: { key: 'predictHits', equals: [true] },
+      });
+      // Every millisecond here is a millisecond of head start for the escape
+      // and a millisecond the player had to walk out of the shot instead — see
       // {@link DEFAULT_PREDICT_WITHIN_MS}.
       const predictWithinMs = context.settings.range('predictWithinMs', {
         label: 'Count shots landing within (ms)',
@@ -165,12 +187,18 @@ export function createAutoNexusPlugin(): Plugin {
       // ── Leaving before the hit lands ────────────────────────────────────
 
       /**
-       * Escapes if the shots already in flight would take health to the floor.
+       * Escapes if the shots already in flight would leave almost nothing.
+       *
+       * **Against its own floor, and a much lower one.** A shot that is going to
+       * land is the ordinary state of a dungeon: it may be dodged, walked out of
+       * or predicted wrong, and leaving the map every time one is inbound is a
+       * feature nobody can play with. What earns an escape here is a forecast
+       * that is nearly fatal — see {@link DEFAULT_PREDICTED_THRESHOLD_PERCENT}
+       * for the split, which is the reference implementation's.
        *
        * Nothing here is charged to {@link HpTracker}: a shot that has not
-       * connected is not damage, and the acknowledgement — which may never come,
-       * because the player may walk out of it — is what pays for it. This only
-       * ever asks what health *would* be.
+       * connected is not damage, and the acknowledgement — which may never come
+       * — is what pays for it. This only ever asks what health *would* be.
        *
        * Silent without the game's projectile data, which is what
        * `world.projectiles()` is built from. That is why the acknowledgement
@@ -186,27 +214,35 @@ export function createAutoNexusPlugin(): Plugin {
 
         const now = session.world.gameTimeMs;
         const withinMs = predictWithinMs.get();
-        const percent = thresholdPercent.get();
+        const percent = predictedThresholdPercent.get();
         let damage = 0;
         let shots = 0;
 
         for (const shot of session.world.projectiles()) {
-          if (!strikesWithin(now, self, shot, withinMs, FORECAST_SAMPLE_STEP_MS)) continue;
-          // The damage the shot was *announced* with, which is what the server
-          // will apply, in preference to the figure in its data file. Not
-          // treated as piercing: unlike an unidentified acknowledgement this is
-          // a shot we have seen, and assuming armour does nothing would invent
-          // damage rather than round towards safety.
+          // **A shot the client has already answered for is spent.** Its damage
+          // is on the tracked health already, and `BulletLog.consume` dropping
+          // it is how that is known here. Multi-hit shots stay in the world
+          // after landing, so counting one twice is not hypothetical — it is
+          // the difference between the forecast above and one that invents a
+          // second hit the player will never take. The damage is taken from the
+          // announcement rather than the shot's data file for the same reason:
+          // it is the figure the server will apply.
           const announced = state.bullets.damageOf(shot.ownerId, shot.bulletId);
-          damage += damageTaken(announced ?? shot.damage, {
+          if (announced === undefined) continue;
+          if (!strikesWithin(now, self, shot, withinMs, FORECAST_SAMPLE_STEP_MS)) continue;
+
+          // Not treated as piercing: unlike an unidentified acknowledgement this
+          // is a shot we have seen, and assuming armour does nothing would
+          // invent damage rather than round towards safety.
+          damage += damageTaken(announced, {
             defense: self.defense,
             conditions: conditionsOf(session),
             piercing: false,
           });
           shots += 1;
           if (!state.hp.atOrBelowPercent(percent, damage)) continue;
-          const what = shots === 1 ? 'an inbound shot' : `${String(shots)} inbound shots`;
-          escape(session, state, `${what} for ${String(damage)}`);
+          const what = shots === 1 ? 'shot' : 'shots';
+          escape(session, state, `forecast: ${String(shots)} ${what} for ${String(damage)}`);
           return;
         }
       };

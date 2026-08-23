@@ -37,13 +37,28 @@ export const DEFAULT_CLOSE_SPAWN_TILES = 0.15;
  * Default window a predicted hit has to land in to be worth escaping, in
  * milliseconds.
  *
- * Long enough that the escape is on the wire well before the client
- * acknowledges the hit, and short enough that "the player stands still" is
- * nearly true — the assumption `impact.ts` forecasts on. A wider window does
- * not find more lethal shots, only earlier ones, and an earlier one is one the
- * player had more time to walk out of.
+ * The reference implementation's `PredictedAutoNexusTime`. Long enough that the
+ * escape is on the wire before the client acknowledges the hit, and short
+ * enough that "the player stands still" is nearly true — the assumption
+ * `impact.ts` forecasts on. A wider window does not find more lethal shots,
+ * only earlier ones, and an earlier one is one the player had more time to
+ * walk out of.
  */
-export const DEFAULT_PREDICT_WITHIN_MS = 300;
+export const DEFAULT_PREDICT_WITHIN_MS = 200;
+
+/**
+ * Default health share at which a *forecast* escapes, as a percentage.
+ *
+ * **Deliberately far below {@link DEFAULT_THRESHOLD_PERCENT}, and that gap is
+ * the whole reason the forecast is safe to have.** A hit that has landed is a
+ * fact and is worth leaving on; a hit that is merely on its way may still be
+ * walked out of, dodged, or predicted wrong — so it has to be very nearly fatal
+ * before it is worth spending a dungeon on. The reference implementation splits
+ * the same two rules the same way: `ForceAutoNexusHealth` against health that
+ * has actually gone, `PredictedAutoNexusHealth` — a quarter of it — against a
+ * forecast.
+ */
+export const DEFAULT_PREDICTED_THRESHOLD_PERCENT = 10;
 
 /**
  * Spacing of the predicted positions the forecast sweeps between.
