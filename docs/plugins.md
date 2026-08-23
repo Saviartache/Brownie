@@ -183,6 +183,62 @@ is only unique within a map**, so an entry carried across one does not cost
 memory, it acts on the wrong object. `features/autonexus/BulletLog.ts` is the
 worked example.
 
+## Injecting a packet toward the server
+
+**Read this before writing a plugin that sends anything.** A client→server
+packet is slipped into a stream the server is already tracking, and it has to
+look like something that stream would have produced. Four rules, every one of
+them learned by ending a live session:
+
+**1. Stamp `time` with `session.world.clientTimeMs`, read at the moment of
+sending.** That is the clock the *game client* puts on its own packets — not
+`world.gameTimeMs`, which counts from when this proxy opened the server link.
+The two are unrelated numbers: the client has usually been running for a while,
+through other maps, before this connection existed. A packet stamped with the
+wrong one is discarded in silence — no error, no effect, nothing in the stream
+to say so, and since nothing acknowledges an item move or a drink either, the
+result is indistinguishable from a refusal. `USEITEM`, `INVENTORYSWAP`,
+`PLAYERSHOOT`, `MOVE` and their neighbours all carry one.
+
+**2. Never let a stamp go backwards.** The client's stamps are a rising
+sequence and a packet injected into the middle of it is part of that sequence.
+So do not cache a stamp and reuse it later. `clientTimeMs` will not read behind
+the client's own last stamp, but the *order* of what a plugin sends is still the
+plugin's to get right.
+
+**3. Set the fields a working implementation sets, and no more — a trailing
+optional in the definition file is not an invitation.** `INVENTORYSWAP` has an
+optional `tickId` there; this build of the game does not carry it. Filling it in
+— which looks like exactly the right way to place an operation in the tick
+sequence — made the server answer `Bad message received` and hang up, on *every*
+swap including the one that had been working a minute earlier. An optional field
+is a field some build had, not one this build wants.
+
+**4. Leave a gap between packets that change the same thing.** Two item moves
+inside half a second end the session; the same two seven seconds apart are fine.
+Auto-loot holds everything it sends to one second by default and never resets
+that spacing — not even when the player steps from one loot bag onto another,
+which is precisely the case that produced the fatal pair.
+
+### What the server says when it refuses
+
+`FAILURE` is the only account it gives before hanging up, and it is worth
+knowing how to read even though nothing logs it by default. Its `errorId` is
+always 0 and says nothing; the **message** is what distinguishes the two kinds
+of failure:
+
+| message | what it means |
+|---|---|
+| empty | a rule was refused — the packet parsed, its contents were rejected |
+| `Bad message received` | the packet did not parse — wrong fields, wrong length |
+
+While chasing one of these, log `FAILURE` from a packet handler; the difference
+between those two answers is what tells a malformed packet from a rejected
+action, and confusing them costs days.
+
+The full reasoning, and the sessions that paid for each rule, are under *the
+client's timeline* in [`docs/architecture.md`](architecture.md).
+
 ## Native features
 
 ```ts

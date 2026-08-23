@@ -124,7 +124,11 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
         if (found === undefined) return false;
 
         session.sendToServer('USEITEM', {
-          time: Math.trunc(nowMs),
+          // The client's own clock, never the connection's: a packet stamped
+          // with the wrong one is dropped by the server without a word, and
+          // nothing acknowledges a drink, so it looks exactly like a potion
+          // that did nothing.
+          time: Math.trunc(session.world.clientTimeMs),
           slotObject: {
             objectId: session.self.objectId,
             slotId: found.slotId,
@@ -134,9 +138,6 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
           useType: USE_TYPE_SELF,
           unknownInt: 0,
         });
-        context.log.debug(
-          `drank ${wanted} from slot ${String(found.slotId)} at ${String(Math.round(current))}/${String(Math.round(maximum))}`,
-        );
         return true;
       };
 

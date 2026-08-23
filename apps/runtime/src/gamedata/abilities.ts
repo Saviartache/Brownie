@@ -11,10 +11,21 @@
  * that never appeared in either set — every one added since the list was
  * written — silently did nothing.
  *
- * Everything below is read once at startup with the rest of the catalog.
- * Nothing here is on a hot path.
+ * Two facts come out of an item and they are used for different things: how it
+ * may be fired ({@link AbilityUse}) and what firing it gives you
+ * ({@link AbilityFacts.benefits}). The second is what stops a priest's tome
+ * going off in an empty hallway; see `abilityEffects.ts` for what the effect
+ * names mean.
+ *
+ * Read once at startup with the rest of the catalog. Nothing here is hot.
  */
 
+import {
+  AIMED_EFFECTS,
+  MOVEMENT_EFFECTS,
+  benefitOf,
+  type AbilityBenefit,
+} from './abilityEffects.js';
 import {
   attribute,
   childText,
@@ -38,7 +49,7 @@ export const AbilityUse = {
   Never: 'never',
   /** Aimed at a point: cast it at an enemy, and only while one is in range. */
   Aimed: 'aimed',
-  /** A buff, an aura or a heal centred on the character itself. */
+  /** Cast on the character itself — a buff, an aura, a heal. */
   SelfCast: 'self-cast',
 } as const;
 
@@ -52,93 +63,28 @@ export interface AbilityFacts {
   /** The game's own cooldown, for the few abilities that declare one. */
   readonly cooldownMs: number | undefined;
   /**
-   * How long what a self-cast grants lasts — the shortest of its effects.
+   * How long the shortest thing it grants lasts, for the ones that grant
+   * something the runtime cannot see on the character.
    *
-   * This is what makes "when is the buff worth casting again?" answerable from
-   * the file instead of from a constant. The reference implementation recast
-   * every self-buff every 2500 ms, which for a seal that lasts six seconds is
-   * two casts in three thrown away, and for one that lasts two seconds is a
-   * buff that spends a third of the fight down.
-   *
-   * The *shortest*, because a tome that grants an aura and a speed boost is
-   * only fully applied while both stand. Wisdom extends what the file declares
-   * and nothing here models that, so a recast on this figure is early rather
-   * than late — which wastes a little mana and never leaves the buff down.
+   * A stat boost is the case this exists for: `AttBoost` and its five siblings
+   * live in the second condition stat, which the runtime does not carry, so
+   * "is it still up?" cannot be asked and the file's own duration is the only
+   * answer there is. Anything that grants a *readable* condition is paced by
+   * that bit instead, which is exact where this is a guess — wisdom stretches
+   * every duration in the file and nothing here models that.
    *
    * `undefined` for an ability that grants nothing timed, such as a plain heal.
    */
   readonly refreshMs: number | undefined;
+  /**
+   * What it gives the character, in the order the file lists it.
+   *
+   * Empty for an ability that gives nothing this build can name — which is not
+   * the same as an ability that gives nothing, and is why an empty list falls
+   * back to "fire it when something is nearby" rather than to never firing.
+   */
+  readonly benefits: readonly AbilityBenefit[];
 }
-
-/**
- * Effects that move the character.
- *
- * Every one of these is a reason never to fire the ability on a timer, and the
- * reason is the same: where the character ends up stops being something the
- * player decided.
- */
-const MOVEMENT_EFFECTS: ReadonlySet<string> = new Set([
-  'Teleport',
-  'TeleportToObject',
-  'MarkAndTeleport',
-  'Dash',
-  'ChannelDash',
-]);
-
-/**
- * Effects that land where `USEITEM.itemUsePos` points.
- *
- * Also, and more importantly, the effects that are worth nothing without
- * something to use them on: every one of these either damages or places
- * something, so casting into an empty room is mana spent on nobody. A few of
- * them — the novas and the blasts — are actually centred on the character
- * whatever point is sent, and they are here rather than below because the
- * question this set answers is "does it need a target", and they do.
- */
-const AIMED_EFFECTS: ReadonlySet<string> = new Set([
-  'Shoot',
-  'BulletNova',
-  'BulletCreate',
-  'ShurikenAbility',
-  'Trap',
-  'PoisonGrenade',
-  'Lightning',
-  'RaiseDead',
-  'SpawnCreep',
-  'ObjectToss',
-  'Decoy',
-  'Totem',
-  'EffectBlast',
-  'DetonateHex',
-  'DamageNova',
-  'DazeBlast',
-  'StasisBlast',
-  'VampireBlast',
-]);
-
-/** Effects that act on the character and whoever stands near it. */
-const SELF_EFFECTS: ReadonlySet<string> = new Set([
-  'ConditionEffectSelf',
-  'ConditionEffectAura',
-  'ClearConditionEffectSelf',
-  'RemoveNegativeConditionsSelf',
-  'StatBoostSelf',
-  'StatBoostAura',
-  'DamageMultAura',
-  'BoostRange',
-  'GenericActivate',
-  'SelfTransform',
-  'Heal',
-  'HealNova',
-  'Magic',
-  'MagicNova',
-  'Pet',
-  // Invisibility. Auto-casting it is a real choice rather than an obvious one —
-  // it breaks the moment the player shoots — but it is a buff on the character
-  // and this file's job is to say what the item does, not whether to want it.
-  // The plugin's self-cast switch is where that is decided.
-  'Sneak',
-]);
 
 /** `<MultiPhase />` — the marker on an ability that is held down. */
 const HELD_MARKER = 'MultiPhase';
@@ -161,8 +107,8 @@ export function readAbilityFacts(element: string): AbilityFacts | undefined {
 
   let movement = false;
   let aimed = false;
-  let selfCast = false;
   let refreshMs: number | undefined;
+  const benefits: AbilityBenefit[] = [];
 
   for (const activation of activations) {
     const effect = elementText(activation) ?? '';
@@ -174,9 +120,15 @@ export function readAbilityFacts(element: string): AbilityFacts | undefined {
       aimed = true;
       continue;
     }
-    if (!SELF_EFFECTS.has(effect)) continue;
 
-    selfCast = true;
+    const benefit = benefitOf(effect, activation);
+    if (benefit === undefined) continue;
+    benefits.push(benefit);
+
+    // Only from what cannot be seen on the character: a duration kept beside a
+    // readable bit would be a second, worse answer to a question the bit
+    // already answers exactly.
+    if (benefit.conditionBit !== 0) continue;
     const duration = durationMsOf(activation);
     if (duration !== undefined && (refreshMs === undefined || duration < refreshMs)) {
       refreshMs = duration;
@@ -184,10 +136,11 @@ export function readAbilityFacts(element: string): AbilityFacts | undefined {
   }
 
   return {
-    use: useOf(element, movement, aimed, selfCast),
+    use: useOf(element, movement, aimed, benefits.length > 0),
     mpCost: parseGameNumber(childText(element, 'MpCost')) ?? 0,
     cooldownMs: secondsToMs(parseGameNumber(childText(element, 'Cooldown'))),
     refreshMs,
+    benefits,
   };
 }
 
@@ -198,10 +151,10 @@ export function readAbilityFacts(element: string): AbilityFacts | undefined {
  * and a sheath dashes *and* shoots. The one that decides is the one that makes
  * automatic use a bad idea, then the one that needs a target, then the rest.
  */
-function useOf(element: string, movement: boolean, aimed: boolean, selfCast: boolean): AbilityUse {
+function useOf(element: string, movement: boolean, aimed: boolean, gives: boolean): AbilityUse {
   if (movement || hasChild(element, HELD_MARKER)) return AbilityUse.Never;
   if (aimed) return AbilityUse.Aimed;
-  if (selfCast) return AbilityUse.SelfCast;
+  if (gives) return AbilityUse.SelfCast;
   // Every effect it declares is one nothing here recognises. Saying so is not
   // the same as saying it is safe to fire on a timer, and the game adds effects
   // faster than this file learns them.

@@ -8,7 +8,16 @@ export default tseslint.config(
     // `.venv` alongside `node_modules`: a Python virtual environment ships
     // vendored JavaScript inside `site-packages`, and linting somebody else's
     // `WScript` shim says nothing about this project.
-    ignores: ['**/dist/**', '**/node_modules/**', '**/.venv/**', '**/*.d.ts', 'apps/native/**'],
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/.venv/**',
+      '**/*.d.ts',
+      'apps/native/**',
+      // Other people's source, kept to be read rather than built. See
+      // `.gitignore`.
+      'references/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

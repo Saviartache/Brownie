@@ -158,14 +158,16 @@ describe('the auto-drink plugin', () => {
     host: PluginHost;
     session: SessionView;
     self: { hp: number; mp: number; conditions: number };
-    world: { gameTimeMs: number; mapName: string };
+    world: { gameTimeMs: number; clientTimeMs: number; mapName: string };
     sent: ReturnType<typeof vi.fn>;
   }
 
   function harness(
     over: Partial<{ hp: number; maxHp: number; mp: number; maxMp: number; map: string }> = {},
   ): Harness {
-    const world = { gameTimeMs: 10_000, mapName: over.map ?? 'Dungeon' };
+    // Deliberately different numbers: the packet must carry the client's clock,
+    // not the connection's, and only a test that can tell them apart says so.
+    const world = { gameTimeMs: 10_000, clientTimeMs: 987_000, mapName: over.map ?? 'Dungeon' };
     const self = {
       objectId: 7,
       objectType: 0x30e,
@@ -218,7 +220,7 @@ describe('the auto-drink plugin', () => {
     const h = harness({ hp: 700, maxHp: 1000 }); // exactly 70%
     tick(h);
     expect(h.sent).toHaveBeenCalledWith('USEITEM', {
-      time: 10_000,
+      time: 987_000,
       slotObject: { objectId: 7, slotId: 4, objectType: HEALTH_POTION },
       itemUsePos: { x: 4.5, y: 6.5 },
       useType: 1,

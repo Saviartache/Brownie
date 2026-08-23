@@ -16,13 +16,32 @@
 export const ON_TOP_TILES = 1;
 
 /**
- * Spacing between consecutive pickups. The *first* pickup on a bag is immediate.
+ * The least time between two item packets of ours — **across bags, not within
+ * one.**
  *
- * Stepping onto a bag and waiting a quarter of a second before anything happens
- * is the difference people notice, so the spacing is reset the moment the
- * player steps off every bag.
+ * The reference implementation spaced consecutive pickups by a quarter of a
+ * second and reset that spacing the moment the player stepped off every bag, so
+ * the first take from each new bag went out immediately. That reset is what
+ * killed sessions:
+ *
+ * ```
+ * 08:03:11.952  took 2594 from bag 291383 slot 0 into slot 1000000
+ * 08:03:18.964  took 2595 from bag 291531 slot 0 into slot 7
+ * 08:03:19.373  took 2594 from bag 291532 slot 0 into slot 1000000
+ * 08:03:19.476  FAILURE, empty message, and the connection closed
+ * ```
+ *
+ * Seven seconds between the first two and nothing happened; four hundred
+ * milliseconds between the next two — a different bag, so the spacing had been
+ * reset — and the server refused the second and hung up. Every disconnect this
+ * feature has caused has that shape: two item moves inside half a second.
+ *
+ * So the spacing is a floor on *everything* auto-loot sends and is never reset.
+ * A second is far above the four hundred milliseconds that fails and far below
+ * the seven that plainly works; it is the default rather than a constant
+ * because where the real limit sits between them is not known.
  */
-export const PICKUP_INTERVAL_MS = 250;
+export const PICKUP_INTERVAL_MS = 1000;
 
 /** How long before the same bag slot is tried again after an attempt. */
 export const RETRY_ITEM_AFTER_MS = 1500;
@@ -38,18 +57,6 @@ export const RETRY_ITEM_AFTER_MS = 1500;
 export const PENDING_TIMEOUT_MS = 1200;
 
 /**
- * How long a destination slot stays claimed after a potion is sent to it.
- *
- * Long, and deliberately: a belt slot's count is the only evidence a potion
- * landed, and it lags. Claiming the slot for half a minute is what stops a
- * second potion being sent to a slot that is about to fill.
- */
-export const SLOT_CLAIM_MS = 30_000;
-
-/** How long a bag slot stays claimed after a potion has been taken from it. */
-export const BAG_SLOT_CLAIM_MS = 30_000;
-
-/**
  * How long to leave a freshly seen shared bag alone.
  *
  * A white bag drops for the whole room, and taking from one the instant it
@@ -57,6 +64,14 @@ export const BAG_SLOT_CLAIM_MS = 30_000;
  * `ContainerFacts.shared`.
  */
 export const SHARED_BAG_DELAY_MS = 2000;
+
+/**
+ * How long a destination slot is left alone after it refuses an item.
+ *
+ * Long enough that a full inventory is not re-tested on every bag, short enough
+ * that a slot emptied by hand comes back into use without a map change.
+ */
+export const REFUSED_SLOT_MS = 30_000;
 
 /** Ticks of standing still before an idle player stops looting. */
 export const STATIONARY_TICK_LIMIT = 100;
@@ -85,6 +100,3 @@ export const MANUAL_PAUSE_MS = 4000;
  * ours has already gone.
  */
 export const MANUAL_BLOCK_MS = 1200;
-
-/** How often at most the guard says anything, so spam cannot fill the log. */
-export const GUARD_LOG_INTERVAL_MS = 1500;

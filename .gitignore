@@ -40,6 +40,18 @@ tools/extractor/tools/assetripper/*
 # its own virtual environment and Cheat Engine's own files with it.
 tools/cheatengine-mcp-bridge/
 
+# ── Reference implementations ───────────────────────────────────────────────
+# Other people's source, kept beside this one to be read rather than built:
+# `RealmEngine` is the implementation this project is a rewrite of, and
+# `RealmShark` is a packet analyser whose protocol handling is worth consulting
+# when the wire disagrees with `packet-definitions.json` — which it has.
+#
+# Not vendored and not submodules: nothing here is compiled, linked or shipped,
+# and neither is ours to redistribute. Clone them yourself:
+#
+#   git clone https://github.com/X-com/RealmShark.git references/RealmShark
+references/
+
 # ── Local machine state ─────────────────────────────────────────────────────
 # The working plan: what is finished, what is next, and what each stage has to
 # meet before it counts as done. Somebody's own notes about the work rather than

@@ -177,6 +177,98 @@ the rest, and the lifetimes differ per store because the questions do:
 | `TileMap` | ground the server has sent | the map changes |
 | `ProjectileStore` | shots **still in flight** | their flight ends, or the map changes |
 
+### The client's timeline: two clocks, one direction
+
+A client→server packet with a `time` field is a statement on a timeline the
+server is already tracking, and there are two ways to get it wrong. Both have
+cost a session.
+
+**Use the right clock.** `world.gameTimeMs` counts from the moment *this proxy*
+opened the server link. `world.clientTimeMs` is the clock the **game client**
+stamps on everything it sends, read off its own packets — `MOVE` records,
+`PONG`, `PLAYERSHOOT`. They agree only if the client's clock starts where our
+connection did, and it does not: the client has usually been running for a
+while, through other maps, before the connection this session is carrying.
+
+Anything sending a packet with a `time` field uses `clientTimeMs`. The server
+checks that stamp against what the client has been telling it and drops a packet
+that disagrees — with no error, no effect and nothing in the stream to say so.
+Because nothing acknowledges an item move or a drink either, the result is
+indistinguishable from a refusal: auto-loot walked its way through every slot in
+the inventory being "refused", and auto-drink logged a drink every 400 ms while
+the mana bar rose at exactly the rate of natural regeneration.
+
+**Never send a stamp that goes backwards.** What the client puts on the wire is
+a rising sequence, and the server is entitled to read it as one. A packet
+*injected into the middle of that stream* is part of the same sequence, so one
+carrying an earlier time than the client's own last packet is the timeline
+running backwards — which is not a value the server has to tolerate. Every
+calibration is taken from a reading that was already a moment old (a movement
+record describes where the player *was*), so an estimate alone can sit behind
+the client. `clientTimeMs` is therefore floored at the highest stamp seen, and
+`calibrateClientClock` is re-read on every stamped packet so the lag never gets
+frozen in.
+
+The practical rule for anything injecting toward the server:
+
+* stamp with `world.clientTimeMs` and nothing else;
+* do not hold a stamp and reuse it later — read it at the moment of sending;
+* leave room between injected packets rather than emitting several for one tick,
+  so what we add to the stream keeps the shape the client's own traffic has.
+
+### Two item moves inside half a second end the session
+
+Every disconnect auto-loot has caused has one shape, and it is not the item, the
+bag or the destination slot:
+
+```
+08:03:11.952  took 2594 from bag 291383 slot 0 into slot 1000000
+08:03:18.964  took 2595 from bag 291531 slot 0 into slot 7
+08:03:19.373  took 2594 from bag 291532 slot 0 into slot 1000000
+08:03:19.476  FAILURE, empty message, and the connection closed
+```
+
+Seven seconds between the first two and nothing happened. Four hundred
+milliseconds between the next two and the server refused the second and hung up.
+The reference implementation spaced pickups by 250 ms *and reset that spacing
+whenever the player stood on no bag*, so stepping from one bag to the next sent
+a move immediately — which is exactly the pair above, two different bags.
+
+So the spacing is a floor on everything the feature sends and is never reset.
+A second by default, exposed as a setting, because where the real limit sits
+between 400 ms and 7 s has not been measured.
+
+### A trailing optional the definition has and the game does not
+
+`packet-definitions.json` gives `INVENTORYSWAP` a trailing optional `tickId`.
+**The live build does not carry it.** Filling it in — a reasonable-looking way
+to place an operation in the tick sequence — got every swap back as `FAILURE`
+with the message `Bad message received`, including the stack join that had been
+working a minute earlier.
+
+That message is the server failing to *parse* the packet rather than refusing
+what it asked for: four bytes this build does not expect. An optional field in
+that file is a field some build had, not one this build wants.
+
+**So set only the fields a working implementation sets, and treat a trailing
+optional as absent unless the live game has been seen to carry one.**
+
+### What the server says when it refuses
+
+`FAILURE` is the only account the server gives before hanging up. Nothing logs
+it by default — its `errorId` is always 0 and carries no information — but the
+**message** is worth knowing about, because it separates two failures that look
+identical from the outside:
+
+| message | what it means |
+|---|---|
+| empty | a rule was refused: the packet parsed, its contents were rejected |
+| `Bad message received` | the packet did not parse: wrong fields, wrong length |
+
+Several disconnects were diagnosed as the wrong one of those before anything
+read it. When chasing a refusal, log `FAILURE` from a packet handler for the
+duration; that one line is what tells a malformed packet from a rejected action.
+
 ### A slot the server has not stated is absent, not empty
 
 `SelfState` carries the player's own item slots — what is worn, carried, in the
@@ -188,18 +280,33 @@ Which stat carries which slot is a fact about a game build, and **the two stat
 tables in this repository disagree** about the backpack and the belt.
 `packages/protocol/data/stat-types.json` puts the backpack at 135–142 and
 148–155 with the belt at 143–145; the reference implementation, from a live
-capture, put the backpack at 131–146 and the belt at 116–118. It cannot be
+capture, puts the backpack at 131–146 and the belt at 116–118. It cannot be
 settled from a file on disk: the game's metadata is name-obfuscated, so the enum
-is not in it. `state/ItemSlots.ts` uses the first, records the second, and is
-the only place either appears.
+is not in it. `state/ItemSlots.ts` holds the answer and is the only place it
+appears.
 
-What makes leaving that unresolved safe is the absent-versus-empty rule. Point
-the ids at nothing and nothing is *reported* for those slots: auto-loot declines
-to use the backpack, auto-drink declines to use the belt, and both fall back to
-the eight carried slots — whose ids the two tables agree on. Treating an
-unstated slot as empty is what would aim a swap at a slot that is actually full.
-The `objectType` an `INVENTORYSWAP` carries is the second guard, because the
-server refuses a swap whose view of the destination disagrees with its own.
+**A live session settled it against the JSON table**, by a four-slot shift: a
+swap aimed at a backpack slot chosen because stat 139 read as empty was refused
+over and over. Under the capture 139 is backpack slot **8**, so the packet named
+a slot four places earlier than the one that was free — a swap into an occupied
+slot, which is what the server refuses.
+
+Three rules keep a future disagreement from costing anything:
+
+* **Only a slot the server has stated is ever named.** "Empty" has to be
+  something the server said about that slot, not the absence of anything being
+  said, which is why the inventory view reports a list of stated slots rather
+  than an array with gaps. Being reported is also what says the third potion-belt
+  slot exists: it is an unlock, and the server states it exactly when the
+  character has it.
+* **A move is confirmed at both ends before another goes out.** The destination
+  filling says the item arrived; the *source* bag slot emptying says the server
+  has told us about the bag it came out of. Acting on the first alone aims the
+  next swap with a picture of the bag from before the last one.
+* **A destination that refuses an item is dropped, not retried.** A move that
+  never arrives is the only answer the server gives to a refusal, and it is
+  treated as one — which turns a wrong slot map into a pickup that quietly does
+  not happen instead of a packet a second saying so.
 
 ### A shot is gone the moment its flight ends
 

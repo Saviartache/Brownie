@@ -78,14 +78,13 @@ const PLAN_INTERVAL_MS = 20;
 const MIN_PLAN_GAP_MS = 6;
 
 /**
- * How often the walk-to-cursor target is written to the log while the chord is
- * held.
+ * How long the walk-to-cursor chord has to have been up before holding it again
+ * is worth another line.
  *
- * Often enough that a sweep of the mouse shows up as a sweep in the file, and
- * rare enough that a second of holding the chord is five lines rather than
- * forty.
+ * Comfortably longer than the gap between two plans, so one press is one line
+ * however long it is held, and two presses are two.
  */
-const TARGET_LOG_INTERVAL_MS = 200;
+const CHORD_IDLE_MS = 400;
 
 /**
  * How far ahead the module is pointed at, at least.
@@ -527,7 +526,8 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       /** Whether anything is currently drawn, so it can be cleared exactly once. */
       let showing = false;
       let saidTargetAtMs = 0;
-      let saidVerdict = '';
+      /** Whether the last line said the planner had the wheel. */
+      let saidDriving = false;
       /**
        * Whether the module is currently being told where to walk.
        *
@@ -619,17 +619,18 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // cursor points exists only inside the game, and it reaches this line
         // through a camera, two processes and a unit conversion — so a walk that
         // goes the wrong way has several possible causes and no way to tell them
-        // apart from outside. Throttled because this runs forty times a second,
-        // and at debug because it is a question, not news.
+        // apart from outside. Said once when the chord goes down rather than
+        // five times a second while it is held: the question it answers is
+        // "which way did that send me", and the first line answers it.
         const now = Date.now();
-        if (now - saidTargetAtMs >= TARGET_LOG_INTERVAL_MS) {
-          saidTargetAtMs = now;
+        if (now - saidTargetAtMs >= CHORD_IDLE_MS) {
           const self = session.self;
           context.log.debug(
             `cursor walk: ${self.x.toFixed(2)},${self.y.toFixed(2)}` +
               ` towards ${target.x.toFixed(2)},${target.y.toFixed(2)}`,
           );
         }
+        saidTargetAtMs = now;
 
         controller.reset();
         commanding = true;
@@ -723,14 +724,21 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           avoidBlasts.get() ? liveBlasts(map) : NO_BLASTS,
         );
 
-        if (plan.verdict !== saidVerdict) {
-          saidVerdict = plan.verdict;
+        // **Only when the wheel changes hands.** This used to speak on every
+        // change of verdict, and a verdict changes several times a second in a
+        // fight — guide to evade and back is the planner refining an answer, not
+        // news, and a hundred lines of it a minute buries everything else in the
+        // log. What is worth a line is the thing a person can see happening:
+        // the dodge taking over, and giving back.
+        if (plan.steer !== saidDriving) {
+          saidDriving = plan.steer;
           context.log.debug(
-            `dodge ${plan.verdict}: ${String(plan.trackedShots)} shots,` +
-              ` room ${plan.clearanceTiles.toFixed(2)}t,` +
-              ` clear for ${describe(plan.unsafeAtMs)},` +
-              ` hit in ${describe(plan.impactMs)},` +
-              ` at ${(plan.speedScale * 100).toFixed(0)}% speed`,
+            plan.steer
+              ? `dodge took over (${plan.verdict}): ${String(plan.trackedShots)} shots,` +
+                  ` room ${plan.clearanceTiles.toFixed(2)}t,` +
+                  ` clear for ${describe(plan.unsafeAtMs)},` +
+                  ` hit in ${describe(plan.impactMs)}`
+              : `dodge gave the wheel back (${plan.verdict})`,
           );
         }
 

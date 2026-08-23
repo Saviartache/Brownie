@@ -14,9 +14,12 @@ import { MOVEMENT_EPSILON, PENDING_TIMEOUT_MS } from './constants.js';
 /**
  * A set of keys held until a deadline.
  *
- * Three things want exactly this and they wanted three near-identical maps in
- * the reference implementation: bag slots already taken from, destination slots
- * already aimed at, and items tried too recently to try again.
+ * The reference implementation kept three near-identical maps of these — bag
+ * slots taken from, destination slots aimed at, and items tried too recently to
+ * try again. Two of the three were only ever needed because a potion moved onto
+ * the potion belt could not be *seen* to arrive; nothing writes to the belt any
+ * more (see `destination.ts`), and a move to an ordinary slot is confirmed by
+ * the slot filling, so what is left is the retry cooldown.
  */
 export class Claims<K> {
   readonly #until = new Map<K, number>();
@@ -47,37 +50,54 @@ export class Claims<K> {
   }
 }
 
+/** Where a move took an item from — one slot of one container. */
+export interface MoveSource {
+  readonly objectId: number;
+  readonly slot: number;
+  readonly objectType: number;
+}
+
 /** A move that has gone out and not yet been seen to land. */
 export interface PendingMove {
   readonly slotId: number;
   /** What the slot's count should read once it lands, for a slot that counts. */
   readonly expectedQuantity: number | undefined;
+  /** The bag slot it came out of, which has to be seen to empty. */
+  readonly source: MoveSource;
   readonly sinceMs: number;
   /** Whether it was a quaff potion, which is what the manual guard cares about. */
   readonly potion: boolean;
 }
 
 export class LootSession {
-  /** Bag slots taken from, so an emptied slot is not tried again immediately. */
-  readonly bagSlots = new Claims<string>();
-  /** Destination slots aimed at, so two potions never chase one slot. */
-  readonly slots = new Claims<number>();
   /** Items tried recently, so a refusal is retried rather than spun on. */
   readonly attempts = new Claims<string>();
+  /**
+   * Destination slots that would not take an item.
+   *
+   * A slot the server refuses is a slot that is not what we think it is —
+   * occupied, or not a slot at all — and the only way to find that out is to
+   * try. Having tried, stop: the alternative is one refused swap per second for
+   * as long as the player stands on the bag.
+   */
+  readonly refusedSlots = new Claims<number>();
 
   /** When a bag was first seen, for the shared-bag delay. */
   readonly bagSeenAtMs = new Map<number, number>();
   /** Bags already announced, so the notifier says each one once. */
   readonly announced = new Set<number>();
 
-  /** When the last move went out, for the spacing between consecutive ones. */
+  /**
+   * When the last item packet went out.
+   *
+   * The spacing every move is held to, and it is never reset — see
+   * `PICKUP_INTERVAL_MS` for the sessions that cost.
+   */
   lastActionAtMs = Number.NEGATIVE_INFINITY;
   /** Until when the player's own potion packets are held back. */
   blockUntilMs = 0;
   /** Until when auto-loot stands down after the player acted by hand. */
   pauseUntilMs = 0;
-  /** When the guard last said something, so it cannot flood the log. */
-  lastGuardLogAtMs = Number.NEGATIVE_INFINITY;
 
   #pending: PendingMove | undefined;
   #lastX = Number.NaN;
@@ -97,20 +117,40 @@ export class LootSession {
   }
 
   /**
-   * Clears the pending move once its destination has filled or it has waited
-   * long enough to be assumed lost.
+   * Clears the pending move once it has been seen to happen at **both ends**,
+   * or has waited long enough to be assumed lost.
    *
-   * A destination the server has never stated cannot be seen to fill, so such a
-   * move is only ever cleared by the timeout — which is the behaviour that lets
-   * a build with unknown backpack stats keep working, one slow move at a time,
-   * rather than stopping after the first.
+   * Both ends, because one is not enough. The destination filling says the item
+   * arrived; the bag slot emptying says the server has told us about the bag it
+   * came out of. Acting on the first alone means the next swap is aimed using a
+   * picture of the bag from before the last one — and a swap naming a bag slot
+   * that no longer holds what we say it holds is how the second pickup out of
+   * one bag ended a session.
+   *
+   * @param sourceCleared Whether the bag slot this came out of has been seen to
+   *   change. A bag that is gone entirely counts: there is nothing left to be
+   *   stale about.
+   * @returns the move that was **abandoned** — sent, waited on, and never seen
+   *   to arrive. That is the server having refused it, silently, which is the
+   *   only answer it gives; the caller's job is to stop aiming at that slot.
+   *   Without this the same refused swap goes out every second forever, which
+   *   is what a wrong idea about the backpack's stat ids looked like from the
+   *   outside: a pickup that never happens and a packet a second saying so.
    */
-  resolvePending(inventory: InventoryView, nowMs: number): void {
+  resolvePending(
+    inventory: InventoryView,
+    sourceCleared: (move: PendingMove) => boolean,
+    nowMs: number,
+  ): PendingMove | undefined {
     const move = this.#pending;
-    if (move === undefined) return;
-    if (nowMs - move.sinceMs >= PENDING_TIMEOUT_MS || landed(inventory, move)) {
+    if (move === undefined) return undefined;
+    if (landed(inventory, move) && sourceCleared(move)) {
       this.#pending = undefined;
+      return undefined;
     }
+    if (nowMs - move.sinceMs < PENDING_TIMEOUT_MS) return undefined;
+    this.#pending = undefined;
+    return move;
   }
 
   /** Records where the player is, and how long they have been there. */
@@ -126,9 +166,8 @@ export class LootSession {
 
   /** Drops what has lapsed from every claim. */
   expire(nowMs: number): void {
-    this.bagSlots.expire(nowMs);
-    this.slots.expire(nowMs);
     this.attempts.expire(nowMs);
+    this.refusedSlots.expire(nowMs);
   }
 
   /**
@@ -139,9 +178,8 @@ export class LootSession {
    * wearing the same number.
    */
   reset(): void {
-    this.bagSlots.clear();
-    this.slots.clear();
     this.attempts.clear();
+    this.refusedSlots.clear();
     this.bagSeenAtMs.clear();
     this.announced.clear();
     this.#pending = undefined;
@@ -160,6 +198,8 @@ export function bagSlotKey(objectId: number, slot: number, objectType: number): 
 function landed(inventory: InventoryView, move: PendingMove): boolean {
   const slot = inventory.at(move.slotId);
   if (slot === undefined) return false;
+  // A slot being occupied answers it, except for one that was already occupied
+  // before the move — a stack being added to, where the count is the evidence.
   return move.expectedQuantity === undefined
     ? slot.objectType !== -1
     : slot.quantity >= move.expectedQuantity;

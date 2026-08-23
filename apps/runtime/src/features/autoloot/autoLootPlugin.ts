@@ -15,13 +15,15 @@
  * after {@link PENDING_TIMEOUT_MS}; everything in `LootSession` is that idea.
  *
  * **A move is aimed at a slot the server has stated, never at one assumed to
- * exist.** The state layer reports a slot only when the server has said what is
- * in it, which is what makes an unresolved question about the backpack's stat
- * ids cost nothing: on a build where they have moved, the backpack is simply
- * never used. The `objectType` the swap carries is the second guard — the
- * server refuses a swap whose view of the destination disagrees with its own,
- * so the worst case is a move that does not happen rather than an item thrown
- * into a bag.
+ * exist**, and three guards keep it that way — each of them bought with a live
+ * session. The state layer reports a slot only when the server has said what is
+ * in it, so a build that moved the backpack's stat ids means the backpack goes
+ * unused rather than mis-addressed. The `objectType` the swap carries is
+ * checked by the server against its own view, so a mistaken "this slot is
+ * empty" is refused rather than acted on. And a destination that *is* refused —
+ * seen as a move that never arrives — is dropped for a while instead of retried
+ * once a second forever, which is what the second of those sessions looked
+ * like from the log.
  */
 
 import {
@@ -40,16 +42,14 @@ import { describeBag } from './announce.js';
 import { bagSlotItem, findBags, type NearbyBag } from './bags.js';
 import { enlargeBags } from './bigBags.js';
 import {
-  BAG_SLOT_CLAIM_MS,
-  GUARD_LOG_INTERVAL_MS,
   MANUAL_BLOCK_MS,
   MANUAL_PAUSE_MS,
   NOTIFY_RADIUS_TILES,
   ON_TOP_TILES,
   PICKUP_INTERVAL_MS,
+  REFUSED_SLOT_MS,
   RETRY_ITEM_AFTER_MS,
   SHARED_BAG_DELAY_MS,
-  SLOT_CLAIM_MS,
   STATIONARY_TICK_LIMIT,
 } from './constants.js';
 import { findBeltDestination, findFreeSlot, type Destination } from './destination.js';
@@ -125,12 +125,21 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         default: false,
       });
       const healthPotions = context.settings.boolean('healthPotions', {
-        label: 'Health potions',
+        label: 'Health potions — top up the belt',
         group: taking,
-        default: false,
+        default: true,
       });
       const magicPotions = context.settings.boolean('magicPotions', {
-        label: 'Mana potions',
+        label: 'Mana potions — top up the belt',
+        group: taking,
+        default: true,
+      });
+      // Topping the belt up and hoarding spares are different wants, and the
+      // reference implementation had one switch for both — so anybody who
+      // wanted their belt kept full got their inventory filled with the
+      // overflow as well.
+      const sparePotions = context.settings.boolean('sparePotions', {
+        label: 'Also take spare potions into the inventory',
         group: taking,
         default: false,
       });
@@ -196,6 +205,18 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         label: 'Stop while standing still',
         group: behaviour,
         default: true,
+      });
+      // Exposed because where the server's real limit sits is not known: four
+      // hundred milliseconds between two moves ends the session and seven
+      // seconds plainly does not, and nothing has been measured in between.
+      const pickupIntervalMs = context.settings.number('pickupIntervalMs', {
+        label: 'Least time between pickups (ms)',
+        group: behaviour,
+        advanced: true,
+        default: PICKUP_INTERVAL_MS,
+        min: 400,
+        max: 5000,
+        step: 100,
       });
       const drinkStatPotions = context.settings.boolean('drinkStatPotions', {
         label: 'Drink stat potions straight from the bag',
@@ -295,24 +316,6 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         return ceiling > 0 && session.self.permanentStats[raises] >= ceiling;
       };
 
-      const destinationFor = (
-        session: SessionView,
-        state: LootSession,
-        objectType: number,
-        facts: ItemFacts | undefined,
-        nowMs: number,
-      ): Destination | undefined => {
-        const inventory = session.self.inventory;
-        const claimed = (slotId: number): boolean => state.slots.held(slotId, nowMs);
-
-        const kind = facts?.potion?.kind;
-        if (facts !== undefined && (kind === PotionKind.Heal || kind === PotionKind.Magic)) {
-          const belt = findBeltDestination(inventory, objectType, facts.beltStack, claimed);
-          if (belt !== undefined) return belt;
-        }
-        return findFreeSlot(inventory, useBackpack.get(), backpackFirst.get(), claimed);
-      };
-
       /** @returns true once something has been sent, so the tick stops there. */
       const takeFrom = (
         session: SessionView,
@@ -327,7 +330,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           if (objectType <= 0) continue;
 
           const key = bagSlotKey(bag.entity.objectId, slot, objectType);
-          if (state.bagSlots.held(key, nowMs) || state.attempts.held(key, nowMs)) continue;
+          if (state.attempts.held(key, nowMs)) continue;
 
           const facts = inputs.item(objectType);
 
@@ -350,29 +353,47 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           };
           if (!shouldLoot(candidate, preferences)) continue;
 
-          const destination = destinationFor(session, state, objectType, facts, nowMs);
+          const kind = facts?.potion?.kind;
+          const quaffable = kind === PotionKind.Heal || kind === PotionKind.Magic;
+          const refused = (slotId: number): boolean => state.refusedSlots.held(slotId, nowMs);
+
+          // The belt first for a quaff potion: one belt slot holds six, so it
+          // is six inventory slots the player keeps, and it is where they are
+          // reached for from.
+          const belt =
+            quaffable && facts !== undefined
+              ? findBeltDestination(session.self.inventory, objectType, facts.beltStack, refused)
+              : undefined;
+
+          // A potion the belt has no room for is a *spare*, and spares are a
+          // separate question from topping the belt up: filling the inventory
+          // with them is what most players do not want, so it is asked for
+          // rather than assumed. This is about the item, not about the bag, so
+          // the rest of the bag is still worth looking at.
+          if (belt === undefined && quaffable && !sparePotions.get()) continue;
+
+          const destination =
+            belt ??
+            findFreeSlot(session.self.inventory, useBackpack.get(), backpackFirst.get(), refused);
           // Nowhere to put it is a fact about the whole inventory, not about
           // this slot, so there is nothing further in this bag to try.
           if (destination === undefined) return false;
 
           moveFromBag(session, bag, slot, objectType, destination);
 
-          const kind = facts?.potion?.kind;
-          const quaffable = kind === PotionKind.Heal || kind === PotionKind.Magic;
           state.lastActionAtMs = nowMs;
           state.attempts.hold(key, nowMs + RETRY_ITEM_AFTER_MS);
           state.startPending({
             slotId: destination.slotId,
             expectedQuantity: destination.expectedQuantity,
+            source: { objectId: bag.entity.objectId, slot, objectType },
             sinceMs: nowMs,
             potion: quaffable,
           });
-          // A potion is the case where the evidence lags: a belt slot's count
-          // is the only sign it landed. Claim both ends for long enough that a
-          // late confirmation cannot be read as "it never arrived".
-          if (quaffable || isBeltSlot(destination.slotId)) {
-            state.slots.hold(destination.slotId, nowMs + SLOT_CLAIM_MS);
-            state.bagSlots.hold(key, nowMs + BAG_SLOT_CLAIM_MS);
+          // A potion is still the one thing the player's own hands are likely
+          // to be doing at the same moment, so it holds their potion packets
+          // back for the window in which ours is settling.
+          if (quaffable) {
             state.blockUntilMs = Math.max(state.blockUntilMs, nowMs + MANUAL_BLOCK_MS);
           }
           return true;
@@ -387,13 +408,14 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         objectType: number,
       ): void => {
         session.sendToServer('USEITEM', {
-          time: Math.trunc(session.world.gameTimeMs),
+          // The client's own clock, never the connection's: a packet stamped
+          // with the wrong one is dropped by the server without a word.
+          time: Math.trunc(session.world.clientTimeMs),
           slotObject: { objectId: bag.entity.objectId, slotId: slot, objectType },
           itemUsePos: { x: 0, y: 0 },
           useType: USE_TYPE_FROM_BAG,
           unknownInt: 0,
         });
-        context.log.debug(`drank ${String(objectType)} from bag ${String(bag.entity.objectId)}`);
       };
 
       const moveFromBag = (
@@ -403,8 +425,16 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         objectType: number,
         destination: Destination,
       ): void => {
+        // **`tickId` is deliberately absent, and the live game said so.**
+        // `packet-definitions.json` carries it as a trailing optional, and
+        // filling it in was tried: every swap — including the stack join that
+        // had been working — came back `FAILURE [0] Bad message received`,
+        // which is the server failing to *parse* the packet rather than
+        // refusing what it asked for. Four bytes this build does not expect.
         session.sendToServer('INVENTORYSWAP', {
-          time: Math.trunc(session.world.gameTimeMs),
+          // The client's own clock, never the connection's: a packet stamped
+          // with the wrong one is dropped by the server without a word.
+          time: Math.trunc(session.world.clientTimeMs),
           position: { x: session.self.x, y: session.self.y },
           slotObject1: { objectId: bag.entity.objectId, slotId: slot, objectType },
           slotObject2: {
@@ -412,11 +442,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
             slotId: destination.slotId,
             objectType: destination.objectType,
           },
-          tickId: 0,
         });
-        context.log.debug(
-          `took ${String(objectType)} from bag ${String(bag.entity.objectId)} into slot ${String(destination.slotId)}`,
-        );
       };
 
       // ── The tick ─────────────────────────────────────────────────────────
@@ -432,6 +458,22 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           );
         }
       };
+
+      /**
+       * Whether the bag a move came out of has been seen to change.
+       *
+       * The other half of "did that happen?", and the half that keeps the next
+       * swap from being aimed with a picture of the bag from before the last
+       * one. A bag that is gone entirely counts — there is nothing left to be
+       * stale about.
+       */
+      const sourceCleared =
+        (session: SessionView) =>
+        (move: { source: { objectId: number; slot: number; objectType: number } }): boolean => {
+          const bag = session.world.entity(move.source.objectId);
+          if (bag === undefined) return true;
+          return bagSlotItem(bag, move.source.slot) !== move.source.objectType;
+        };
 
       /** Drops what is remembered about bags that are no longer in the world. */
       const forgetGoneBags = (session: SessionView, state: LootSession): void => {
@@ -452,7 +494,14 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
         state.trackMovement(self.x, self.y);
         state.expire(nowMs);
-        state.resolvePending(self.inventory, nowMs);
+
+        // A move that was never seen to arrive is one the server refused, and
+        // the slot it named is not the empty slot we took it for. Stop aiming
+        // at it rather than sending the same refusal once a second.
+        const abandoned = state.resolvePending(self.inventory, sourceCleared(session), nowMs);
+        if (abandoned !== undefined) {
+          state.refusedSlots.hold(abandoned.slotId, nowMs + REFUSED_SLOT_MS);
+        }
 
         const bags = findBags(session.world, self, inputs.container, NOTIFY_RADIUS_TILES);
         for (const bag of bags) {
@@ -470,22 +519,23 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         if (pauseWhenIdle.get() && state.stationaryTicks > STATIONARY_TICK_LIMIT) return;
         if (state.pending !== undefined) return;
 
-        let standingOnOne = false;
+        // **One floor for everything this sends, and it is never reset.** The
+        // reference implementation reset the spacing whenever the player stood
+        // on no bag, so the first take from each new bag went out at once — and
+        // two moves four hundred milliseconds apart, one per bag, is what the
+        // server hangs up on. See `PICKUP_INTERVAL_MS`.
+        if (nowMs - state.lastActionAtMs < pickupIntervalMs.get()) return;
+
         for (const bag of bags) {
           // Nearest first, so the first one out of reach ends the search.
           if (bag.distanceTiles > ON_TOP_TILES) break;
-          standingOnOne = true;
 
           if (waitOnSharedBags.get() && bag.facts.shared) {
             const seenAtMs = state.bagSeenAtMs.get(bag.entity.objectId) ?? nowMs;
             if (nowMs - seenAtMs < SHARED_BAG_DELAY_MS) continue;
           }
-          if (nowMs - state.lastActionAtMs < PICKUP_INTERVAL_MS) continue;
           if (takeFrom(session, state, bag, nowMs)) return;
         }
-
-        // Off every bag: the next one stepped on is emptied without waiting.
-        if (!standingOnOne) state.lastActionAtMs = Number.NEGATIVE_INFINITY;
       });
 
       // ── The player's own hands ───────────────────────────────────────────
@@ -502,17 +552,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
             shouldWithhold(packet.name, state.pending?.potion === true, nowMs < state.blockUntilMs)
           ) {
             packet.drop();
-            if (nowMs - state.lastGuardLogAtMs >= GUARD_LOG_INTERVAL_MS) {
-              state.lastGuardLogAtMs = nowMs;
-              context.log.info(`withheld ${packet.name}: a pickup of ours is still settling`);
-            }
           } else {
             // Standing down cancels what is in flight as well: whatever the
             // player is doing is a better guide to where their items are than
             // a move we sent before they started.
             state.attempts.clear();
-            state.slots.clear();
-            state.bagSlots.clear();
           }
           state.pauseUntilMs = Math.max(state.pauseUntilMs, nowMs + MANUAL_PAUSE_MS);
         });

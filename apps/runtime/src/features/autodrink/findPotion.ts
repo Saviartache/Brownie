@@ -5,6 +5,18 @@
  * only interesting decision it makes: the belt is a stack of six that costs one
  * slot, and everything taken out of it has to be replaced by hand, so a player
  * who has filled it usually wants it drained first.
+ *
+ * **Reading the belt is safe in a way that writing to it is not**, and the
+ * difference is what this file relies on. A drink names a slot the server has
+ * just described and repeats its contents straight back — so being wrong about
+ * which stat carries the belt cannot produce a claim the server did not make.
+ * A *swap* had to assert that a belt slot was empty, which is a claim the
+ * server never made, and doing that killed a live session; nothing writes to
+ * the belt any more (see `autoloot/destination.ts`).
+ *
+ * The guard that makes reading safe is the stack count: a belt slot reports one
+ * and nothing else on the wire does, so a slot with no count is not treated as
+ * a belt slot at all.
  */
 
 import type { InventoryView, ItemSlotView } from '@brownie/plugin-api';

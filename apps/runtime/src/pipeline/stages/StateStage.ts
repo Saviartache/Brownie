@@ -16,7 +16,17 @@ type Applier = (packet: MutablePacket, world: WorldState) => void;
  * because bullet collision is the client's own call and these three packets are
  * it reporting one it has already acted on.
  */
-const CLIENT_PACKETS: ReadonlySet<string> = new Set(['MOVE', 'PLAYERHIT', 'OTHERHIT', 'SQUAREHIT']);
+const CLIENT_PACKETS: ReadonlySet<string> = new Set([
+  'MOVE',
+  'PLAYERHIT',
+  'OTHERHIT',
+  'SQUAREHIT',
+  // Not state, but the two other packets the client stamps with its own clock —
+  // which is a thing only the client knows and only its own packets carry. See
+  // `WorldState.clientTimeMs`.
+  'PLAYERSHOOT',
+  'PONG',
+]);
 
 /**
  * Forgets a shot the client says has landed.
@@ -289,9 +299,30 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         const last = records.at(-1);
         if (last === undefined) return;
         const record = asRecord(last);
+        // Each record is stamped with the client's own clock, which is the one
+        // the server checks a `time` field against.
+        const time = numberOf(record, 'time');
+        if (time !== undefined) world.calibrateClientClock(time);
         const x = numberOf(record, 'x');
         const y = numberOf(record, 'y');
         if (x !== undefined && y !== undefined) world.self.moveTo(x, y);
+      },
+    ],
+    [
+      // The client's answer to a ping, and the earliest thing it stamps — it
+      // goes out before the character is even in the world.
+      'PONG',
+      (packet, world) => {
+        const time = packet.number('time');
+        if (time !== undefined) world.calibrateClientClock(time);
+      },
+    ],
+    [
+      // And its own shots, for a session that is standing still and shooting.
+      'PLAYERSHOOT',
+      (packet, world) => {
+        const time = packet.number('time');
+        if (time !== undefined) world.calibrateClientClock(time);
       },
     ],
     [

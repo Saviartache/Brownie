@@ -395,6 +395,92 @@ describe('how steady the answer is', () => {
   });
 });
 
+// Both of these came out of a live log rather than out of a hunch, and both
+// read as "the dodge is not really working" long before anyone could say why.
+describe('what the verdict is allowed to claim', () => {
+  /** Sustained fire from every side: waves overlapping, never quite quiet. */
+  function crossfire(): DodgeShot[] {
+    const shots: DodgeShot[] = [];
+    for (let wave = 0; wave < 14; wave += 1) {
+      const from = (wave * 1.1) % (Math.PI * 2);
+      for (let i = 0; i < 5; i += 1) {
+        shots.push(
+          straightShot(
+            { x: 10 + Math.cos(from) * 8, y: 10 + Math.sin(from) * 8 },
+            from + Math.PI + (i - 2) * 0.11,
+            9,
+            wave * 210,
+            2200,
+          ),
+        );
+      }
+    }
+    return shots;
+  }
+
+  /** Every plan over four seconds of it, walked as the module would walk it. */
+  function drivenPlans(): DodgePlan[] {
+    const controller = new DodgeController();
+    const shots = crossfire();
+    const plans: DodgePlan[] = [];
+    const queued: { dirX: number; dirY: number; scale: number }[] = [];
+    let x = 10;
+    let y = 10;
+
+    for (let step = 0; step < 200; step += 1) {
+      const gameTimeMs = step * 20;
+      const plan = controller.plan(
+        situation({ x, y, gameTimeMs, nowMs: 1_000_000 + gameTimeMs }),
+        SETTINGS,
+        OPEN_GROUND,
+        shots,
+      );
+      plans.push(plan);
+      queued.push({ dirX: plan.dirX, dirY: plan.dirY, scale: plan.steer ? plan.speedScale : 0 });
+      const live = queued[queued.length - 4];
+      if (live !== undefined) {
+        x += live.dirX * 6 * live.scale * 0.02;
+        y += live.dirY * 6 * live.scale * 0.02;
+      }
+    }
+    return plans;
+  }
+
+  // The live log was full of `unavoidable ... room 0.01t ... hit in never`: the
+  // planner calling a moment hopeless when nothing was going to hit it, and
+  // throwing away its sense of position to survive a hit that was not coming.
+  // Being grazed is not being hit.
+  it('never calls a moment hopeless while nothing would actually land', () => {
+    const doomedButUnhit = drivenPlans().filter(
+      (plan) => plan.verdict === 'unavoidable' && plan.impactMs === Infinity,
+    );
+
+    expect(doomedButUnhit).toHaveLength(0);
+  });
+
+  // And full of `clear ... hit in 480ms, at 0% speed`: the wheel handed back
+  // with an impact already inside the window it is supposed to act on.
+  it('never hands the wheel back with a hit already inside the window', () => {
+    const abandoned = drivenPlans().filter(
+      (plan) =>
+        (plan.verdict === 'clear' || plan.verdict === 'intent-safe') &&
+        plan.impactMs <= SETTINGS.reactWithinMs,
+    );
+
+    expect(abandoned).toHaveLength(0);
+  });
+
+  // Standing still *is* sometimes the answer — when every course is hit and
+  // this one is hit latest. That is the honest verdict, and it must not be
+  // confused with the two above.
+  it('still says so plainly when standing is the least bad thing available', () => {
+    const plans = drivenPlans();
+    // It does take the wheel in this fight rather than passing every check by
+    // never doing anything.
+    expect(plans.filter((plan) => plan.steer).length).toBeGreaterThan(40);
+  });
+});
+
 describe('blasts on their way down', () => {
   /** A bomb landing on a spot, in `armsInMs` from the plan's clock. */
   const blast = (x: number, y: number, radiusTiles: number, armsInMs: number): BlastView => ({

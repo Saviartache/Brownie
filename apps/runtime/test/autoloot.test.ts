@@ -247,7 +247,8 @@ describe('counting a bag slot"s enchants', () => {
 });
 
 describe('choosing where a looted item goes', () => {
-  const nothingClaimed = (): boolean => false;
+  /** Nothing has refused anything yet. */
+  const never = (): boolean => false;
 
   function inventoryOf(options: {
     carried?: ItemSlotView[];
@@ -266,42 +267,6 @@ describe('choosing where a looted item goes', () => {
     };
   }
 
-  const beltSlot = (index: number, objectType: number, quantity: number): ItemSlotView => ({
-    slotId: SlotRange.BeltFirst + index,
-    objectType,
-    quantity,
-  });
-
-  it('stacks a potion onto a belt slot that has room', () => {
-    const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 3)] });
-    expect(findBeltDestination(inventory, HEALTH_POTION, 6, nothingClaimed)).toEqual({
-      slotId: SlotRange.BeltFirst,
-      objectType: HEALTH_POTION,
-      expectedQuantity: 4,
-    });
-  });
-
-  it('refuses to start a second stack when the first is full', () => {
-    const inventory = inventoryOf({
-      belt: [beltSlot(0, HEALTH_POTION, 6), beltSlot(1, -1, 0)],
-    });
-    expect(findBeltDestination(inventory, HEALTH_POTION, 6, nothingClaimed)).toBeUndefined();
-  });
-
-  it('takes an empty belt slot when there is no stack yet', () => {
-    const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0)] });
-    expect(findBeltDestination(inventory, HEALTH_POTION, 6, nothingClaimed)).toEqual({
-      slotId: SlotRange.BeltFirst,
-      objectType: -1,
-      expectedQuantity: 1,
-    });
-  });
-
-  it('does not use the belt for an item the belt refuses', () => {
-    const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0)] });
-    expect(findBeltDestination(inventory, T13_BOW, 0, nothingClaimed)).toBeUndefined();
-  });
-
   it('takes the first free carried slot, in slot order', () => {
     const inventory = inventoryOf({
       carried: [
@@ -310,21 +275,7 @@ describe('choosing where a looted item goes', () => {
         { slotId: 6, objectType: -1, quantity: 0 },
       ],
     });
-    expect(findFreeSlot(inventory, true, false, nothingClaimed)).toEqual({
-      slotId: 5,
-      objectType: -1,
-      expectedQuantity: undefined,
-    });
-  });
-
-  it('skips a slot already claimed by a move still settling', () => {
-    const inventory = inventoryOf({
-      carried: [
-        { slotId: 4, objectType: -1, quantity: 0 },
-        { slotId: 5, objectType: -1, quantity: 0 },
-      ],
-    });
-    expect(findFreeSlot(inventory, true, false, (slotId) => slotId === 4)?.slotId).toBe(5);
+    expect(findFreeSlot(inventory, true, false, never)).toEqual({ slotId: 5, objectType: -1 });
   });
 
   it('uses the backpack only when allowed, and first when asked', () => {
@@ -332,12 +283,102 @@ describe('choosing where a looted item goes', () => {
       carried: [{ slotId: 4, objectType: -1, quantity: 0 }],
       backpack: [{ slotId: 12, objectType: -1, quantity: 0 }],
     });
-    expect(findFreeSlot(inventory, false, false, nothingClaimed)?.slotId).toBe(4);
-    expect(findFreeSlot(inventory, true, true, nothingClaimed)?.slotId).toBe(12);
+    expect(findFreeSlot(inventory, false, false, never)?.slotId).toBe(4);
+    expect(findFreeSlot(inventory, true, true, never)?.slotId).toBe(12);
   });
 
   it('has nowhere to put anything when the server has stated no slots', () => {
-    expect(findFreeSlot(inventoryOf({}), true, false, nothingClaimed)).toBeUndefined();
+    expect(findFreeSlot(inventoryOf({}), true, false, never)).toBeUndefined();
+  });
+
+  it('moves along the inventory when a slot has already refused an item', () => {
+    const inventory = inventoryOf({
+      carried: [
+        { slotId: 4, objectType: -1, quantity: 0 },
+        { slotId: 5, objectType: -1, quantity: 0 },
+      ],
+      backpack: [{ slotId: 12, objectType: -1, quantity: 0 }],
+    });
+    expect(findFreeSlot(inventory, true, false, (slotId) => slotId === 4)?.slotId).toBe(5);
+    expect(findFreeSlot(inventory, true, false, (slotId) => slotId !== 12)?.slotId).toBe(12);
+    expect(findFreeSlot(inventory, true, false, () => true)).toBeUndefined();
+  });
+
+  // The belt is a separate question with its own answer; a free *slot* is never
+  // one of its slots, or an ordinary item would land there.
+  it('never offers a potion-belt slot as a free one', () => {
+    const inventory = inventoryOf({
+      belt: [
+        { slotId: SlotRange.BeltFirst, objectType: -1, quantity: 0 },
+        { slotId: SlotRange.BeltFirst + 1, objectType: HEALTH_POTION, quantity: 2 },
+      ],
+    });
+    expect(findFreeSlot(inventory, true, false, never)).toBeUndefined();
+    expect(findFreeSlot(inventory, true, true, never)).toBeUndefined();
+  });
+
+  describe('the potion belt', () => {
+    const beltSlot = (index: number, objectType: number, quantity: number): ItemSlotView => ({
+      slotId: SlotRange.BeltFirst + index,
+      objectType,
+      quantity,
+    });
+
+    it('adds to a stack that has room', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 3)] });
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toEqual({
+        slotId: SlotRange.BeltFirst,
+        objectType: HEALTH_POTION,
+        expectedQuantity: 4,
+      });
+    });
+
+    // The third belt slot is an unlock, and the server reports it exactly when
+    // the character has it — so being reported is the answer.
+    it('takes an empty slot the server has stated', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0), beltSlot(1, -1, 0)] });
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toEqual({
+        slotId: SlotRange.BeltFirst,
+        objectType: -1,
+        expectedQuantity: 1,
+      });
+    });
+
+    it('has nothing to offer for a belt the server has not stated', () => {
+      expect(findBeltDestination(inventoryOf({}), HEALTH_POTION, 6, never)).toBeUndefined();
+    });
+
+    it('joins the stack rather than taking the empty slot beside it', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0), beltSlot(1, HEALTH_POTION, 1)] });
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)?.slotId).toBe(
+        SlotRange.BeltFirst + 1,
+      );
+    });
+
+    it('refuses to start a second stack of the same potion when the first is full', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 6), beltSlot(1, -1, 0)] });
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toBeUndefined();
+    });
+
+    it('does not put a different potion on the stack', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 2)] });
+      expect(findBeltDestination(inventory, ATTACK_POTION, 6, never)).toBeUndefined();
+    });
+
+    it('leaves the belt alone for an item the belt refuses', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0)] });
+      expect(findBeltDestination(inventory, T13_BOW, 0, never)).toBeUndefined();
+    });
+
+    it('skips a stack that has already refused an item', () => {
+      const inventory = inventoryOf({
+        belt: [beltSlot(0, HEALTH_POTION, 1), beltSlot(1, HEALTH_POTION, 1)],
+      });
+      const refused = (slotId: number): boolean => slotId === SlotRange.BeltFirst;
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, refused)?.slotId).toBe(
+        SlotRange.BeltFirst + 1,
+      );
+    });
   });
 });
 
@@ -367,42 +408,97 @@ describe('what one connection remembers', () => {
     expect(claims.held('a', 80)).toBe(true);
   });
 
-  it('clears a pending move once its destination fills', () => {
+  const SOURCE = { objectId: 1, slot: 0, objectType: T13_BOW };
+  /** The bag has been seen to change. */
+  const emptied = (): boolean => true;
+  /** The bag still says what it said before the move went out. */
+  const unchanged = (): boolean => false;
+
+  it('clears a pending move once its destination fills, and calls it no refusal', () => {
     const state = new LootSession();
-    state.startPending({ slotId: 4, expectedQuantity: undefined, sinceMs: 0, potion: false });
-
-    state.resolvePending(inventoryWith({ slotId: 4, objectType: -1, quantity: 0 }), 10);
-    expect(state.pending).toBeDefined();
-
-    state.resolvePending(inventoryWith({ slotId: 4, objectType: T13_BOW, quantity: 0 }), 20);
-    expect(state.pending).toBeUndefined();
-  });
-
-  it('waits for a belt slot to reach the count it should', () => {
-    const state = new LootSession();
-    const beltId = SlotRange.BeltFirst;
-    state.startPending({ slotId: beltId, expectedQuantity: 4, sinceMs: 0, potion: true });
-
-    const belt = (quantity: number): InventoryView => ({
-      carried: () => [],
-      backpack: () => [],
-      belt: () => [{ slotId: beltId, objectType: HEALTH_POTION, quantity }],
-      at: (slotId) =>
-        slotId === beltId ? { slotId: beltId, objectType: HEALTH_POTION, quantity } : undefined,
+    state.startPending({
+      slotId: 4,
+      expectedQuantity: undefined,
+      source: SOURCE,
+      sinceMs: 0,
+      potion: false,
     });
 
-    state.resolvePending(belt(3), 10);
+    expect(
+      state.resolvePending(inventoryWith({ slotId: 4, objectType: -1, quantity: 0 }), emptied, 10),
+    ).toBeUndefined();
     expect(state.pending).toBeDefined();
-    state.resolvePending(belt(4), 20);
+
+    const arrived = inventoryWith({ slotId: 4, objectType: T13_BOW, quantity: 0 });
+    expect(state.resolvePending(arrived, emptied, 20)).toBeUndefined();
     expect(state.pending).toBeUndefined();
   });
 
-  it('gives up on a move to a slot nothing ever reports', () => {
+  // The second pickup out of one bag ended a session, because it was aimed
+  // using a picture of the bag from before the first one.
+  it('keeps waiting while the bag still says what it said before the move', () => {
     const state = new LootSession();
-    state.startPending({ slotId: 12, expectedQuantity: undefined, sinceMs: 0, potion: false });
-    state.resolvePending(inventoryWith(undefined), PENDING_TIMEOUT_MS - 1);
+    const arrived = inventoryWith({ slotId: 4, objectType: T13_BOW, quantity: 0 });
+    state.startPending({
+      slotId: 4,
+      expectedQuantity: undefined,
+      source: SOURCE,
+      sinceMs: 0,
+      potion: false,
+    });
+
+    expect(state.resolvePending(arrived, unchanged, 10)).toBeUndefined();
     expect(state.pending).toBeDefined();
-    state.resolvePending(inventoryWith(undefined), PENDING_TIMEOUT_MS);
+
+    expect(state.resolvePending(arrived, emptied, 20)).toBeUndefined();
+    expect(state.pending).toBeUndefined();
+  });
+
+  it('waits for a belt stack to reach the count it should', () => {
+    // A stacking move goes into a slot that was already occupied, so "is it
+    // occupied?" cannot tell it landed. The count is the only evidence.
+    const state = new LootSession();
+    const beltId = SlotRange.BeltFirst;
+    state.startPending({
+      slotId: beltId,
+      expectedQuantity: 4,
+      source: SOURCE,
+      sinceMs: 0,
+      potion: true,
+    });
+
+    const belt = (quantity: number): InventoryView => {
+      const slot = { slotId: beltId, objectType: HEALTH_POTION, quantity };
+      return {
+        carried: () => [],
+        backpack: () => [],
+        belt: () => [slot],
+        at: (slotId) => (slotId === beltId ? slot : undefined),
+      };
+    };
+
+    expect(state.resolvePending(belt(3), emptied, 10)).toBeUndefined();
+    expect(state.pending).toBeDefined();
+    expect(state.resolvePending(belt(4), emptied, 20)).toBeUndefined();
+    expect(state.pending).toBeUndefined();
+  });
+
+  it('hands back a move that was never seen to arrive', () => {
+    const state = new LootSession();
+    const empty = inventoryWith({ slotId: 12, objectType: -1, quantity: 0 });
+    state.startPending({
+      slotId: 12,
+      expectedQuantity: undefined,
+      source: SOURCE,
+      sinceMs: 0,
+      potion: false,
+    });
+
+    expect(state.resolvePending(empty, emptied, PENDING_TIMEOUT_MS - 1)).toBeUndefined();
+    expect(state.pending).toBeDefined();
+
+    // The server's only answer to a refused swap is silence, so this is it.
+    expect(state.resolvePending(empty, emptied, PENDING_TIMEOUT_MS)?.slotId).toBe(12);
     expect(state.pending).toBeUndefined();
   });
 
@@ -521,7 +617,7 @@ describe('the auto-loot plugin', () => {
   interface Harness {
     host: PluginHost;
     session: SessionView;
-    world: { gameTimeMs: number; mapName: string };
+    world: { gameTimeMs: number; clientTimeMs: number; mapName: string };
     self: { x: number; y: number; inventory: InventoryView };
     bags: Map<number, EntityView>;
     sent: ReturnType<typeof vi.fn>;
@@ -529,21 +625,29 @@ describe('the auto-loot plugin', () => {
     settings: NonNullable<ReturnType<PluginHost['settingsOf']>>;
   }
 
-  function harness(options: { carried?: ItemSlotView[]; map?: string } = {}): Harness {
+  function harness(
+    options: { carried?: ItemSlotView[]; belt?: ItemSlotView[]; map?: string } = {},
+  ): Harness {
+    // Held as the specs the test passed, so a test that swaps an entry in mid
+    // run — which is how an item arriving is simulated — is seen by the plugin.
     const carried = options.carried ?? [
       { slotId: 4, objectType: -1, quantity: 0 },
       { slotId: 5, objectType: -1, quantity: 0 },
     ];
+    const belt = options.belt ?? [];
     const inventory: InventoryView = {
       carried: () => carried,
       backpack: () => [],
-      belt: () => [],
-      at: (slotId) => carried.find((entry) => entry.slotId === slotId),
+      belt: () => belt,
+      at: (slotId) => [...carried, ...belt].find((entry) => entry.slotId === slotId),
     };
 
     const bags = new Map<number, EntityView>();
     const world = {
       gameTimeMs: 50_000,
+      // Deliberately different: the packet must carry the client's clock, not
+      // the connection's, and only a test that can tell them apart says so.
+      clientTimeMs: 1_234_000,
       mapName: options.map ?? 'Dungeon',
       entities: () => bags.values(),
       entity: (objectId: number) => bags.get(objectId),
@@ -616,12 +720,14 @@ describe('the auto-loot plugin', () => {
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
     tick(h);
 
+    // No `tickId`. The definition carries it as a trailing optional and this
+    // build of the game does not: filling it in got every swap back as
+    // `FAILURE [0] Bad message received`, which is a parse failure.
     expect(h.sent).toHaveBeenCalledWith('INVENTORYSWAP', {
-      time: 50_000,
+      time: 1_234_000,
       position: { x: 10, y: 10 },
       slotObject1: { objectId: 1, slotId: 0, objectType: T13_BOW },
       slotObject2: { objectId: 7, slotId: 4, objectType: -1 },
-      tickId: 0,
     });
   });
 
@@ -653,6 +759,111 @@ describe('the auto-loot plugin', () => {
 
     // Past the timeout, the move is assumed lost and the next one goes.
     advance(h, PENDING_TIMEOUT_MS);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(2);
+  });
+
+  // Straight from a live log: the first item out of a bag went in fine and the
+  // second ended the session. The second swap was aimed with a picture of the
+  // bag from before the first one.
+  it('waits for the bag to catch up before taking a second item from it', () => {
+    const carried = [
+      { slotId: 4, objectType: -1, quantity: 0 },
+      { slotId: 5, objectType: -1, quantity: 0 },
+    ];
+    const h = harness({ carried });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW, UT_BOW], { x: 10, y: 10 }));
+
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    // The item arrives — but the bag still says it holds what we just took.
+    carried[0] = { slotId: 4, objectType: T13_BOW, quantity: 0 };
+    advance(h, 1100);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    // Once the server has told us about the bag as well, the next one goes.
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [-1, UT_BOW], { x: 10, y: 10 }));
+    advance(h, 1100);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(2);
+    expect(h.sent.mock.calls[1]?.[1]).toMatchObject({
+      slotObject1: { objectId: 1, slotId: 1, objectType: UT_BOW },
+      slotObject2: { objectId: 7, slotId: 5, objectType: -1 },
+    });
+  });
+
+  it('stops waiting on a bag that has gone entirely', () => {
+    const carried = [
+      { slotId: 4, objectType: -1, quantity: 0 },
+      { slotId: 5, objectType: -1, quantity: 0 },
+    ];
+    const h = harness({ carried });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+    tick(h);
+
+    // Emptied by that pickup: there is nothing left to be stale about, so the
+    // move resolves rather than sitting out its timeout.
+    carried[0] = { slotId: 4, objectType: T13_BOW, quantity: 0 };
+    h.bags.delete(1);
+    advance(h, 1100);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    h.bags.set(2, bag(2, SOULBOUND_BAG, [UT_BOW], { x: 10, y: 10 }));
+    advance(h, 1100);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(2);
+  });
+
+  // Straight from a live log: the same two items, into the same slot, once a
+  // second, for as long as the player stood on the bag. The slot was one the
+  // server would not take an item into, and nothing noticed.
+  it('stops aiming at a slot that will not take an item', () => {
+    const h = harness();
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW, UT_BOW], { x: 10, y: 10 }));
+
+    // Two free slots, two attempts — and then nothing, because neither ever
+    // filled. The inventory here never changes, which is what a refusal looks
+    // like from the outside.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      tick(h);
+      advance(h, PENDING_TIMEOUT_MS);
+    }
+    expect(h.sent).toHaveBeenCalledTimes(2);
+    expect(
+      h.sent.mock.calls.map(
+        (call) => (call[1] as { slotObject2: { slotId: number } }).slotObject2.slotId,
+      ),
+    ).toEqual([4, 5]);
+  });
+
+  // Straight from a live log, and the shape of every disconnect this feature
+  // has caused: one bag emptied, a step onto another, and a second move four
+  // hundred milliseconds after the first. The spacing used to reset whenever
+  // the player stood on no bag, so the new bag's first take went out at once.
+  it('holds its spacing across bags, not just within one', () => {
+    const carried = [
+      { slotId: 4, objectType: -1, quantity: 0 },
+      { slotId: 5, objectType: -1, quantity: 0 },
+    ];
+    const h = harness({ carried });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    // The first bag empties and is gone; the player steps onto another.
+    carried[0] = { slotId: 4, objectType: T13_BOW, quantity: 0 };
+    h.bags.delete(1);
+    h.bags.set(2, bag(2, SOULBOUND_BAG, [UT_BOW], { x: 10, y: 10 }));
+
+    advance(h, 400);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    advance(h, 700);
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(2);
   });
@@ -706,9 +917,87 @@ describe('the auto-loot plugin', () => {
     expect(h.notified[0]).toContain('Bow of Covert Havens');
   });
 
+  it('adds a looted potion to the stack already on the belt', () => {
+    const h = harness({
+      belt: [
+        { slotId: SlotRange.BeltFirst, objectType: -1, quantity: 0 },
+        { slotId: SlotRange.BeltFirst + 1, objectType: HEALTH_POTION, quantity: 2 },
+      ],
+    });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION], { x: 10, y: 10 }));
+    tick(h);
+
+    // The stack, not the empty slot beside it, and not a carried slot: what
+    // goes out repeats the object type the server itself put there.
+    expect(h.sent).toHaveBeenCalledWith('INVENTORYSWAP', {
+      time: 1_234_000,
+      position: { x: 10, y: 10 },
+      slotObject1: { objectId: 1, slotId: 0, objectType: HEALTH_POTION },
+      slotObject2: { objectId: 7, slotId: SlotRange.BeltFirst + 1, objectType: HEALTH_POTION },
+    });
+  });
+
+  it('fills a free belt slot before any inventory slot', () => {
+    const h = harness({
+      belt: [{ slotId: SlotRange.BeltFirst, objectType: -1, quantity: 0 }],
+    });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION], { x: 10, y: 10 }));
+    tick(h);
+
+    expect(h.sent).toHaveBeenCalledWith('INVENTORYSWAP', {
+      time: 1_234_000,
+      position: { x: 10, y: 10 },
+      slotObject1: { objectId: 1, slotId: 0, objectType: HEALTH_POTION },
+      slotObject2: { objectId: 7, slotId: SlotRange.BeltFirst, objectType: -1 },
+    });
+  });
+
+  // Topping the belt up and hoarding spares are separate wants: a full belt
+  // means the potion is left where it is unless the second one is asked for.
+  it('leaves a spare potion in the bag when the belt is full', () => {
+    const h = harness({
+      belt: [{ slotId: SlotRange.BeltFirst, objectType: HEALTH_POTION, quantity: 6 }],
+    });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION], { x: 10, y: 10 }));
+    tick(h);
+    expect(h.sent).not.toHaveBeenCalled();
+  });
+
+  it('takes the spare into the inventory once that is asked for', () => {
+    const h = harness({
+      belt: [{ slotId: SlotRange.BeltFirst, objectType: HEALTH_POTION, quantity: 6 }],
+    });
+    h.settings.apply('sparePotions', true);
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION], { x: 10, y: 10 }));
+    tick(h);
+
+    expect(h.sent).toHaveBeenCalledWith('INVENTORYSWAP', {
+      time: 1_234_000,
+      position: { x: 10, y: 10 },
+      slotObject1: { objectId: 1, slotId: 0, objectType: HEALTH_POTION },
+      slotObject2: { objectId: 7, slotId: 4, objectType: -1 },
+    });
+  });
+
+  it('goes on looking through the bag past a potion it will not take', () => {
+    // A full belt is a fact about the potion, not about the bag.
+    const h = harness({
+      belt: [{ slotId: SlotRange.BeltFirst, objectType: HEALTH_POTION, quantity: 6 }],
+    });
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION, T13_BOW], { x: 10, y: 10 }));
+    tick(h);
+
+    expect(h.sent).toHaveBeenCalledWith(
+      'INVENTORYSWAP',
+      expect.objectContaining({
+        slotObject1: { objectId: 1, slotId: 1, objectType: T13_BOW },
+      }),
+    );
+  });
+
   it('stands down and withholds a move while one of its own potions settles', () => {
     const h = harness();
-    h.settings.apply('healthPotions', true);
+    h.settings.apply('sparePotions', true);
     h.bags.set(1, bag(1, SOULBOUND_BAG, [HEALTH_POTION], { x: 10, y: 10 }));
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);

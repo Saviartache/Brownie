@@ -355,6 +355,9 @@ describe('StateStage', () => {
       'NEWTICK',
       'OTHERHIT',
       'PLAYERHIT',
+      // Not state: the two other packets the client stamps with its own clock.
+      'PLAYERSHOOT',
+      'PONG',
       'SHOWEFFECT',
       'SQUAREHIT',
       'UPDATE',
@@ -598,6 +601,126 @@ describe('WorldState timing', () => {
   });
 });
 
+/**
+ * The clock the server checks a packet's `time` against.
+ *
+ * Not the connection's — the client has usually been running long before the
+ * connection this session carries, and a packet stamped with the wrong one is
+ * dropped in silence. Auto-loot and auto-drink both spent a session sending
+ * perfectly formed packets nothing answered.
+ */
+describe("the game client's own clock", () => {
+  const CONNECTED_AT = 1_000_000;
+
+  /** A world on a clock the test drives, so the readings are exact. */
+  function clockHarness(): {
+    world: WorldState;
+    feed: (packet: MutablePacket, context?: PacketContext) => void;
+    tick: (ms: number) => void;
+  } {
+    let now = CONNECTED_AT;
+    const world = new WorldState({ now: () => now });
+    const stage = new StateStage(world);
+    world.markConnected();
+    return {
+      world,
+      feed: (packet, context = FROM_CLIENT) => {
+        stage.handle(packet, context);
+      },
+      tick: (ms) => {
+        now += ms;
+      },
+    };
+  }
+
+  const move = (time: number): MutablePacket =>
+    packetOf('MOVE', {
+      tickId: 1,
+      serverRealTimeMSofLastNewTick: 0,
+      records: [{ time, x: 5, y: 6 }],
+    });
+
+  it('falls back to the connection until the client has stamped something', () => {
+    const { world, tick } = clockHarness();
+    tick(5_000);
+    expect(world.clientTimeMs).toBe(5_000);
+  });
+
+  it("reads it off the client's own movement, and keeps running from there", () => {
+    const { world, feed, tick } = clockHarness();
+    feed(move(1_234_567));
+    expect(world.clientTimeMs).toBe(1_234_567);
+
+    // The client's clock and ours tick together, so it stays current between
+    // the packets it is read from.
+    tick(400);
+    expect(world.clientTimeMs).toBe(1_234_967);
+    // And it is nothing like the connection's, which is the whole point.
+    expect(world.gameTimeMs).toBe(400);
+  });
+
+  it('reads it off a pong, which the client sends before anything else', () => {
+    const { world, feed } = clockHarness();
+    feed(packetOf('PONG', { serial: 1, time: 900_000 }));
+    expect(world.clientTimeMs).toBe(900_000);
+  });
+
+  it("reads it off the client's own shots", () => {
+    const { world, feed } = clockHarness();
+    feed(
+      packetOf('PLAYERSHOOT', {
+        time: 500_000,
+        shotId: 1,
+        containerType: 1,
+        attackIndex: 0,
+        projectilePosition: { x: 1, y: 1 },
+        angle: 0,
+        bulletId: 1,
+        unknownShort: 0,
+        playerPosition: { x: 1, y: 1 },
+      }),
+    );
+    expect(world.clientTimeMs).toBe(500_000);
+  });
+
+  it('follows the latest reading rather than freezing the first', () => {
+    // A movement record describes where the player *was*, so every calibration
+    // is a little stale; taking the newest keeps that from being frozen in.
+    const { world, feed, tick } = clockHarness();
+    feed(move(1_000_000));
+    tick(1_000);
+    feed(move(2_000_000));
+    expect(world.clientTimeMs).toBe(2_000_000);
+  });
+
+  it('ignores a stamp that is not a time', () => {
+    const { world, feed } = clockHarness();
+    feed(move(1_000_000));
+    feed(move(0));
+    expect(world.clientTimeMs).toBe(1_000_000);
+  });
+
+  // What the client puts on the wire is a rising sequence, and a packet slipped
+  // into the middle of it carrying an earlier time is that sequence going
+  // backwards. Every calibration is taken from a reading already a moment old,
+  // so the estimate alone can be behind.
+  it('never reads behind the last stamp the client sent', () => {
+    const { world, feed } = clockHarness();
+    feed(move(1_000_000));
+    // A later packet stamped further ahead than wall time accounts for.
+    feed(move(1_009_000));
+    expect(world.clientTimeMs).toBe(1_009_000);
+  });
+
+  it('is not read from what the server sends', () => {
+    const { world, feed, tick } = clockHarness();
+    tick(5_000);
+    // The appliers are origin-gated, so a server-side copy changes nothing.
+    feed(move(1_234_567), FROM_SERVER);
+    expect(world.clientTimeMs).toBe(5_000);
+  });
+});
+
 // **The dodgeable half of an area effect.** By the time `AOE` arrives the blast
 // has landed and the client is already answering with where the player was; what
 // can be walked out of is the telegraph the game sends first.
@@ -735,9 +858,9 @@ describe("the player's own bars and slots", () => {
   const HP_BOOST_STAT = 46;
   const MP_BOOST_STAT = 47;
   const CARRIED_SLOT_4_STAT = 12;
-  const BACKPACK_SLOT_0_STAT = 135;
-  const BACKPACK_SLOT_8_STAT = 148;
-  const BELT_SLOT_0_STAT = 143;
+  const BACKPACK_SLOT_0_STAT = 131;
+  const BACKPACK_SLOT_8_STAT = 139;
+  const BELT_SLOT_0_STAT = 116;
 
   const HEALTH_POTION = 2594;
   const A_BOW = 3010;

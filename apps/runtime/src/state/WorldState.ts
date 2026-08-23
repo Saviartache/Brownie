@@ -63,6 +63,10 @@ export class WorldState implements WorldView {
 
   #map: MapInfo = NO_MAP;
   #connectedAtMs: number | undefined;
+  /** Wall time to the client's clock. `undefined` until it has said so. */
+  #clientClockOffsetMs: number | undefined;
+  /** The highest stamp the client has put on the wire, as a floor. */
+  #latestClientStampMs = 0;
   readonly #now: () => number;
 
   constructor(options: WorldStateOptions = {}) {
@@ -89,6 +93,42 @@ export class WorldState implements WorldView {
    */
   get gameTimeMs(): number {
     return this.#connectedAtMs === undefined ? 0 : this.#now() - this.#connectedAtMs;
+  }
+
+  /**
+   * The game client's own clock, as the server has been hearing it.
+   *
+   * Kept as an offset from wall time rather than a stored reading, so it stays
+   * current between the packets it is calibrated from. Until one of those has
+   * arrived this answers {@link gameTimeMs}, which is the closest thing there
+   * is to it and wrong in the same direction.
+   *
+   * **Never behind the last stamp the client itself sent.** What the client
+   * puts on the wire is a rising sequence and the server is entitled to read it
+   * as one, so a packet injected into the middle of that stream carrying an
+   * *earlier* time is the timeline going backwards. The estimate can be a
+   * little behind — every calibration is taken from a reading that was already
+   * a moment old — and the floor is what keeps that small lag from becoming a
+   * malformed sequence.
+   */
+  get clientTimeMs(): number {
+    if (this.#clientClockOffsetMs === undefined) return this.gameTimeMs;
+    const estimate = this.#now() + this.#clientClockOffsetMs;
+    return Math.max(0, estimate, this.#latestClientStampMs);
+  }
+
+  /**
+   * Records the client's own time, off a packet the client stamped.
+   *
+   * Re-read on every such packet rather than fixed once: the reading a
+   * calibration is taken from is always a little stale — a movement record
+   * describes where the player *was* — and taking the latest keeps that lag
+   * from being frozen in for the life of the session.
+   */
+  calibrateClientClock(clientTimeMs: number): void {
+    if (!Number.isFinite(clientTimeMs) || clientTimeMs <= 0) return;
+    this.#clientClockOffsetMs = clientTimeMs - this.#now();
+    if (clientTimeMs > this.#latestClientStampMs) this.#latestClientStampMs = clientTimeMs;
   }
 
   /** Called once, when the server connection is established. */

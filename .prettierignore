@@ -8,3 +8,7 @@ packages/protocol/data/
 # somebody else's files on every check, and losing the ability to take an
 # upstream fix cleanly.
 tools/extractor/
+
+# Reference implementations, kept to be read rather than built — reformatting
+# them would rewrite somebody else's tree and lose the ability to pull upstream.
+references/

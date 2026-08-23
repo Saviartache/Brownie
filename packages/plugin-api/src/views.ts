@@ -265,6 +265,28 @@ export interface WorldView {
   readonly mapName: string;
   /** Milliseconds since this connection reached the game server. */
   readonly gameTimeMs: number;
+  /**
+   * The game client's own clock, as the server has been hearing it.
+   *
+   * **Not {@link gameTimeMs}, and the difference is not academic.** That one
+   * counts from the moment *this proxy* opened the server link; this one is the
+   * number the game client itself stamps on everything it sends, read off its
+   * own packets. They agree only if the client's clock happens to start where
+   * our connection did, and it does not — the client has usually been running
+   * for a while, through other maps, before the connection this session is
+   * carrying.
+   *
+   * **Anything sending a packet with a `time` field must use this one.** The
+   * server checks that stamp against what the client has been telling it, and
+   * a packet stamped with the wrong clock is dropped without a word: no error,
+   * no effect, and — because nothing acknowledges an item move either — no way
+   * to tell it apart from a refusal. Auto-loot and auto-drink both spent a
+   * session sending perfectly formed packets into that silence.
+   *
+   * Falls back to {@link gameTimeMs} until the client has said something the
+   * clock can be read from, which it does within the first moments.
+   */
+  readonly clientTimeMs: number;
   entities(): Iterable<EntityView>;
   entity(objectId: number): EntityView | undefined;
   players(): Iterable<EntityView>;

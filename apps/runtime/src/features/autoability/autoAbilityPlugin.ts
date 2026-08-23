@@ -16,6 +16,29 @@
  * the game adds effects faster than a table learns them, and a timer on an
  * unknown one is a timer on whatever it turns out to do.
  *
+ * **And nothing is cast because a timer said so.** A priest's tome is a heal;
+ * firing it at full health throws away both the heal and the mana that would
+ * have paid for the next one. So the question asked every tick is not "has the
+ * interval elapsed" but "is any of what this ability gives worth having right
+ * now" — health while health is missing, an aura while something is there to
+ * use it on, a cleanse while something is actually wrong, and none of them
+ * while the character is already carrying the effect. That is
+ * {@link castReason}, and the interval is only a floor under it.
+ *
+ * **Being aimed is not a reason to cast, only a place to cast at.** Support
+ * abilities carry attacks as riders — `pD Tome` heals, raises a healing aura
+ * and fires a shot — and letting the rider decide is how a 180-mana heal went
+ * off every 700 ms for as long as anything was on screen. An ability that gives
+ * nothing nameable is the only one fired for having a target, which is every
+ * quiver, spell, trap and scepter in the game.
+ *
+ * **It reads the character, not the party.** A priest's tome heals everyone
+ * standing in it, and a group in trouble around a healthy priest is not
+ * something the runtime can see — the server states other players' health, but
+ * whether they want a heal from *this* character is a judgement, not a fact.
+ * So the trigger is the player's own bar, which is the half that is knowable,
+ * and healing the group is still the player's key to press.
+ *
  * **It sends `USEITEM`, exactly as the client does for a key press.** The
  * position it names is where the effect lands — an enemy for an aimed ability,
  * the character for a buff — which is the same field the client fills with the
@@ -30,9 +53,12 @@
 import {
   PluginCategory,
   definePlugin,
+  type EntityView,
   type Plugin,
   type Position,
   type SessionView,
+  type SettingHandle,
+  type SettingValue,
 } from '@brownie/plugin-api';
 import { isSafeZone } from '../../constants/SafeZones.js';
 import { AbilityUse, type AbilityFacts } from '../../gamedata/abilities.js';
@@ -43,6 +69,7 @@ import { AbilityUse, type AbilityFacts } from '../../gamedata/abilities.js';
 // shooting at it. See `autoaim/shootable.ts`.
 import { TargetPriority, selectTarget } from '../autoaim/selectTarget.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
+import { castReason, percentOf, type CastPreferences } from './worthCasting.js';
 
 export interface AutoAbilityInputs {
   /**
@@ -101,9 +128,37 @@ const SHOOTABLE: Omit<ShootableRules, 'isObstacle' | 'isInvincible'> = {
   skipObstacles: true,
 };
 
-/** When this session may cast again, on the world's clock. */
-interface CastClock {
+/**
+ * Every setting, folded into one record when one of them moves.
+ *
+ * Read rather than looked up, which is the same reason Oryx's Sanctuary folds
+ * its switches: a handle's `get` is a map lookup, there are eight of them on
+ * this path, and none of the answers changed between one server tick and the
+ * next. It extends {@link CastPreferences} so the three the decision wants can
+ * be handed straight to it instead of built into a fresh object per tick.
+ */
+interface Tuning extends CastPreferences {
+  readonly attacks: boolean;
+  readonly support: boolean;
+  readonly rangeTiles: number;
+  /** The share of the mana bar to leave standing, as a fraction of it. */
+  readonly manaReserve: number;
+  readonly minIntervalMs: number;
+}
+
+/**
+ * What one connection remembers.
+ *
+ * The map name rides along with the clock so "is this a safe zone" is answered
+ * once per map rather than once per tick — the test lowercases the name, and a
+ * string built five times a second to reach the same verdict is the only thing
+ * on this path that allocates at all.
+ */
+interface SessionState {
+  /** When this session may cast again, on the world's clock. */
   nextAtMs: number;
+  mapName: string;
+  safeZone: boolean;
 }
 
 export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
@@ -116,12 +171,15 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
     },
 
     setup(context) {
-      const castAimed = context.settings.boolean('castAimed', {
-        label: 'Cast aimed abilities at enemies',
+      // Split by what an ability is *for* rather than by where it is pointed. A
+      // priest's tome fires a shot and would otherwise sit under "attacks",
+      // which is not what a player switching attacks off means by it.
+      const castAttacks = context.settings.boolean('castAimed', {
+        label: 'Use attack abilities — quivers, spells, traps, scepters',
         default: true,
       });
-      const castSelf = context.settings.boolean('castSelf', {
-        label: 'Cast buffs, auras and heals on yourself',
+      const castSupport = context.settings.boolean('castSelf', {
+        label: 'Use support abilities — heals, buffs, auras, cleanses',
         default: true,
       });
       const rangeTiles = context.settings.range('rangeTiles', {
@@ -131,13 +189,26 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         max: 20,
         step: 1,
       });
-      // Applies to the self-casts; the aimed ones need a target by definition.
-      // On by default because a stun aura in an empty room is mana spent on
-      // nothing, and off is for the player who wants a speed buff kept up while
-      // walking somewhere.
-      const onlyNearEnemies = context.settings.boolean('onlyNearEnemies', {
-        label: 'Hold buffs until an enemy is near',
-        default: true,
+      // The two thresholds that are the player's to set, and the only ones:
+      // whether a berserk aura needs an enemy nearby is not a preference, it is
+      // what a berserk aura is, and the data file already says so.
+      const healthPercent = context.settings.range('healthPercent', {
+        label: 'Cast healing abilities at or below (% health)',
+        default: 80,
+        min: 10,
+        max: 100,
+        step: 5,
+      });
+      const manaPercent = context.settings.range('manaPercent', {
+        label: 'Cast mana abilities at or below (% mana)',
+        default: 50,
+        min: 10,
+        max: 100,
+        step: 5,
+      });
+      const utilityOutOfCombat = context.settings.boolean('utilityOutOfCombat', {
+        label: 'Keep speed and stealth up outside combat',
+        default: false,
       });
       const mpReservePercent = context.settings.range('mpReservePercent', {
         label: 'Keep at least (% mana)',
@@ -158,41 +229,113 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         step: 50,
       });
 
+      let tuning: Tuning = {
+        attacks: true,
+        support: true,
+        rangeTiles: 8,
+        manaReserve: 0,
+        minIntervalMs: 700,
+        hpPercent: 80,
+        mpPercent: 50,
+        utilityOutOfCombat: false,
+      };
+
+      const refresh = (): void => {
+        tuning = {
+          attacks: castAttacks.get(),
+          support: castSupport.get(),
+          rangeTiles: rangeTiles.get(),
+          // Kept as a fraction rather than the percentage the control shows, so
+          // the per-tick arithmetic is one multiply.
+          manaReserve: mpReservePercent.get() / 100,
+          minIntervalMs: minIntervalMs.get(),
+          hpPercent: healthPercent.get(),
+          mpPercent: manaPercent.get(),
+          utilityOutOfCombat: utilityOutOfCombat.get(),
+        };
+      };
+
+      refresh();
+      for (const handle of [
+        castAttacks,
+        castSupport,
+        rangeTiles,
+        healthPercent,
+        manaPercent,
+        utilityOutOfCombat,
+        mpReservePercent,
+        minIntervalMs,
+      ] as readonly SettingHandle<SettingValue>[]) {
+        context.onDispose(handle.onChange(refresh));
+      }
+
       const rules: ShootableRules = {
         ...SHOOTABLE,
         isObstacle: inputs.isObstacle,
         isInvincible: inputs.isInvincible,
       };
 
-      const bySession = new Map<string, CastClock>();
+      const bySession = new Map<string, SessionState>();
 
-      const clockFor = (session: SessionView): CastClock => {
-        let clock = bySession.get(session.id);
-        if (clock === undefined) {
-          clock = { nextAtMs: Number.NEGATIVE_INFINITY };
-          bySession.set(session.id, clock);
+      /** This session's state, with its safe-zone verdict current. */
+      const stateFor = (session: SessionView): SessionState => {
+        const mapName = session.world.mapName;
+        const held = bySession.get(session.id);
+        if (held === undefined) {
+          const fresh: SessionState = {
+            nextAtMs: Number.NEGATIVE_INFINITY,
+            mapName,
+            safeZone: isSafeZone(mapName),
+          };
+          bySession.set(session.id, fresh);
+          return fresh;
         }
-        return clock;
+        if (held.mapName !== mapName) {
+          held.mapName = mapName;
+          held.safeZone = isSafeZone(mapName);
+        }
+        return held;
       };
 
-      /** How long to wait after a cast before the next one is worth sending. */
+      /**
+       * How long to wait after a cast before the next one is worth sending.
+       *
+       * An aimed ability is not slowed to the length of a buff it also happens
+       * to grant: a knight's shield raises a damage aura and its point is still
+       * the shot, so pacing it to the aura would be pacing an attack by
+       * something that is not the attack. What holds one of those back is mana
+       * and {@link Tuning.minIntervalMs}.
+       */
       const intervalOf = (ability: AbilityFacts, aimed: boolean): number => {
         const refreshMs = aimed ? 0 : (ability.refreshMs ?? 0);
-        return Math.max(minIntervalMs.get(), ability.cooldownMs ?? 0, refreshMs);
+        return Math.max(tuning.minIntervalMs, ability.cooldownMs ?? 0, refreshMs);
       };
 
-      const nearestEnemy = (session: SessionView): Position | undefined =>
+      // Built once rather than per search: the rules behind it are settled in
+      // `setup` and a fresh closure per tick is a fresh closure per tick.
+      const worthCastingAt = (enemy: EntityView): boolean => isShootable(enemy, rules);
+
+      const nearestEnemy = (session: SessionView): EntityView | undefined =>
         selectTarget(session.world.enemies(), {
           shooterX: session.self.x,
           shooterY: session.self.y,
-          maxRangeTiles: rangeTiles.get(),
+          maxRangeTiles: tuning.rangeTiles,
           priority: TargetPriority.Closest,
-          accept: (enemy) => isShootable(enemy, rules),
+          accept: worthCastingAt,
         });
 
+      // Cheapest test first, and each one is a test the next would have been
+      // wasted work without. Nothing on this path allocates until a cast is
+      // actually going out.
       context.packets.on('NEWTICK', (_packet, session) => {
         const self = session.self;
-        if (!self.alive || isSafeZone(session.world.mapName)) return;
+        if (!self.alive) return;
+
+        const state = stateFor(session);
+        if (state.safeZone) return;
+
+        const nowMs = session.world.gameTimeMs;
+        if (nowMs < state.nextAtMs) return;
 
         const slot = self.inventory.at(ABILITY_SLOT);
         if (slot === undefined || slot.objectType <= 0) return;
@@ -200,32 +343,68 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         const ability = inputs.ability(slot.objectType);
         if (ability === undefined || ability.use === AbilityUse.Never) return;
 
+        // Two independent facts about the same item: whether it supports the
+        // character, and whether it is pointed at something. A tome is both.
+        const supports = ability.benefits.length > 0;
+        if (!(supports ? tuning.support : tuning.attacks)) return;
         const aimed = ability.use === AbilityUse.Aimed;
-        if (!(aimed ? castAimed.get() : castSelf.get())) return;
-
-        const nowMs = session.world.gameTimeMs;
-        const clock = clockFor(session);
-        if (nowMs < clock.nextAtMs) return;
 
         // The cost first, then the reserve on top of it: a cast that leaves the
         // bar under what the player asked to keep is one they did not want, and
         // a cast the server refuses for want of mana is a packet sent for
         // nothing. An unstated maximum reserves nothing rather than everything.
-        const reserve = self.maxMp > 0 ? (self.maxMp * mpReservePercent.get()) / 100 : 0;
+        const reserve = self.maxMp > 0 ? self.maxMp * tuning.manaReserve : 0;
         if (self.mp < ability.mpCost + reserve) return;
 
-        // Where the effect lands. A buff ignores the point — the game centres
-        // it on the character whatever the client sent — so it is cast where
-        // the character stands, which is a position that is always legal.
-        let at: Position = self;
-        if (aimed || onlyNearEnemies.get()) {
-          const enemy = nearestEnemy(session);
-          if (enemy === undefined) return;
-          if (aimed) at = enemy;
-        }
+        // Looked up at most once per tick, and often not at all: a pass over
+        // every visible enemy is by far the most expensive thing here, and a
+        // priest at full health is turned down before anything needs to know
+        // whether the room is empty.
+        let enemy: EntityView | undefined;
+        let searched = false;
+        const nearest = (): EntityView | undefined => {
+          if (!searched) {
+            searched = true;
+            enemy = nearestEnemy(session);
+          }
+          return enemy;
+        };
+        const hasEnemy = (): boolean => nearest() !== undefined;
+
+        // **What the ability gives decides whether to cast; being aimed decides
+        // only where.** Several support abilities carry an attack as a rider —
+        // `pD Tome` heals and also fires a shot — and treating that rider as the
+        // reason is how a 180-mana heal went off every 700 ms for as long as
+        // anything was on screen.
+        const reason = castReason(
+          ability.benefits,
+          {
+            hpPercent: percentOf(self.hp, self.maxHp),
+            mpPercent: percentOf(self.mp, self.maxMp),
+            conditions: self.conditions,
+            enemyNear: hasEnemy,
+          },
+          tuning,
+        );
+        if (reason === undefined) return;
+
+        // An aimed ability is pointed at the enemy so its attack lands, and at
+        // the character when there is nobody to point it at — which happens
+        // exactly when a support ability with an attack rider is being cast for
+        // the support. A buff ignores the point either way: the game centres it
+        // on the character whatever the client sent.
+        const at: Position = aimed ? (nearest() ?? self) : self;
 
         session.sendToServer('USEITEM', {
-          time: Math.trunc(nowMs),
+          // **The client's clock, not the one this plugin schedules against.**
+          // The server checks this field against the time the game client has
+          // been stamping its own packets with, and throws the packet away when
+          // it does not match — no error, no effect, and the ability sound the
+          // player hears is the client reacting to a use it never made. It cost
+          // a session of a priest's tome firing every 700 ms and healing
+          // nothing. `gameTimeMs` below is a different quantity for a different
+          // job: a monotonic proxy-side clock to measure intervals with.
+          time: Math.trunc(session.world.clientTimeMs),
           slotObject: {
             objectId: self.objectId,
             slotId: ABILITY_SLOT,
@@ -235,11 +414,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
           useType: USE_TYPE_SELF,
           unknownInt: 0,
         });
-        const waitMs = intervalOf(ability, aimed);
-        clock.nextAtMs = nowMs + waitMs;
-        context.log.debug(
-          `cast ${ability.use} 0x${slot.objectType.toString(16)} at ${at.x.toFixed(1)},${at.y.toFixed(1)} for ${String(ability.mpCost)} mp, again in ${String(waitMs)} ms`,
-        );
+        state.nextAtMs = nowMs + intervalOf(ability, aimed);
       });
 
       // `USEITEM` only ever flows from the client, and our own casts are
@@ -249,12 +424,12 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         if (packet.opaque) return;
         if (slotIdOf(packet.get('slotObject')) !== ABILITY_SLOT) return;
 
-        const clock = clockFor(session);
-        clock.nextAtMs = Math.max(clock.nextAtMs, session.world.gameTimeMs + MANUAL_PAUSE_MS);
+        const state = stateFor(session);
+        state.nextAtMs = Math.max(state.nextAtMs, session.world.gameTimeMs + MANUAL_PAUSE_MS);
       });
 
       context.packets.on('MAPINFO', (_packet, session) => {
-        clockFor(session).nextAtMs = session.world.gameTimeMs + MAP_SETTLE_MS;
+        stateFor(session).nextAtMs = session.world.gameTimeMs + MAP_SETTLE_MS;
       });
 
       context.onDispose(

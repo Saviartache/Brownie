@@ -421,6 +421,31 @@ export class DodgeController {
   /** What counted as trouble this plan, for {@link #safety} to classify against. */
   #reactWithinMs = 0;
 
+  /**
+   * How coarse the numbers the branches are chosen on actually are.
+   *
+   * Every time the sweep reports lands on the sample grid, so a threshold
+   * compared against one has a step of this size under it. It is the width the
+   * hysteresis bands below are given, because a band narrower than the noise is
+   * not a band.
+   */
+  #quantumMs = 0;
+
+  /**
+   * Which branch the last plan took, so a threshold has to be crossed properly
+   * to change it rather than merely brushed. See {@link #choose}.
+   */
+  #doomed = false;
+  #urgent = false;
+  /**
+   * What {@link #doomed} was on the *previous* plan.
+   *
+   * Kept apart because `#choose` runs twice when the part-speed courses turn out
+   * to be worth scoring, and a band measured against a value this plan already
+   * set would widen itself on the second call and latch.
+   */
+  #doomedBefore = false;
+
   readonly #sweep: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
   readonly #probe: Reach = { wallTiles: Infinity, hazardTiles: Infinity, exitTiles: Infinity };
 
@@ -430,6 +455,11 @@ export class DodgeController {
   }
 
   #forget(): void {
+    // Nothing in the air is neither urgent nor hopeless, and a band remembered
+    // across a quiet stretch is a band applied to a different fight.
+    this.#doomed = false;
+    this.#doomedBefore = false;
+    this.#urgent = false;
     this.#held = false;
     this.#heldX = 0;
     this.#heldY = 0;
@@ -475,6 +505,7 @@ export class DodgeController {
     const horizonMs = settings.horizonMs;
     const reactWithinMs = Math.min(settings.reactWithinMs, horizonMs);
     this.#reactWithinMs = reactWithinMs;
+    this.#quantumMs = Math.max(1, settings.sampleStepMs);
     this.#survivalCapMs = horizonMs + settings.sampleStepMs;
     const reachTiles = tilesPerMs * (settings.leadMs + horizonMs);
     const fieldOptions: ThreatFieldOptions = {
@@ -556,7 +587,28 @@ export class DodgeController {
     const committed =
       this.#held && (this.#heldX !== 0 || this.#heldY !== 0) && situation.nowMs < this.#heldUntilMs;
 
-    if (ownUnsafeAt > reactWithinMs && ownHazard > HAZARD_GUARD_MS && !crowded && !committed) {
+    // **Letting go asks for more than taking over did.** The bar is a sample
+    // higher while the planner is driving, so a course sitting on the threshold
+    // cannot hand the wheel back and take it again on alternate plans — which is
+    // what the live log showed as `clear` and `guide` trading places every sixty
+    // milliseconds, each time with a hit still half a second out.
+    const releaseBar = this.#held ? reactWithinMs + this.#quantumMs : reactWithinMs;
+    // **A hit counts wherever it came from.** `unsafeAtMs` is raised only by
+    // shots already near — that is what stops the planner reacting to fire
+    // across the room — but a fast shot eight tiles out still lands inside the
+    // window, and judging solely on the near ones handed the wheel back with an
+    // impact four hundred milliseconds away. The live log has that exact line:
+    // `clear ... hit in 480ms, at 0% speed`. Being about to be grazed by
+    // something close and being about to be hit by anything at all are both
+    // reasons to stay.
+    const ownImpact = this.#impactMs[own] ?? Infinity;
+    if (
+      ownUnsafeAt > releaseBar &&
+      ownImpact > releaseBar &&
+      ownHazard > HAZARD_GUARD_MS &&
+      !crowded &&
+      !committed
+    ) {
       // Their course is fine for as long as this decision is about. Nothing to
       // say, and not saying it *is* the feature — what the caller does with a
       // plan that steers nowhere is give the wheel back; see `dodgePlugin`.
@@ -568,7 +620,7 @@ export class DodgeController {
         dirY: 0,
         speedScale: 0,
         unsafeAtMs: ownUnsafeAt,
-        impactMs: this.#impactMs[own] ?? Infinity,
+        impactMs: ownImpact,
         clearanceTiles: this.#clearance[own] ?? Infinity,
         trackedShots: tracked,
       };
@@ -581,7 +633,13 @@ export class DodgeController {
     // through, not backed away from, and the window is usually a short step
     // rather than a sprint. Neither happens in open fire, so the fast path stays
     // the fast path.
-    const urgent = ownUnsafeAt < settings.urgentWithinMs;
+    // Entered at the setting, left a sample later — the same band, and for the
+    // same reason, as the one on the doomed test below.
+    this.#urgent =
+      ownUnsafeAt <
+      (this.#urgent ? settings.urgentWithinMs + this.#quantumMs : settings.urgentWithinMs);
+    const urgent = this.#urgent;
+    this.#doomedBefore = this.#doomed;
     let scored = firstTier;
     let chosen = this.#choose(scored, reactWithinMs, urgent, situation);
     if (this.#worthACloserLook(chosen, scored, reactWithinMs)) {
@@ -820,7 +878,14 @@ export class DodgeController {
     situation: DodgeSituation,
   ): number {
     const bestWindow = this.#longestSafeWindow(scored);
-    if (bestWindow <= reactWithinMs) {
+    // **Hopeless means hit, not grazed** — and with hysteresis, because both
+    // numbers land on the sixty-millisecond sample grid and a bare threshold on
+    // a quantised signal flips branch every plan or two. The live log showed
+    // guide, evade and unavoidable alternating six times in a hundred and fifty
+    // milliseconds, and each branch admits a different set of courses.
+    const doomedBar = this.#doomedBefore ? reactWithinMs + this.#quantumMs : reactWithinMs;
+    this.#doomed = this.#longestUnhitWindow(scored) <= doomedBar;
+    if (this.#doomed) {
       // Nothing clears the window, whatever speed it is walked at. Trade inside
       // a narrow band so the hit is still the latest and lightest available —
       // and where the course leaves us stops mattering, because there is no
@@ -880,6 +945,27 @@ export class DodgeController {
     let best = -Infinity;
     for (let c = 0; c < scored; c += 1) {
       const window = this.#unsafeMs[c] ?? 0;
+      if (window > best) best = window;
+    }
+    return best;
+  }
+
+  /**
+   * The longest any scored course goes before something actually lands on it.
+   *
+   * **Not the same question as {@link #longestSafeWindow}, and confusing the two
+   * declared every busy moment hopeless.** That one asks when a course drops
+   * below a comfortable margin — eight hundredths of a tile by default — which
+   * in twenty-shot fire is nearly always and nearly always a *miss*. Deciding
+   * "nothing can be done" on it produced verdicts reading `unavoidable, room
+   * 0.01t, hit in never`: no course was going to be hit, and the planner had
+   * just thrown away its sense of position to survive a hit that was not coming.
+   * Being grazed is not being hit, and only being hit is hopeless.
+   */
+  #longestUnhitWindow(scored: number): number {
+    let best = -Infinity;
+    for (let c = 0; c < scored; c += 1) {
+      const window = this.#impactMs[c] ?? 0;
       if (window > best) best = window;
     }
     return best;

@@ -9,20 +9,34 @@
  * and where they are scattered to is a fact about a game build.
  *
  * **The two stat tables in this repository disagree about the backpack and the
- * belt.** `packages/protocol/data/stat-types.json` puts the backpack at 135–142
- * and 148–155 with the belt at 143–145, which is what this file uses because
- * that table is the repository's stated source for stat ids. The reference
- * implementation, from a live capture, put the backpack at 131–146 and the belt
- * at 116–118. Both cannot be right and neither can be settled from a file on
- * disk — the game's own metadata is name-obfuscated, so the enum is not in it.
+ * belt, and the live game settled it against the newer one.**
+ * `packages/protocol/data/stat-types.json` puts the backpack at 135–142 and
+ * 148–155 with the belt at 143–145. The reference implementation, from a live
+ * capture, puts the backpack at 131–146 — contiguous — and the belt at 116–118.
+ * It cannot be settled from a file on disk: the game's own metadata is
+ * name-obfuscated, so the enum is not in it.
  *
- * What makes leaving that unresolved safe is that a slot is only ever known
- * when the server actually stated it (see {@link PlayerInventory}). Point these
- * at the wrong ids and nothing is *reported* for the backpack or the belt: a
- * pickup declines to use the backpack, a drink declines to use the belt, and
- * both fall back to the eight carried slots, whose ids the two tables agree on.
- * Nothing acts on a slot it invented. Correcting a build is an edit to the four
- * numbers below and to nothing else.
+ * Two sessions decided it, both against the JSON table and both explained by
+ * the same four-slot shift:
+ *
+ *  - A swap aimed at potion-belt slot 0 — chosen because stat 143 read as empty
+ *    — killed the session outright. Under the capture, 143 is backpack slot 12,
+ *    not the belt.
+ *  - A swap aimed at backpack slot 4 was refused over and over, chosen because
+ *    stat 139 read as empty. Under the capture, 139 is backpack slot **8**, so
+ *    the packet named a slot four places earlier than the one that was free —
+ *    which is exactly a swap into an occupied slot, and exactly what the server
+ *    refuses.
+ *
+ * So the capture's numbers are the ones below. Being wrong here no longer costs
+ * a session either way: a slot is only known when the server actually stated it
+ * (see {@link PlayerInventory}), nothing is ever moved *into* the belt (see
+ * `features/autoloot/destination.ts`), and a destination that will not take an
+ * item is dropped after one refusal rather than retried forever. Under the JSON
+ * table these ids report exalt totals and quest counts, which are numbers rather
+ * than the -1 an empty slot sends — so a wrong guess reads as "occupied" and is
+ * never aimed at. Correcting a future build is an edit to the three numbers
+ * below and to the test in `state.test.ts` that pins them.
  */
 
 /**
@@ -46,16 +60,13 @@ export const SlotRange = {
 
 /** The stat carrying slot 0; the eleven that follow are consecutive. */
 const WORN_AND_CARRIED_STAT = 8;
-/** The stat carrying backpack slot 0; seven more follow it. */
-const BACKPACK_STAT = 135;
-/** The stat carrying backpack slot 8 — the extender's half, elsewhere. */
-const BACKPACK_EXTENDER_STAT = 148;
+/** The stat carrying backpack slot 0; the fifteen that follow are consecutive. */
+const BACKPACK_STAT = 131;
 /** The stat carrying belt slot 0; two more follow it. */
-const BELT_STAT = 143;
+const BELT_STAT = 116;
 
 /** Slots 0–11: the four worn and the eight carried, numbered together. */
 const OWN_SLOTS = 12;
-const BACKPACK_FIRST_HALF = 8;
 const BACKPACK_SLOTS = 16;
 const BELT_SLOTS = 3;
 
@@ -68,11 +79,7 @@ function buildSlotByStat(): ReadonlyMap<number, number> {
     bySlot.set(WORN_AND_CARRIED_STAT + slot, slot);
   }
   for (let index = 0; index < BACKPACK_SLOTS; index += 1) {
-    const stat =
-      index < BACKPACK_FIRST_HALF
-        ? BACKPACK_STAT + index
-        : BACKPACK_EXTENDER_STAT + (index - BACKPACK_FIRST_HALF);
-    bySlot.set(stat, SlotRange.BackpackFirst + index);
+    bySlot.set(BACKPACK_STAT + index, SlotRange.BackpackFirst + index);
   }
   for (let index = 0; index < BELT_SLOTS; index += 1) {
     bySlot.set(BELT_STAT + index, SlotRange.BeltFirst + index);

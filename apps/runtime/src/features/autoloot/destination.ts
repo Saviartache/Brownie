@@ -1,15 +1,25 @@
 /**
  * Where a looted item is put.
  *
- * Two questions, and they are different ones: a quaff potion goes on the potion
- * belt if the belt will take it — one slot holds six — and everything else goes
- * in the first free slot the player has asked to fill.
+ * A quaff potion goes to the potion belt first — one belt slot holds six, so it
+ * is six carried slots the player keeps, and it is where they are reached for
+ * from. Everything else, and every potion the belt has no room for, goes in the
+ * first free slot the player has allowed.
  *
- * Pure. What is *claimed* is passed in rather than read, so the rules here have
- * no idea a claim exists and stay testable as a table.
+ * **Only slots the server has actually stated are candidates**, which is what
+ * the inventory view guarantees: a slot nobody has described is absent rather
+ * than empty, so a character whose backpack is not being reported has no free
+ * backpack slots rather than sixteen imaginary ones. The third belt slot is an
+ * unlock and the server reports it exactly when the character has it, so being
+ * reported is itself the answer.
+ *
+ * Pure, and testable as a table.
  */
 
 import type { InventoryView, ItemSlotView } from '@brownie/plugin-api';
+
+/** Whether a slot has already refused an item and should be left alone. */
+export type SlotRefused = (slotId: number) => boolean;
 
 /** A slot an item can be moved into, named the way `INVENTORYSWAP` names it. */
 export interface Destination {
@@ -19,41 +29,47 @@ export interface Destination {
    *
    * The packet carries it and the server checks it against its own view, so a
    * slot we believe is empty and is not gets the swap refused rather than the
-   * item that was there thrown into the bag. That check is what makes a wrong
-   * guess about the slot stats cost nothing — see `state/ItemSlots.ts`.
+   * item that was there thrown into the bag.
    */
   readonly objectType: number;
-  /** What the slot's count should read once the move lands, when it counts. */
+  /**
+   * What the slot's count should read once the move lands, for a slot that
+   * counts.
+   *
+   * The only evidence a stacking move arrived: the slot already held the item
+   * before it, so "is it occupied?" cannot answer. `undefined` everywhere else,
+   * where being occupied at all is the answer.
+   */
   readonly expectedQuantity: number | undefined;
 }
 
-/** Whether a slot is already spoken for by a move still settling. */
-export type SlotClaimed = (slotId: number) => boolean;
-
 /**
- * A potion-belt slot for this potion, or `undefined` if the belt will not take
- * it.
+ * A potion-belt slot for this potion, or `undefined` when the belt has no room.
  *
- * Stacks onto a slot already holding the same potion while there is room. When
- * there is such a slot and it is *full*, the answer is nothing rather than an
- * empty slot: a second stack of the same potion on the belt is not what anyone
- * wants, and the reference implementation learned that by producing them.
+ * A stack of the same potion is joined before an empty slot is taken, so the
+ * belt fills rather than spreading one potion across it. A stack that is *full*
+ * ends the search rather than starting a second one somewhere else — two stacks
+ * of one potion on a three-slot belt is not what anybody wants.
+ *
+ * @param beltStack How many the belt holds in one slot, from the item's own
+ *   `QuickslotAllowed`. Zero for everything the belt refuses, which is most of
+ *   the game.
  */
 export function findBeltDestination(
   inventory: InventoryView,
   objectType: number,
   beltStack: number,
-  claimed: SlotClaimed,
+  refused: SlotRefused,
 ): Destination | undefined {
   if (beltStack <= 0) return undefined;
 
   let firstEmpty: ItemSlotView | undefined;
   for (const slot of inventory.belt()) {
-    if (claimed(slot.slotId)) continue;
+    if (refused(slot.slotId)) continue;
     if (slot.objectType === objectType) {
-      return slot.quantity > 0 && slot.quantity < beltStack
-        ? { slotId: slot.slotId, objectType, expectedQuantity: slot.quantity + 1 }
-        : undefined;
+      // A count is what says the game stacks this slot at all.
+      if (slot.quantity <= 0 || slot.quantity >= beltStack) return undefined;
+      return { slotId: slot.slotId, objectType, expectedQuantity: slot.quantity + 1 };
     }
     if (slot.objectType === -1 && firstEmpty === undefined) firstEmpty = slot;
   }
@@ -66,26 +82,26 @@ export function findBeltDestination(
 /**
  * The first free slot the player has allowed, or `undefined` when full.
  *
- * Only slots the server has actually stated are candidates, which is what the
- * inventory view guarantees — so a character whose backpack is not being
- * reported has no free backpack slots rather than sixteen imaginary ones.
+ * `refused` is what makes a mistake here self-limiting rather than endless: a
+ * slot the server would not take an item into is skipped from then on, so the
+ * search moves along the inventory instead of retrying the same refusal.
  */
 export function findFreeSlot(
   inventory: InventoryView,
   useBackpack: boolean,
   backpackFirst: boolean,
-  claimed: SlotClaimed,
+  refused: SlotRefused,
 ): Destination | undefined {
-  const carried = (): Destination | undefined => firstEmpty(inventory.carried(), claimed);
+  const carried = (): Destination | undefined => firstEmpty(inventory.carried(), refused);
   const backpack = (): Destination | undefined =>
-    useBackpack ? firstEmpty(inventory.backpack(), claimed) : undefined;
+    useBackpack ? firstEmpty(inventory.backpack(), refused) : undefined;
 
   return backpackFirst ? (backpack() ?? carried()) : (carried() ?? backpack());
 }
 
-function firstEmpty(slots: readonly ItemSlotView[], claimed: SlotClaimed): Destination | undefined {
+function firstEmpty(slots: readonly ItemSlotView[], refused: SlotRefused): Destination | undefined {
   for (const slot of slots) {
-    if (slot.objectType !== -1 || claimed(slot.slotId)) continue;
+    if (slot.objectType !== -1 || refused(slot.slotId)) continue;
     return { slotId: slot.slotId, objectType: -1, expectedQuantity: undefined };
   }
   return undefined;
