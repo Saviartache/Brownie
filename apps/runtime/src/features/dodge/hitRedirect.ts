@@ -69,11 +69,13 @@ export function registerHitRedirect(context: PluginContext): void {
   const enabled = context.settings.boolean('redirectHits', {
     group: 'Hit redirect',
     label: 'Blame a nearby player for hits that land',
+    advanced: true,
     default: false,
   });
   const radiusTiles = context.settings.range('redirectRadiusTiles', {
     group: 'Hit redirect',
     label: 'Look for one within (tiles)',
+    advanced: true,
     default: DEFAULT_RADIUS_TILES,
     min: 1,
     max: MAX_RADIUS_TILES,

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConditionEffect, conditionBitLow } from '../src/constants/ConditionEffect.js';
 import { solveIntercept } from '../src/features/autoaim/intercept.js';
-import { MotionTracker } from '../src/features/autoaim/MotionTracker.js';
+import { MotionTracker } from '../src/state/MotionTracker.js';
 import { CURSOR_FRESH_MS, CursorTracker } from '../src/native/CursorTracker.js';
 import { TargetPriority, selectTarget } from '../src/features/autoaim/selectTarget.js';
 import {

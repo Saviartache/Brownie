@@ -489,6 +489,14 @@ export class Application {
           const reach = this.#weapon.of(weaponType)?.reachTiles;
           return reach !== undefined && reach > 0 ? reach : undefined;
         },
+        // The two the spacing band cannot work without, and the same two
+        // auto-aim is handed for the same reason: a wall in this game is an
+        // object with hit points and the enemy flag, and a quarter of what
+        // `objects.xml` marks as an enemy is a spawner or a room controller.
+        // Ranking "how near is the nearest monster" over those measures the
+        // room rather than the fight.
+        isObstacle: (objectType) => this.#objects.occupies(objectType),
+        isInvincible: (objectType) => this.#objects.isInvincible(objectType),
       }),
     );
 

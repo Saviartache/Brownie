@@ -40,7 +40,7 @@ import {
   type SessionView,
 } from '@brownie/plugin-api';
 import { solveIntercept } from './intercept.js';
-import { MotionTracker } from './MotionTracker.js';
+import { MotionTracker } from '../../state/MotionTracker.js';
 import { TargetPriority, selectTarget } from './selectTarget.js';
 import { isShootable } from './shootable.js';
 

@@ -190,8 +190,12 @@ export interface DodgeWorld extends Ground {
    *
    * **Scored, never a veto.** The only lane out of a volley sometimes runs past
    * a monster, and a planner that refuses it stands in the volley instead.
+   *
+   * @param aheadMs When the player would be standing there, from now. The
+   *   monsters are carried forward over it, which is what tells one the player
+   *   walked up to from one that is walking up to the player.
    */
-  standoffAt(x: number, y: number): number;
+  standoffAt(x: number, y: number, aheadMs: number): number;
 }
 
 /** The course that stays put. Always index nought, always considered. */
@@ -352,6 +356,34 @@ function standoffCost(outOfBandTiles: number): number {
   return outOfBandTiles < 0 ? -outOfBandTiles * CROWDED_WEIGHT : outOfBandTiles;
 }
 
+/**
+ * What a course has to clear before {@link DodgeController.#mostAligned} will
+ * look at it at all.
+ *
+ * **A requirement is not a preference, and mixing the two is how a planner ends
+ * up trading being hit for a tidier heading.** Everything in the ordering below
+ * the bars is an argument about which of several acceptable courses is nicest;
+ * these decide what "acceptable" means, and they are settled first so that no
+ * amount of niceness can outvote them.
+ */
+interface Bars {
+  /** Trouble must be strictly later than this. */
+  windowMs: number;
+  /** And a hit no earlier than this. */
+  impactMs: number;
+  /** And at least this much room over the horizon. */
+  roomTiles: number;
+  /**
+   * And a strictly better place against the monsters than this, in quanta.
+   *
+   * `Infinity` — the usual case — admits everything, which is what "nobody is
+   * inside the bubble" should mean. Finite only while something is, and then it
+   * is the cost of standing where the player already is: a course that does not
+   * improve on that is not an answer to being crowded.
+   */
+  standoff: number;
+}
+
 export class DodgeController {
   readonly #field = new ThreatField();
   readonly #blasts = new Blasts();
@@ -402,6 +434,16 @@ export class DodgeController {
    * something is on top of them that is not a request worth honouring.
    */
   #crowded = false;
+
+  /**
+   * How badly the place the player is standing sits against the monsters.
+   *
+   * Signed as {@link DodgeWorld.standoffAt} reports it, and kept because two
+   * separate decisions are made against it: whether anything has walked inside
+   * the bubble at all, and — when something has — which courses count as
+   * getting out of it rather than merely moving.
+   */
+  #hereStandoff = 0;
 
   /**
    * The course last committed to, and until when it stands.
@@ -455,6 +497,13 @@ export class DodgeController {
     unsafeAtMs: Infinity,
   };
   readonly #probe: Reach = { wallTiles: Infinity, hazardTiles: Infinity, exitTiles: Infinity };
+  /** What a course must clear to be considered. Rewritten in place per branch. */
+  readonly #bars: Bars = {
+    windowMs: -Infinity,
+    impactMs: -Infinity,
+    roomTiles: -Infinity,
+    standoff: Infinity,
+  };
 
   /** Drops the commitment. Called when the session or the character changes. */
   reset(): void {
@@ -541,11 +590,20 @@ export class DodgeController {
     // to speak: the room being taken is the room a dodge needs, so waiting until
     // it is damage is waiting until there is nowhere left to go.
     //
-    // **Only while nobody is driving.** A player walking into a boss has said
-    // where they want to be, and a knight is *supposed* to be there. Crowding
-    // ranks the courses whatever they are doing; it only ever takes the wheel
-    // when their hands are off it.
-    this.#crowded = !steering && world.standoffAt(situation.x, situation.y) < 0;
+    // **Whoever is driving, and that is a correction.** This used to stand down
+    // the moment the player touched a key, on the reasoning that somebody
+    // walking into a boss has said where they want to be. That is true of
+    // walking *towards* one and false of everything else — a monster closing on
+    // a player who is walking anywhere at all is not a request, and the live
+    // report was the plain one: "they just walk up and kill me". What decides
+    // whether to leave them alone is not whether their hands are on the keys,
+    // it is whether what they are doing with them is making room; see
+    // {@link #standoffOf} and the release test below.
+    // Asked about right now, because "has something got inside the bubble" is a
+    // question about the present. Where a *course* leaves the player is asked
+    // about the moment they would arrive; see {@link #standoffFor}.
+    this.#hereStandoff = world.standoffAt(situation.x, situation.y, 0);
+    this.#crowded = this.#hereStandoff < 0;
     const crowded = this.#crowded;
     const tracked = this.#field.tracked;
     // Shots in flight and blasts on their way down. Either is a reason to think.
@@ -611,11 +669,19 @@ export class DodgeController {
     // something close and being about to be hit by anything at all are both
     // reasons to stay.
     const ownImpact = this.#impactMs[own] ?? Infinity;
+    // **Being crowded only keeps the wheel while their own walking is not
+    // dealing with it.** Somebody stepping away from a monster that closed on
+    // them is already doing the right thing and must not be argued with;
+    // somebody walking into one, along one, or standing still is not, and that
+    // is the case the whole band exists for. Measured as "does this course end
+    // better placed than standing here does" rather than by asking which keys
+    // are down.
+    const makingRoom = (this.#standoff[own] ?? 0) < standoffCost(this.#hereStandoff);
     if (
       ownUnsafeAt > releaseBar &&
       ownImpact > releaseBar &&
       ownHazard > HAZARD_GUARD_MS &&
-      !crowded &&
+      (!crowded || makingRoom) &&
       !committed
     ) {
       // Their course is fine for as long as this decision is about. Nothing to
@@ -863,13 +929,26 @@ export class DodgeController {
     const dirX = this.#dirX[candidate] ?? 0;
     const dirY = this.#dirY[candidate] ?? 0;
     if ((dirX === 0 && dirY === 0) || tilesPerMs <= 0) {
-      return standoffCost(world.standoffAt(situation.x, situation.y));
+      // Standing still is not standing still relative to something walking
+      // towards you, so this asks about the far moment too and takes the worse.
+      return Math.max(
+        standoffCost(world.standoffAt(situation.x, situation.y, 0)),
+        standoffCost(world.standoffAt(situation.x, situation.y, untilMs)),
+      );
     }
-    const far = Math.min(tilesPerMs * untilMs, maxTravelTiles);
-    const near = far / 2;
+    const farTiles = Math.min(tilesPerMs * untilMs, maxTravelTiles);
+    const nearTiles = farTiles / 2;
+    // When the course is at each of those two places, so the monsters can be
+    // asked about the same moment rather than about now.
+    const farMs = untilMs;
+    const nearMs = untilMs / 2;
     return Math.max(
-      standoffCost(world.standoffAt(situation.x + dirX * near, situation.y + dirY * near)),
-      standoffCost(world.standoffAt(situation.x + dirX * far, situation.y + dirY * far)),
+      standoffCost(
+        world.standoffAt(situation.x + dirX * nearTiles, situation.y + dirY * nearTiles, nearMs),
+      ),
+      standoffCost(
+        world.standoffAt(situation.x + dirX * farTiles, situation.y + dirY * farTiles, farMs),
+      ),
     );
   }
 
@@ -903,30 +982,32 @@ export class DodgeController {
       // window left to walk through and nothing to shoot back with once hit.
       const best = this.#bestSurvival(scored);
       this.#verdict = 'unavoidable';
-      return this.#mostAligned(
-        scored,
-        -Infinity,
-        // Capped before the subtraction: "a hair worse than never" is still
-        // never, and a floor of `Infinity` would exclude every course including
-        // the one it was derived from.
-        Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - DOOMED_TRADE_MS,
-        (this.#clearance[best] ?? -Infinity) - DOOMED_TRADE_TILES,
-        situation,
-        false,
-      );
+      this.#bars.windowMs = -Infinity;
+      // Capped before the subtraction: "a hair worse than never" is still
+      // never, and a floor of `Infinity` would exclude every course including
+      // the one it was derived from.
+      this.#bars.impactMs =
+        Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - DOOMED_TRADE_MS;
+      this.#bars.roomTiles = (this.#clearance[best] ?? -Infinity) - DOOMED_TRADE_TILES;
+      // Nothing survives the window, so where a course leaves us has stopped
+      // being a question — including whether it leaves the bubble.
+      this.#bars.standoff = Infinity;
+      return this.#mostAligned(scored, situation, false);
     }
     if (urgent) {
       // Survival is achievable but close. Spend a little of the safe window on
       // their heading and no more — capped for the reason above.
       this.#verdict = 'evade';
-      return this.#mostAligned(
-        scored,
-        Math.max(reactWithinMs, Math.min(bestWindow, this.#survivalCapMs) - URGENT_TRADE_MS),
+      this.#bars.windowMs = Math.max(
         reactWithinMs,
-        -Infinity,
-        situation,
-        true,
+        Math.min(bestWindow, this.#survivalCapMs) - URGENT_TRADE_MS,
       );
+      this.#bars.impactMs = reactWithinMs;
+      this.#bars.roomTiles = -Infinity;
+      // Something lands in a moment. Being crowded is the lesser problem and
+      // insisting on the bubble here would throw away courses that survive.
+      this.#bars.standoff = Infinity;
+      return this.#mostAligned(scored, situation, true);
     }
     // There is time. Take the course closest to where they were going out of
     // everything that clears the window — the difference between a feature that
@@ -940,7 +1021,21 @@ export class DodgeController {
     // That is the planner watching a bullet arrive and deciding to leave the
     // wheel where it was.
     this.#verdict = 'guide';
-    return this.#mostAligned(scored, reactWithinMs, reactWithinMs, -Infinity, situation, true);
+    this.#bars.windowMs = reactWithinMs;
+    this.#bars.impactMs = reactWithinMs;
+    this.#bars.roomTiles = -Infinity;
+    // **And when something is inside the bubble, a course has to be getting out
+    // of it.** This is the branch a crowded player reaches, and every term that
+    // measures where a course leaves us sits below the one that prefers the
+    // heading they are pressing — so their own course won outright and the
+    // planner watched a monster walk onto them without a word. A bar rather
+    // than a reordering, because that is what the other three are: survival
+    // still comes first, and among the courses that survive *and* make room,
+    // theirs is still preferred.
+    this.#bars.standoff = this.#crowded
+      ? inQuanta(standoffCost(this.#hereStandoff), STANDOFF_QUANTUM_TILES)
+      : Infinity;
+    return this.#mostAligned(scored, situation, true);
   }
 
   /**
@@ -1147,25 +1242,23 @@ export class DodgeController {
    * preferring one of those to the other and the band is what keeps it off the
    * monster itself.
    *
-   * @param minWindowMs Trouble must be at least this far off. `-Infinity` when
-   *   nothing clears the window and the question becomes "which is least bad".
+   * What a course has to clear before it is considered at all is in
+   * {@link #bars}, which the caller fills. **They are bars and not terms on
+   * purpose**: the ordering below is what makes the feature feel like help
+   * rather than a hand on the shoulder, and the way to keep a hard requirement
+   * out of that argument is to settle it before the argument starts.
+   *
    * @param keepPosition Whether where a course leaves us is worth ranking above
    *   survival. False once nothing clears the window: with no gap to thread,
    *   backing off is the answer rather than the mistake, and the best place to
    *   fight from is any place still alive.
    */
-  #mostAligned(
-    scored: number,
-    minWindowMs: number,
-    minImpactMs: number,
-    minRoomTiles: number,
-    situation: DodgeSituation,
-    keepPosition: boolean,
-  ): number {
+  #mostAligned(scored: number, situation: DodgeSituation, keepPosition: boolean): number {
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
     const flowX = this.#field.flowX;
     const flowY = this.#field.flowY;
     const coherence = keepPosition ? this.#field.flowCoherence : 0;
+    const bars = this.#bars;
     let best = -1;
     let bestDot = -Infinity;
     let bestSafety = -Infinity;
@@ -1177,9 +1270,10 @@ export class DodgeController {
     let bestRoom = -Infinity;
 
     for (let c = 0; c < scored; c += 1) {
-      if ((this.#unsafeMs[c] ?? 0) <= minWindowMs) continue;
-      if ((this.#impactMs[c] ?? 0) < minImpactMs) continue;
-      if ((this.#clearance[c] ?? -Infinity) < minRoomTiles) continue;
+      if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
+      if ((this.#impactMs[c] ?? 0) < bars.impactMs) continue;
+      if ((this.#clearance[c] ?? -Infinity) < bars.roomTiles) continue;
+      if (this.#standoffOf(c) >= bars.standoff) continue;
       const dirX = this.#dirX[c] ?? 0;
       const dirY = this.#dirY[c] ?? 0;
       const standing = dirX === 0 && dirY === 0;

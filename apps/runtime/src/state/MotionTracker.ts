@@ -1,9 +1,13 @@
 /**
- * How fast the things being shot at are moving.
+ * How fast the things in the world are moving.
  *
  * The packet stream says where an entity *is*, once per server tick, and never
- * says where it is going. Leading a shot needs the second of those, so it is
- * derived here — from consecutive sightings of the same object id.
+ * says where it is going. Two features need the second of those and neither can
+ * get it anywhere else: auto-aim leads its shots with it, and the dodge tells a
+ * monster the player has walked up to from one that has walked up to the player
+ * — which is the difference between a knight standing where they meant to and a
+ * melee minion closing in. So it lives beside the world model rather than
+ * inside either of them.
  *
  * **Smoothed, because the input is a step function.** A server tick moves an
  * entity in one jump, and dividing that jump by the interval gives a velocity

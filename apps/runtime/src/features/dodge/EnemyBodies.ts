@@ -24,12 +24,28 @@
  * and a planner that refuses it stands in the volley instead. Here it only ever
  * raises the near edge of the band, which is a preference and never a veto.
  *
- * **Culled, because a realm holds hundreds and a plan can reach five tiles.**
- * The list is rebuilt per plan from the store's own cached array and holds only
- * what could matter, so the scoring loop never sees the room.
+ * **Culled twice, and the second cull is the one that makes the band mean
+ * anything.** A realm holds hundreds of enemies and a plan can reach five tiles,
+ * so distance drops most of them — but distance alone left the list full of
+ * things that are enemies only on paper. A wall in this game is an object with
+ * hit points and the enemy flag, and better than a quarter of what
+ * `objects.xml` marks as an enemy is a spawner, an emitter or a room controller
+ * that can neither be hurt nor hurt anybody. With those in, "how near is the
+ * nearest monster" was answered by the room: the near edge kept the player off
+ * the scenery, and the far edge was satisfied by a pillar while the boss stood
+ * out of range. The caller says which is which; see {@link EnemyBodies.collect}.
+ *
+ * **And they move.** The packet stream says where a monster is and never where
+ * it is going, so with the list frozen at the last sighting every course that
+ * walks away scored as making room — which is true of a boss standing still and
+ * false of the melee minion matching the player's speed, and the second is the
+ * whole reason the near edge exists. Each body carries the velocity the caller
+ * derived, and a place is judged at the moment the player would be standing in
+ * it.
  */
 
 import type { EntityView } from '@brownie/plugin-api';
+import type { Motion } from '../../state/MotionTracker.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /**
@@ -57,6 +73,23 @@ const CONTACT_TILES = ENEMY_CONTACT_HALF_TILES + PLAYER_HALF_TILES;
  */
 export const OUT_OF_RANGE_CAP_TILES = 2;
 
+/**
+ * How far ahead a body's own movement is believed, in milliseconds.
+ *
+ * **Believing it at all is what makes the near edge of the band mean
+ * anything.** With the monsters frozen where they were last seen, every course
+ * that walks away scores as making room — so a melee minion matching the
+ * player's speed was answered with "you are already dealing with it", every
+ * plan, until it was in contact. Predicting it says the plain thing instead:
+ * walking away from something that is following you does not open a gap, and
+ * walking across its path does.
+ *
+ * Bounded because a monster is free to turn, stop or die, and a velocity
+ * carried a whole second is a claim about a decision it has not made yet. Long
+ * enough to cover the half of the horizon the standoff is actually sampled at.
+ */
+export const MAX_BODY_LOOKAHEAD_MS = 600;
+
 /** The distances a place is judged against. See the file's note. */
 export interface StandoffBand {
   /** Never nearer to a monster than this. Raised to the contact distance. */
@@ -68,20 +101,52 @@ export interface StandoffBand {
 export class EnemyBodies {
   #x = new Float64Array(0);
   #y = new Float64Array(0);
+  /** Tiles per millisecond, or nought for a body nothing is known about. */
+  #vx = new Float64Array(0);
+  #vy = new Float64Array(0);
   #count = 0;
 
   get count(): number {
     return this.#count;
   }
 
-  /** Takes everything within `withinTiles` of a point, and forgets the rest. */
-  collect(enemies: Iterable<EntityView>, x: number, y: number, withinTiles: number): void {
+  /**
+   * Takes everything within `withinTiles` of a point, and forgets the rest.
+   *
+   * @param read What this one is doing, or `undefined` for something that is
+   *   not a body worth keeping away from at all.
+   *
+   *   **Not every `<Enemy/>` is a monster, and in a dungeon most of them are
+   *   not.** A wall in this game is an object with hit points and the enemy
+   *   flag, and better than a quarter of what `objects.xml` marks as an enemy is
+   *   a spawner, an emitter or a room controller that can never be hurt and
+   *   never hurts anybody. Counting those had the band measuring the scenery:
+   *   the setting that keeps a boss at arm's length was answered by a pillar,
+   *   and the one that keeps the player in weapon range was satisfied by a spawn
+   *   anchor across the room. Auto-aim already refuses the same two, for the
+   *   same reason and out of the same catalog.
+   *
+   *   The velocity is what the caller has managed to derive; nought in both
+   *   axes is the honest answer for something seen only once, and it degrades
+   *   this to what it did before — a snapshot.
+   */
+  collect(
+    enemies: Iterable<EntityView>,
+    x: number,
+    y: number,
+    withinTiles: number,
+    read: (enemy: EntityView) => Motion | undefined,
+  ): void {
     this.#count = 0;
     for (const enemy of enemies) {
       if (Math.abs(enemy.x - x) > withinTiles || Math.abs(enemy.y - y) > withinTiles) continue;
+      const motion = read(enemy);
+      if (motion === undefined) continue;
       if (this.#count >= this.#x.length) this.#grow();
       this.#x[this.#count] = enemy.x;
       this.#y[this.#count] = enemy.y;
+      this.#vx[this.#count] = motion.velocityX;
+      this.#vy[this.#count] = motion.velocityY;
       this.#count += 1;
     }
   }
@@ -107,14 +172,21 @@ export class EnemyBodies {
    * game's collision uses (see `hitbox.ts`): weapon range is a radius, and the
    * near edge is a bubble rather than a hitbox. Squared until the end, because
    * this is asked twice per candidate per plan.
+   *
+   * @param aheadMs How far into the future the place being asked about is. The
+   *   bodies are carried forward by their own movement over it, capped at
+   *   {@link MAX_BODY_LOOKAHEAD_MS} — so "how good a place is this" is answered
+   *   about the moment the player would arrive rather than about now, which is
+   *   the whole of what makes it true of something that is following them.
    */
-  standoffAt(x: number, y: number, band: StandoffBand): number {
+  standoffAt(x: number, y: number, band: StandoffBand, aheadMs = 0): number {
     if (this.#count === 0) return 0;
 
+    const ahead = Math.min(Math.max(aheadMs, 0), MAX_BODY_LOOKAHEAD_MS);
     let nearestSquared = Infinity;
     for (let i = 0; i < this.#count; i += 1) {
-      const dx = (this.#x[i] ?? 0) - x;
-      const dy = (this.#y[i] ?? 0) - y;
+      const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
+      const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
       const squared = dx * dx + dy * dy;
       if (squared < nearestSquared) nearestSquared = squared;
     }
@@ -132,9 +204,15 @@ export class EnemyBodies {
     const length = Math.max(16, this.#x.length * 2);
     const x = new Float64Array(length);
     const y = new Float64Array(length);
+    const vx = new Float64Array(length);
+    const vy = new Float64Array(length);
     x.set(this.#x);
     y.set(this.#y);
+    vx.set(this.#vx);
+    vy.set(this.#vy);
     this.#x = x;
     this.#y = y;
+    this.#vx = vx;
+    this.#vy = vy;
   }
 }

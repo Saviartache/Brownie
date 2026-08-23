@@ -36,6 +36,15 @@
  * `ENEMYSHOOT` plans immediately. The reference implementation reached the same
  * conclusion and called it the hazard-spawn callback.
  *
+ * **One question on the panel, and everything else under Advanced.** The planner
+ * genuinely turns on all twenty-odd of its numbers and every one of them has a
+ * reason, but a feature that asks twenty questions before it will switch on is a
+ * feature nobody switches on. A preset answers the one question a person
+ * actually has — how hard should it try — by writing the eleven numbers that
+ * trade caution against interference; the rest belong to the machine and the
+ * connection and are left alone. Moving one by hand is what turns the label into
+ * Custom, so it never claims a preset the numbers are not. See `dodgePresets`.
+ *
  * Walking is not the only way out of a hit, and the other one is not movement at
  * all: see {@link registerHitRedirect}, which answers for a shot that landed by
  * naming somebody else. It is off by default and it costs a bystander.
@@ -45,13 +54,22 @@ import {
   PluginCategory,
   definePlugin,
   type BlastView,
+  type EntityView,
   type Plugin,
   type Position,
   type SessionView,
   type WorldView,
 } from '@brownie/plugin-api';
 import { DodgeController, type DodgeSettings, type DodgeWorld } from './DodgeController.js';
+import {
+  DODGE_PRESETS,
+  DodgePresetId,
+  presetMatches,
+  type DodgePresetChoice,
+  type DodgeTuning,
+} from './dodgePresets.js';
 import { EnemyBodies, OUT_OF_RANGE_CAP_TILES } from './EnemyBodies.js';
+import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
 import { registerHitRedirect } from './hitRedirect.js';
 import { shotPaths, type ShotPath } from './ShotPaths.js';
 
@@ -138,6 +156,9 @@ function describe(ms: number): string {
 
 /** A session with the feature switched off, allocated once. */
 const NO_BLASTS: readonly BlastView[] = [];
+
+/** What a body nothing has been derived about is treated as doing. */
+const STILL: Motion = { velocityX: 0, velocityY: 0 };
 
 /**
  * The blasts still worth walking out of.
@@ -235,6 +256,25 @@ export interface DodgeInputs {
    * resolves a weapon once and remembers it.
    */
   readonly weaponRange: (weaponType: number) => number | undefined;
+  /**
+   * Whether one of these stands in the way rather than fighting.
+   *
+   * **A wall in this game is an object with hit points and the enemy flag**, so
+   * to anything ranking enemies by distance it is simply the closest one — and
+   * the spacing band, which is exactly such a ranking, spent a dungeon measuring
+   * the corridor instead of the monster in it. `OccupySquare` and `FullOccupy`
+   * in `objects.xml`, which is not on the plugin surface; the same lookup
+   * auto-aim is handed, for the same reason.
+   */
+  readonly isObstacle: (objectType: number) => boolean;
+  /**
+   * Whether one of these can never be hurt, and never hurts anybody.
+   *
+   * Spawners, emitters and room controllers answer to `<Enemy/>` and carry
+   * health, and a quarter of the catalog's enemies are one. Again as auto-aim
+   * has it, and again nothing on the wire tells them apart.
+   */
+  readonly isInvincible: (objectType: number) => boolean;
 }
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
@@ -247,6 +287,32 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
     },
 
     setup(context) {
+      // **The only control most people should ever touch.** Everything below it
+      // is real and every one of the numbers earns its place, but a feature that
+      // asks twenty questions before it will switch on is a feature nobody
+      // switches on. This answers the only question a person actually has, and
+      // the rest is filed under Advanced for whoever wants it.
+      //
+      // Registered first because that is the order the overlay draws in.
+      const preset = context.settings.select<DodgePresetChoice>('preset', {
+        group: 'Preset',
+        label: 'How hard it tries',
+        default: DodgePresetId.Balanced,
+        options: [
+          [DodgePresetId.Relaxed, 'Relaxed — steps in late, leaves your walking alone'],
+          [DodgePresetId.Balanced, 'Balanced — what it was tuned at'],
+          [DodgePresetId.Cautious, 'Cautious — wide margins, takes the wheel sooner'],
+          ['custom', 'Custom (your own numbers)'],
+        ],
+      });
+
+      // ── What the preset writes ────────────────────────────────────────────
+      //
+      // The eleven below are a preset's whole assignment: how soon and how near
+      // trouble has to be, how much margin to leave around it, and how hard to
+      // think about the answer. Moving any of them by hand is what turns the
+      // label above into Custom — see `applyPreset` and `onTuningChanged`.
+
       // **Long enough that running away stops looking clever.** A shot travels
       // faster than a character, so fleeing along its own line always survives a
       // *short* window — and a planner whose window is short therefore prefers
@@ -258,6 +324,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const horizonMs = context.settings.range('horizonMs', {
         label: 'Look ahead (ms)',
         group: 'Reaction',
+        advanced: true,
         default: 1000,
         min: 300,
         max: 2000,
@@ -272,6 +339,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const reactWithinMs = context.settings.range('reactWithinMs', {
         label: 'Only act on trouble within (ms)',
         group: 'Reaction',
+        advanced: true,
         default: 420,
         min: 100,
         max: 1200,
@@ -287,6 +355,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const reactWithinTiles = context.settings.range('reactWithinTiles', {
         label: 'Only act on shots within (tiles)',
         group: 'Reaction',
+        advanced: true,
         default: 6,
         min: 2,
         max: 16,
@@ -300,6 +369,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const sampleStepMs = context.settings.range('stepMs', {
         label: 'Prediction sample (ms)',
         group: 'Reaction',
+        advanced: true,
         default: 60,
         min: 20,
         max: 120,
@@ -311,22 +381,16 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const headings = context.settings.range('headings', {
         label: 'Directions considered',
         group: 'Reaction',
+        advanced: true,
         default: 16,
         min: 8,
         max: 48,
         step: 4,
       });
-      const leadMs = context.settings.range('leadMs', {
-        label: 'Command lead (ms)',
-        group: 'Reaction',
-        default: 60,
-        min: 0,
-        max: 200,
-        step: 10,
-      });
       const urgentWithinMs = context.settings.range('urgentWithinMs', {
         label: 'Trouble is urgent within (ms)',
         group: 'Reaction',
+        advanced: true,
         default: 160,
         min: 50,
         max: 500,
@@ -336,6 +400,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const hitScale = context.settings.range('hitScale', {
         label: 'Caution (hit size)',
         group: 'Safety',
+        advanced: true,
         default: 1,
         min: 0.5,
         max: 2,
@@ -344,6 +409,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const padTiles = context.settings.range('latencyPadTiles', {
         label: 'Extra margin (tiles)',
         group: 'Safety',
+        advanced: true,
         default: 0.1,
         min: 0,
         max: 1,
@@ -355,6 +421,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const driftTilesPerSecond = context.settings.range('driftTilesPerSecond', {
         label: 'Distrust far predictions (tiles/s)',
         group: 'Safety',
+        advanced: true,
         default: 0.2,
         min: 0,
         max: 1,
@@ -363,14 +430,34 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const safeClearanceTiles = context.settings.range('safeClearanceTiles', {
         label: 'Room that counts as safe (tiles)',
         group: 'Safety',
+        advanced: true,
         default: 0.08,
         min: 0,
         max: 0.5,
         step: 0.01,
       });
+
+      // ── What is yours whatever the preset says ────────────────────────────
+      //
+      // Latency, the character's own speed, how far off a wall to plan, and
+      // every switch below: properties of a machine, a connection or a
+      // preference rather than of how cautious the planner should be. A preset
+      // that rewrote these would undo somebody's setup every time they tried
+      // another one.
+
+      const leadMs = context.settings.range('leadMs', {
+        label: 'Command lead (ms)',
+        group: 'Reaction',
+        advanced: true,
+        default: 60,
+        min: 0,
+        max: 200,
+        step: 10,
+      });
       const avoidWalls = context.settings.boolean('avoidWalls', {
         label: 'Know where the walls are',
         group: 'Safety',
+        advanced: true,
         default: true,
       });
       // **Room to spare, not room to fit.** A position where the body exactly
@@ -382,6 +469,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const wallClearanceTiles = context.settings.range('wallClearanceTiles', {
         label: 'Keep clear of walls by (tiles)',
         group: 'Safety',
+        advanced: true,
         default: 0.25,
         min: 0,
         max: 1.5,
@@ -390,6 +478,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const avoidDamagingGround = context.settings.boolean('avoidDamagingGround', {
         label: 'Refuse to walk onto damaging ground',
         group: 'Safety',
+        advanced: true,
         default: true,
       });
       // **Thrown bombs, novas and telegraphed circles.** A different shape of
@@ -402,6 +491,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const avoidBlasts = context.settings.boolean('avoidBlasts', {
         label: 'Dodge thrown bombs and area effects',
         group: 'Safety',
+        advanced: true,
         default: true,
       });
       // **The master switch for the planner knowing where the monsters are.**
@@ -411,6 +501,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const mindMonsters = context.settings.boolean('avoidEnemyBodies', {
         label: 'Mind where the monsters are',
         group: 'Spacing',
+        advanced: true,
         default: true,
       });
       // **Room to dodge in, and the reason it is a distance rather than a hit
@@ -418,9 +509,12 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // every escape needs, so by the time contact damage says so there is
       // nowhere left to go. Raised on its own to the distance at which the
       // bodies touch, so nought here still means "not inside it".
+      // Owned by the preset, unlike the rest of this group: how much room to
+      // insist on is exactly the trade the preset is about.
       const keepAway = context.settings.range('keepAwayTiles', {
         label: 'Keep monsters at least (tiles)',
         group: 'Spacing',
+        advanced: true,
         default: 2,
         min: 0,
         max: 6,
@@ -434,6 +528,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const stayInRange = context.settings.boolean('stayInRange', {
         label: "Stay within your weapon's range",
         group: 'Spacing',
+        advanced: true,
         default: true,
       });
       // Nine tenths of it, which is the reference implementation's figure and
@@ -442,6 +537,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const rangePercent = context.settings.range('rangePercent', {
         label: 'Keep within (% of weapon range)',
         group: 'Spacing',
+        advanced: true,
         default: 90,
         min: 50,
         max: 100,
@@ -452,6 +548,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const fallbackRangeTiles = context.settings.range('fallbackRangeTiles', {
         label: 'Assume a range of (tiles)',
         group: 'Spacing',
+        advanced: true,
         default: 5,
         min: MIN_RANGE_TILES,
         max: MAX_RANGE_TILES,
@@ -461,16 +558,19 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const respectIntent = context.settings.boolean('respectIntent', {
         label: 'Leave your own walking alone while it is safe',
         group: 'Control',
+        advanced: true,
         default: true,
       });
       const interceptControl = context.settings.boolean('interceptControl', {
         label: 'Cancel your input while it has the wheel',
         group: 'Control',
+        advanced: true,
         default: true,
       });
       const speedPercent = context.settings.range('speedPercent', {
         label: 'Walk at (% of full speed)',
         group: 'Control',
+        advanced: true,
         default: 92,
         min: 50,
         max: 100,
@@ -482,6 +582,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const holdMs = context.settings.range('holdMs', {
         label: 'Keep walking for (ms)',
         group: 'Control',
+        advanced: true,
         default: 120,
         min: 50,
         max: 500,
@@ -490,6 +591,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const cursorWalkOn = context.settings.boolean('cursorWalk', {
         label: 'Ctrl+middle-click walks to your cursor',
         group: 'Control',
+        advanced: true,
         default: true,
       });
 
@@ -497,8 +599,118 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // packet, and nothing the planner below reads. See `hitRedirect`.
       registerHitRedirect(context);
 
+      // ── Presets ───────────────────────────────────────────────────────────
+
+      /** The eleven the preset owns, as they stand right now. */
+      const readTuning = (): DodgeTuning => ({
+        horizonMs: horizonMs.get(),
+        reactWithinMs: reactWithinMs.get(),
+        reactWithinTiles: reactWithinTiles.get(),
+        sampleStepMs: sampleStepMs.get(),
+        headings: headings.get(),
+        urgentWithinMs: urgentWithinMs.get(),
+        hitScale: hitScale.get(),
+        padTiles: padTiles.get(),
+        driftTilesPerSecond: driftTilesPerSecond.get(),
+        safeClearanceTiles: safeClearanceTiles.get(),
+        keepAwayTiles: keepAway.get(),
+      });
+
+      /**
+       * Whether a write is the preset's own.
+       *
+       * Each `set` below notifies, and every notification runs the check that
+       * asks "does this still match the preset" — which, half-way through
+       * applying one, it does not. Without this the first slider written would
+       * flip the label to Custom and the remaining ten would be applied to a
+       * preset nobody had chosen.
+       */
+      let applyingPreset = false;
+
+      const applyPreset = (choice: DodgePresetChoice): void => {
+        if (choice === 'custom') return; // their own numbers — nothing to apply
+        const values = DODGE_PRESETS[choice];
+        applyingPreset = true;
+        try {
+          horizonMs.set(values.horizonMs);
+          reactWithinMs.set(values.reactWithinMs);
+          reactWithinTiles.set(values.reactWithinTiles);
+          sampleStepMs.set(values.sampleStepMs);
+          headings.set(values.headings);
+          urgentWithinMs.set(values.urgentWithinMs);
+          hitScale.set(values.hitScale);
+          padTiles.set(values.padTiles);
+          driftTilesPerSecond.set(values.driftTilesPerSecond);
+          safeClearanceTiles.set(values.safeClearanceTiles);
+          keepAway.set(values.keepAwayTiles);
+        } finally {
+          applyingPreset = false;
+        }
+        context.log.info(`dodge preset "${choice}" applied`);
+      };
+
+      /** Every setting the preset owns runs this. */
+      const onTuningChanged = (): void => {
+        if (applyingPreset) return;
+        const current = preset.get();
+        // The numbers no longer are the ones the preset names, so stop claiming
+        // they are rather than showing a label that lies.
+        if (current !== 'custom' && !presetMatches(readTuning(), DODGE_PRESETS[current])) {
+          preset.set('custom');
+        }
+      };
+
+      context.onDispose(preset.onChange(applyPreset));
+      for (const handle of [
+        horizonMs,
+        reactWithinMs,
+        reactWithinTiles,
+        sampleStepMs,
+        headings,
+        urgentWithinMs,
+        hitScale,
+        padTiles,
+        driftTilesPerSecond,
+        safeClearanceTiles,
+        keepAway,
+      ]) {
+        context.onDispose(handle.onChange(onTuningChanged));
+      }
+      // A build that adds a number to a preset, or changes one, would otherwise
+      // leave a persisted mix labelled with a preset it no longer matches.
+      onTuningChanged();
+
       const controller = new DodgeController();
       const bodies = new EnemyBodies();
+      /**
+       * How fast the monsters near the player are moving.
+       *
+       * **What tells a monster the player walked up to from one that walked up
+       * to the player**, and the two want opposite answers: the first is where
+       * they meant to be, the second is the thing the near edge of the band
+       * exists to keep off them. Nothing on the wire says it, so it is derived
+       * from consecutive sightings — the same tracker, and the same reason, as
+       * auto-aim's lead.
+       */
+      const motion = new MotionTracker();
+      /** Wall time of the plan being made, for the tracker's own clock. */
+      let sightedAtMs = 0;
+      /**
+       * What one enemy is doing, or nothing when it is not a body to avoid.
+       *
+       * Held once rather than built per plan: it closes over nothing that
+       * changes, and the collection loop asks it of every enemy in reach.
+       */
+      const bodyMotion = (enemy: EntityView): Motion | undefined => {
+        if (inputs.isObstacle(enemy.objectType) || inputs.isInvincible(enemy.objectType)) {
+          return undefined;
+        }
+        motion.observe(enemy.objectId, enemy.x, enemy.y, sightedAtMs);
+        // Seen only once, which every monster is on the plan it comes into
+        // reach. A body that is not known to be moving is treated as still,
+        // which is what this did for all of them before it could tell.
+        return motion.motionAt(enemy.objectId, sightedAtMs) ?? STILL;
+      };
 
       // The map, as the controller sees it. Built once and pointed at the
       // current session, so a plan does not allocate an adapter and three
@@ -518,7 +730,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const world: DodgeWorld = {
         canStand: (x, y) => mapView?.canStandAt(x, y, clearance) ?? false,
         isDamaging: (x, y) => damagingMatters && (mapView?.tileAt(x, y)?.damaging ?? false),
-        standoffAt: (x, y) => bodies.standoffAt(x, y, band),
+        standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
       };
 
       let lastPlanAtMs = 0;
@@ -542,13 +754,17 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       context.onDispose(() => {
         controller.reset();
         bodies.clear();
+        motion.clear();
         mapView = undefined;
         commanding = false;
       });
       // A new connection is a new character in a new place; what the last one
-      // had committed to says nothing about this one.
+      // had committed to says nothing about this one — and an object id from
+      // the last map names something else in this one, so a track kept across
+      // the join is a velocity attributed to a stranger.
       context.sessions.onConnected(() => {
         controller.reset();
+        motion.clear();
       });
 
       /**
@@ -700,7 +916,15 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             (speed * (settings.leadMs + settings.horizonMs)) / 1000,
             band.stayWithinTiles === Infinity ? 0 : band.stayWithinTiles + OUT_OF_RANGE_CAP_TILES,
           );
-          bodies.collect(map.enemies(), self.x, self.y, searchTiles + ENEMY_SEARCH_MARGIN_TILES);
+          sightedAtMs = Date.now();
+          motion.prune(sightedAtMs);
+          bodies.collect(
+            map.enemies(),
+            self.x,
+            self.y,
+            searchTiles + ENEMY_SEARCH_MARGIN_TILES,
+            bodyMotion,
+          );
         } else {
           bodies.clear();
         }
