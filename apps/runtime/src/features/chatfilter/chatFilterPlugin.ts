@@ -115,7 +115,6 @@ export function createChatFilterPlugin(): Plugin {
         hiddenTotal++;
         hidden.set(reason, (hidden.get(reason) ?? 0) + 1);
         last = { sender, reason };
-        context.log.debug(`hid a message from ${sender} (${reason})`);
       };
 
       context.packets.on('TEXT', (packet, session) => {
