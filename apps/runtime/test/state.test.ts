@@ -808,6 +808,49 @@ describe('blasts on their way down', () => {
     });
   }
 
+  /**
+   * The shape the wire actually carries most of the time.
+   *
+   * A live session recorded 19 016 of these and 17 878 of them ended right
+   * where `targetPosition` would have begun — so the second position, the
+   * colour and the duration are not always sent, and reading them as though
+   * they were failed the *whole* decode. Nothing downstream can tell a packet
+   * that failed to decode from a packet that never came.
+   */
+  function shortEffect(effectType: number, at: { x: number; y: number }): MutablePacket {
+    return packetOf('SHOWEFFECT', {
+      effectType,
+      targetObjectId: BOMBER_ID,
+      position: at,
+    });
+  }
+
+  it('reads a telegraph that carries only its own position', () => {
+    const { world, feed } = thrown();
+    feed(shortEffect(NOVA_EFFECT, { x: 7, y: 7 }));
+
+    const blasts = [...world.blasts()];
+    expect(blasts).toHaveLength(1);
+    expect(blasts[0]?.x).toBeCloseTo(7, 5);
+    // No duration on the wire, so the flat default stands rather than nothing.
+    // Compared loosely for the same reason as the throw above: the world's
+    // clock is wall time, and it moves between the feed and the assertion.
+    expect((blasts[0]?.armsAtMs ?? 0) - world.gameTimeMs).toBeGreaterThan(
+      DEFAULT_TELEGRAPH_MS - 100,
+    );
+  });
+
+  // **A throw is the one kind that goes off somewhere else**, so without the
+  // second position there is nothing to place. Falling back to the first would
+  // pencil a bomb in on top of the monster that threw it and have the planner
+  // refuse the ground under it — worse than missing the telegraph.
+  it('refuses to place a throw that never said where it lands', () => {
+    const { world, feed } = thrown();
+    feed(shortEffect(THROW_EFFECT, { x: 3, y: 3 }));
+
+    expect(world.blastStore.size).toBe(0);
+  });
+
   it('records a thrown bomb where it will land, not where it was thrown', () => {
     const { world, feed } = harness();
     world.markConnected();

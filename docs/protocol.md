@@ -216,10 +216,29 @@ The field list came from the client's own metadata, not from guesswork:
   the extractor also publishes has the class's field-name strings in declaration
   order, and the name between pos2 and duration is the colour.
 
-Six fields, and as wire types they come to **29 bytes**. A live census recorded
-**30** as the largest undescribed body over 113,698 sightings, so one byte is
-still unaccounted for. That is not a problem: bytes past the last field are kept
-as `trailing` and re-emitted verbatim, exactly as the table above promises.
+Six fields, and as wire types they come to **29 bytes** — but the game does not
+always send all six, and reading it as though it did is how the telegraph came
+to be decoded for six per cent of the packets that carry it.
+
+**The three after `position` are optional, and our own capture is what says so.**
+A live session recorded 19 016 `SHOWEFFECT`s from the server and **17 878 of them
+failed to decode**, every one with the same reason: `need 4 byte(s), have 0
+(@18)`. The reader window starts at `HEADER_BYTES`, so that is body offset 13 —
+which is exactly where `targetPosition` begins, `1 + 4 + 8`. The body ends
+there. So the shape the wire actually carries is `effectType`, `targetObjectId`
+and one position, with the second position, the colour and the duration present
+only sometimes; they are declared `optional` and the schema loader's rule that
+optionals must be trailing is what makes that decodable.
+
+A failed decode is not a dropped packet — the bytes forward untouched — but it
+leaves every field unreadable, so the whole area-effect feature was quietly
+starved rather than wrong. The counters below are what it should have been read
+off, and were not.
+
+Bodies longer than 29 bytes have also been seen, up to 57. Those bytes are kept
+as `trailing` and re-emitted verbatim, exactly as the table above promises, and
+what they mean is not yet known — see item 2 of `docs/migration/newfeatures.md`,
+which is the same question as which effect types are telegraphs at all.
 
 **The decode checks itself against the game.** Where a telegraph says a bomb will
 land is a claim; the `AOE` that follows is the answer sheet. `BlastStore` counts

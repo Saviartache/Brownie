@@ -350,9 +350,15 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
 
         // A throw lands where it is aimed; everything else goes off where it
         // was announced. The reference implementation drew the same line.
+        //
+        // **Only the first position is always on the wire**, and a throw with
+        // no stated landing spot is not one this can place: falling back to
+        // where it was *thrown from* would pencil a bomb in on top of the
+        // monster that threw it and have the planner refuse the ground under
+        // it. Better to miss the telegraph than to invent one.
         const source = pointOf(packet.get('position'));
         const target = pointOf(packet.get('targetPosition'));
-        const at = effectType === THROW_EFFECT ? (target ?? source) : source;
+        const at = effectType === THROW_EFFECT ? target : source;
         if (at === undefined) return;
 
         // The field is a float and the game is inconsistent about its unit, so

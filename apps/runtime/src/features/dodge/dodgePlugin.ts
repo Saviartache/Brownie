@@ -70,6 +70,7 @@ import {
 } from './dodgePresets.js';
 import { EnemyBodies, OUT_OF_RANGE_CAP_TILES } from './EnemyBodies.js';
 import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
+import { isBlastEffect } from '../../state/blasts/BlastStore.js';
 import { registerHitRedirect } from './hitRedirect.js';
 import { shotPaths, type ShotPath } from './ShotPaths.js';
 
@@ -1073,6 +1074,37 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // plan reads is a function of time, which the interval already covers.
       context.packets.on('ENEMYSHOOT', (_packet, session) => {
         planNow(session);
+      });
+
+      /**
+       * Effect types this session has already said a word about.
+       *
+       * **The one question this feature cannot answer from inside itself.**
+       * Which `SHOWEFFECT` types are a bomb on its way down and which are a
+       * flash was taken from somebody else's reading of somebody else's
+       * capture, and a type we reject is indistinguishable from a type that
+       * never occurs — both are silence. One line per type, the first time it
+       * is seen, turns a session's log into the answer: a type that appears
+       * while thrown attacks are coming in and is not on the list is the next
+       * thing to look at. See item 2 of `docs/migration/newfeatures.md`.
+       *
+       * Bounded by the number of effect types the game has, and every entry
+       * costs one line once.
+       */
+      const seenEffects = new Set<number>();
+
+      context.packets.on('SHOWEFFECT', (packet) => {
+        if (packet.opaque) return;
+        const effectType = packet.number('effectType');
+        if (effectType === undefined || seenEffects.has(effectType)) return;
+        seenEffects.add(effectType);
+        // Whether the body carried a landing spot as well as a source is half
+        // of what tells a telegraph from decoration, and it is the half the
+        // decode was getting wrong.
+        const aimed = packet.get('targetPosition') !== undefined;
+        const verdict = isBlastEffect(effectType) ? 'dodged' : 'ignored';
+        const body = aimed ? 'carries a landing spot' : 'position only';
+        context.log.info(`showeffect type ${String(effectType)}: ${verdict}, ${body}`);
       });
     },
   });
