@@ -3,7 +3,7 @@ import type { Plugin, SessionView } from '@brownie/plugin-api';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import type { PacketRegistry } from '@brownie/protocol';
 import { checkStaleness, findGameInstall, readManifest } from '@brownie/gamedata-tool';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { RuntimeConfig } from './core/config/Config.js';
 import { createAntiDebuffPlugin } from './features/antidebuff/antiDebuffPlugin.js';
@@ -43,6 +43,7 @@ import { PluginStage } from './pipeline/stages/PluginStage.js';
 import { PluginHost } from './plugins/PluginHost.js';
 import { PluginLoader } from './plugins/PluginLoader.js';
 import { PreferencesFile } from './plugins/PreferencesFile.js';
+import { BlastRadiusTable } from './state/blasts/BlastRadiusTable.js';
 import { AllowlistTargets } from './proxy/AllowlistTargets.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './state/ObjectCatalog.js';
 import { EMPTY_TILE_CATALOG, type TileCatalog } from './state/TileMap.js';
@@ -81,6 +82,14 @@ export interface ApplicationOptions {
    * any behind.
    */
   readonly preferencesPath?: string;
+  /**
+   * Where what blasts have been measured at is cached between runs.
+   *
+   * A cache and not configuration: it is filled from detonations this runtime
+   * watched, and losing it costs one telegraph planned at the default radius.
+   * Omitted means the table lives and dies with the run.
+   */
+  readonly blastRadiiPath?: string;
 }
 
 /**
@@ -107,6 +116,17 @@ export class Application {
   readonly #censusPath: string | undefined;
   /** Where a class-name dump goes, or `undefined` to refuse to write one. */
   readonly #dumpPath: string | undefined;
+  /**
+   * What blasts have been measured at, for every session this run.
+   *
+   * Held here rather than per session for the same reason as the catalogs: how
+   * wide an enemy's bomb is describes the game, not the connection, and a
+   * character that walks into a new realm should not have to be bombed again to
+   * find out. See `state/blasts/BlastRadiusTable.ts`.
+   */
+  readonly #blastRadii = new BlastRadiusTable();
+  /** Where that table is cached, or `undefined` to keep it to this run. */
+  readonly #blastRadiiPath: string | undefined;
   readonly #secret: Buffer;
   /** Set only when this run minted the key, so only it removes the file. */
   readonly #publishedKeyPath: string | undefined;
@@ -174,6 +194,7 @@ export class Application {
     });
     this.#censusPath = options.censusPath;
     this.#dumpPath = options.classDumpPath;
+    this.#blastRadiiPath = options.blastRadiiPath;
     if (this.#census.sampling) {
       // Said out loud, every run: the file then contains bytes from a real
       // session, and somebody who forgot they turned this on should not learn
@@ -307,6 +328,9 @@ export class Application {
           isBlocking: (type) => this.#tiles.isBlocking(type),
           isPushing: (type) => this.#tiles.isPushing(type),
         },
+        // One table across every session, so a bomb measured in one realm is
+        // dodged at its real size in the next.
+        blastRadii: this.#blastRadii,
       },
       buildStages: (session: SessionView, world: WorldState) => [
         // The census is first, so a packet a later stage drops is still
@@ -403,6 +427,7 @@ export class Application {
     this.#log.info(`protocol: ${String(this.#registry.packetCount)} packet definitions`);
 
     await this.#loadGameData();
+    await this.#readBlastRadii();
 
     // Before a single plugin is loaded, and deliberately: a plugin reads its
     // persisted values while it is *declaring* them, so the file has to be in
@@ -732,6 +757,60 @@ export class Application {
    * afterwards and not a live feed. Nothing is written when no traffic passed:
    * an empty capture that looks like a result is worse than no file.
    */
+  /**
+   * Reads what previous runs measured blasts at.
+   *
+   * **Every failure is one line and no more.** A missing file is the first run,
+   * an unreadable one is a file somebody edited, and a stale one is a game
+   * patch — and all three mean the same thing to the planner: telegraphs get
+   * the default radius until it has watched a few land. Refusing to start over
+   * a cache this process wrote itself would be absurd.
+   */
+  async #readBlastRadii(): Promise<void> {
+    const path = this.#blastRadiiPath;
+    if (path === undefined) return;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    } catch (cause) {
+      // A missing file is the first run, and the normal case.
+      const missing =
+        typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ENOENT';
+      if (!missing) {
+        this.#log.warn(
+          `could not read ${path}: ${cause instanceof Error ? cause.message : 'unknown'}`,
+        );
+      }
+      return;
+    }
+
+    const restored = this.#blastRadii.restore(parsed);
+    this.#log.info(`blast radii: ${String(restored)} measured`);
+  }
+
+  /**
+   * Writes it back, if anything was measured.
+   *
+   * On shutdown rather than continuously, like the census and for the same
+   * reason: it is a summary of the whole run, and a file per detonation is a
+   * syscall in the middle of a boss fight.
+   */
+  async #writeBlastRadii(): Promise<void> {
+    const path = this.#blastRadiiPath;
+    if (path === undefined || this.#blastRadii.size === 0) return;
+
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      const document = JSON.stringify(this.#blastRadii.serialise(), undefined, 2);
+      await writeFile(path, `${document}\n`, 'utf8');
+    } catch (cause) {
+      this.#log.warn(
+        `could not write the measured blast radii: ${cause instanceof Error ? cause.message : 'unknown'}`,
+      );
+    }
+  }
+
   async #writeCensus(): Promise<void> {
     const path = this.#censusPath;
     if (path === undefined || this.#census.totalPackets === 0) return;
@@ -757,6 +836,9 @@ export class Application {
     // whole session's evidence held only in memory, and a teardown step that
     // hangs or throws ahead of it takes the session with it.
     await this.#writeCensus();
+    // Beside it, and for the same reason: what this run learned about the game
+    // is only in memory until it is written.
+    await this.#writeBlastRadii();
 
     await this.#proxy.close();
     this.#loader.stop();

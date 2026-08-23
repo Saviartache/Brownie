@@ -1,5 +1,5 @@
 import type { MutablePacket } from '@brownie/plugin-api';
-import { isBlastEffect, THROW_EFFECT } from '../../state/blasts/BlastStore.js';
+import { isBlastEffect, THROW_EFFECT, UNKNOWN_ORIGIN_TYPE } from '../../state/blasts/BlastStore.js';
 import type { WorldState } from '../../state/WorldState.js';
 import { readStats } from '../../state/stats.js';
 import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketPipeline.js';
@@ -335,6 +335,19 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         const effectType = packet.number('effectType');
         if (effectType === undefined || !isBlastEffect(effectType)) return;
 
+        // **Whose effect this is decides whether it is a threat at all.** A
+        // teammate's thrown ability and a monster's bomb are the same packet
+        // with the same effect type, and the planner walked out of both — which
+        // is a dodge that runs away from its own party. The object the effect
+        // hangs on is the thrower, and the catalog is what says what it is.
+        const thrower = world.entityStore.get(packet.number('targetObjectId') ?? -1);
+        if (
+          thrower !== undefined &&
+          (thrower.isPlayer || world.objects.isPet(thrower.objectType))
+        ) {
+          return;
+        }
+
         // A throw lands where it is aimed; everything else goes off where it
         // was announced. The reference implementation drew the same line.
         const source = pointOf(packet.get('position'));
@@ -347,19 +360,37 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         // numbers are seconds, large ones are already milliseconds.
         const duration = packet.number('duration') ?? 0;
         const armsInMs = duration > 0 && duration <= 120 ? duration * 1000 : duration;
-        world.blastStore.announce(world.gameTimeMs, at.x, at.y, armsInMs);
+        world.blastStore.announce(world.gameTimeMs, {
+          x: at.x,
+          y: at.y,
+          armsInMs,
+          // What the measured radius is remembered against: the enemy, and the
+          // colour of the ability it used. See `BlastRadiusTable`.
+          originType: thrower?.objectType ?? UNKNOWN_ORIGIN_TYPE,
+          color: packet.number('color') ?? 0,
+        });
       },
     ],
     [
       // The detonation itself, which is far too late to walk out of — the
       // client answers it with an `AOEACK` saying where the player was. Kept
-      // because it is the only thing that can confirm a telegraph was read
-      // correctly, and because it carries the radius the telegraph never does.
+      // because it confirms a telegraph was read correctly, and because it
+      // carries the one thing the telegraph never does: how wide the blast
+      // actually was, which is what the next one from the same enemy is planned
+      // around.
       'AOE',
       (packet, world) => {
         const at = pointOf(packet.get('position'));
         if (at === undefined) return;
-        world.blastStore.landed(world.gameTimeMs, at.x, at.y, packet.number('radius') ?? 0);
+        world.blastStore.landed(world.gameTimeMs, {
+          x: at.x,
+          y: at.y,
+          radiusTiles: packet.number('radius') ?? 0,
+          // Damage, or a condition to be under. An area effect that does
+          // neither is a heal or a buff landing on the party, and treating one
+          // as a detonation cancels whatever real prediction it lands near.
+          harmful: (packet.number('damage') ?? 0) > 0 || (packet.number('effect') ?? 0) > 0,
+        });
       },
     ],
   ]);

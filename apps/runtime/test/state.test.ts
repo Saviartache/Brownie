@@ -15,10 +15,18 @@ import type { ProjectileDefinition } from '../src/gamedata/projectiles.js';
 import type { ObjectCatalog } from '../src/state/ObjectCatalog.js';
 import {
   BlastStore,
+  DEFAULT_BLAST_RADIUS_TILES,
   DEFAULT_TELEGRAPH_MS,
   NOVA_EFFECT,
   THROW_EFFECT,
+  UNKNOWN_ORIGIN_TYPE,
+  type BlastTelegraph,
 } from '../src/state/blasts/BlastStore.js';
+import {
+  BlastRadiusTable,
+  MAX_BLAST_FLIGHT_MS,
+  MAX_BLAST_RADIUS_TILES,
+} from '../src/state/blasts/BlastRadiusTable.js';
 import { StatType } from '../src/constants/StatType.js';
 import type { TileCatalog } from '../src/state/TileMap.js';
 import { WorldState } from '../src/state/WorldState.js';
@@ -725,19 +733,78 @@ describe("the game client's own clock", () => {
 // has landed and the client is already answering with where the player was; what
 // can be walked out of is the telegraph the game sends first.
 describe('blasts on their way down', () => {
+  /** The object type of the thing that throws them, and of the ally that does not. */
+  const BOMBER = 1000;
+  const ALLY = 782;
+  const BOMBER_ID = 42;
+  const ALLY_ID = 43;
+
+  /** A catalog that can tell the two apart, which the wire cannot. */
+  const CATALOG: ObjectCatalog = {
+    isPlayer: (type) => type === ALLY,
+    isEnemy: (type) => type === BOMBER,
+    isPet: () => false,
+    isInvincible: () => false,
+    occupies: () => false,
+    displayName: () => undefined,
+    projectile: () => undefined,
+    item: () => undefined,
+    container: () => undefined,
+    statMaxima: () => undefined,
+  };
+
+  /** A world with one monster and one teammate standing in it. */
+  function thrown(): ReturnType<typeof harness> {
+    const built = harness(CATALOG);
+    built.world.markConnected();
+    built.feed(
+      packetOf('UPDATE', {
+        position: { x: 0, y: 0 },
+        levelType: 0,
+        tiles: [],
+        newObjs: [
+          { objectType: BOMBER, status: status(BOMBER_ID, 3, 3) },
+          { objectType: ALLY, status: status(ALLY_ID, 4, 4) },
+        ],
+        drops: [],
+      }),
+    );
+    return built;
+  }
+
   function showEffect(
     effectType: number,
     from: { x: number; y: number },
     to: { x: number; y: number },
     duration: number,
+    thrower = BOMBER_ID,
+    color = 0,
   ): MutablePacket {
     return packetOf('SHOWEFFECT', {
       effectType,
-      targetObjectId: 42,
+      targetObjectId: thrower,
       position: from,
       targetPosition: to,
-      color: 0,
+      color,
       duration,
+    });
+  }
+
+  /** A detonation. Harmful by default, because almost all of them are. */
+  function aoe(
+    at: { x: number; y: number },
+    radius: number,
+    overrides: { damage?: number; effect?: number } = {},
+  ): MutablePacket {
+    return packetOf('AOE', {
+      position: at,
+      radius,
+      damage: overrides.damage ?? 200,
+      effect: overrides.effect ?? 0,
+      effectDuration: 0,
+      originType: BOMBER,
+      color: 0,
+      armorPierce: false,
     });
   }
 
@@ -778,22 +845,28 @@ describe('blasts on their way down', () => {
 
   // The detonation is what proves the telegraph was read correctly, which is
   // the only check available on a packet body recovered from game metadata.
+  // **A teammate's thrown ability is the same packet with the same effect
+  // type.** Nothing on the wire tells it from a monster's bomb; what does is the
+  // object it hangs on, and a dodge that walks out of its own party's abilities
+  // is a dodge that cannot stand in one.
+  it('ignores a throw an ally made', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 4, y: 4 }, { x: 12, y: 9 }, 0.6, ALLY_ID));
+
+    expect(world.blastStore.size).toBe(0);
+  });
+
+  it('still avoids one from a monster standing next to them', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6, BOMBER_ID));
+
+    expect(world.blastStore.size).toBe(1);
+  });
+
   it('confirms a prediction the detonation lands on', () => {
-    const { world, feed } = harness();
-    world.markConnected();
+    const { world, feed } = thrown();
     feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
-    feed(
-      packetOf('AOE', {
-        position: { x: 12.2, y: 9.1 },
-        radius: 3,
-        damage: 200,
-        effect: 0,
-        effectDuration: 0,
-        originType: 0,
-        color: 0,
-        armorPierce: false,
-      }),
-    );
+    feed(aoe({ x: 12.2, y: 9.1 }, 3));
 
     expect(world.blastStore.confirmed).toBe(1);
     expect(world.blastStore.unmatched).toBe(0);
@@ -802,45 +875,169 @@ describe('blasts on their way down', () => {
   });
 
   it('counts a detonation nothing predicted', () => {
-    const { world, feed } = harness();
-    world.markConnected();
-    feed(
-      packetOf('AOE', {
-        position: { x: 40, y: 40 },
-        radius: 3,
-        damage: 200,
-        effect: 0,
-        effectDuration: 0,
-        originType: 0,
-        color: 0,
-        armorPierce: false,
-      }),
-    );
+    const { world, feed } = thrown();
+    feed(aoe({ x: 40, y: 40 }, 3));
 
     expect(world.blastStore.confirmed).toBe(0);
     expect(world.blastStore.unmatched).toBe(1);
   });
 
+  // A teammate's heal is an area effect in every respect the wire cares about,
+  // and it lands where teammates are. Counted as a detonation it would confirm
+  // — and so cancel — whatever real bomb happened to be coming down nearby.
+  it('is not fooled by an area effect that cannot hurt anybody', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
+    feed(aoe({ x: 12.1, y: 9 }, 3, { damage: 0, effect: 0 }));
+
+    expect(world.blastStore.confirmed).toBe(0);
+    expect(world.blastStore.unmatched).toBe(0);
+    expect([...world.blasts()][0]?.confirmed).toBe(false);
+  });
+
+  // **The measurement that makes the second bomb dodgeable at its real size.**
+  // The telegraph never says how wide; the detonation does, and the ability is
+  // the same one the next time this enemy uses it.
+  it('plans the next blast from the same enemy at its measured size', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
+    expect([...world.blasts()][0]?.radiusTiles).toBe(DEFAULT_BLAST_RADIUS_TILES);
+    feed(aoe({ x: 12, y: 9 }, 1.25));
+
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 20, y: 20 }, 0.6));
+    const next = [...world.blasts()].find((blast) => blast.x === 20);
+    expect(next?.radiusTiles).toBe(1.25);
+  });
+
+  it('keeps the measurement apart per ability, by colour', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6, BOMBER_ID, 0xff0000));
+    feed(aoe({ x: 12, y: 9 }, 1.25));
+
+    // The same enemy, a different ability: nothing has been measured for it.
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 20, y: 20 }, 0.6, BOMBER_ID, 0x00ff00));
+    const next = [...world.blasts()].find((blast) => blast.x === 20);
+    expect(next?.radiusTiles).toBe(DEFAULT_BLAST_RADIUS_TILES);
+  });
+
   it('falls back to a sensible delay when the duration is nonsense', () => {
     const store = new BlastStore();
-    store.announce(0, 5, 5, Number.NaN);
-    store.announce(0, 6, 6, 999_999);
+    store.announce(0, telegraph(5, 5, Number.NaN));
+    store.announce(0, telegraph(6, 6, 999_999));
     const blasts = [...store.values(0)];
     expect(blasts).toHaveLength(2);
     for (const blast of blasts) expect(blast.armsAtMs).toBe(DEFAULT_TELEGRAPH_MS);
   });
 
+  // The flight time is the gap between the two packets, and it is worth keeping
+  // for exactly the case above: a duration field this build could not read.
+  it('uses the flight time it measured when the duration is nonsense', () => {
+    const store = new BlastStore();
+    store.announce(0, telegraph(5, 5, 900));
+    store.landed(1400, { x: 5, y: 5, radiusTiles: 2, harmful: true });
+
+    store.announce(2000, telegraph(5, 5, Number.NaN));
+    expect([...store.values(2000)].at(-1)?.armsAtMs).toBeCloseTo(3400, 5);
+  });
+
   it('refuses a landing spot that is not a place', () => {
     const store = new BlastStore();
-    expect(store.announce(0, Number.NaN, 5, 500)).toBe(false);
+    expect(store.announce(0, telegraph(Number.NaN, 5, 500))).toBe(false);
     expect(store.size).toBe(0);
+  });
+
+  // Every effect hanging on an object we do not hold would otherwise share one
+  // key, and whichever of them landed first would be measuring for the rest.
+  it('does not lend one unknown thrower another one’s measurement', () => {
+    const store = new BlastStore();
+    const anonymous = { armsInMs: 500, originType: UNKNOWN_ORIGIN_TYPE, color: 0 };
+    store.announce(0, { x: 5, y: 5, ...anonymous });
+    store.landed(400, { x: 5, y: 5, radiusTiles: 1.25, harmful: true });
+
+    store.announce(1000, { x: 9, y: 9, ...anonymous });
+    expect([...store.values(1000)].at(-1)?.radiusTiles).toBe(DEFAULT_BLAST_RADIUS_TILES);
   });
 
   it('forgets one long after it has gone off', () => {
     const store = new BlastStore();
-    store.announce(0, 5, 5, 500);
+    store.announce(0, telegraph(5, 5, 500));
     expect([...store.values(600)]).toHaveLength(1);
     expect([...store.values(9000)]).toHaveLength(0);
+  });
+});
+
+/** One telegraph from one anonymous thrower, for the store's own tests. */
+function telegraph(x: number, y: number, armsInMs: number): BlastTelegraph {
+  return { x, y, armsInMs, originType: 7, color: 0 };
+}
+
+/**
+ * What a blast turned out to be, kept between runs.
+ *
+ * A cache and nothing else: every way of failing to read it has to end in the
+ * planner using its default, because the alternative is a runtime that will not
+ * start over a file it wrote itself.
+ */
+describe('what blasts have been measured at', () => {
+  it('remembers the widest it saw, and the mean time it took', () => {
+    const table = new BlastRadiusTable();
+    table.learn(1000, 0, 2, 800);
+    table.learn(1000, 0, 3, 1200);
+
+    expect(table.lookUp(1000, 0)?.radiusTiles).toBe(3);
+    expect(table.lookUp(1000, 0)?.flightMs).toBeCloseTo(1000, 5);
+    expect(table.lookUp(1000, 0)?.seen).toBe(2);
+  });
+
+  it('keeps abilities apart by colour, and knows nothing about the rest', () => {
+    const table = new BlastRadiusTable();
+    table.learn(1000, 1, 2, 800);
+
+    expect(table.lookUp(1000, 2)).toBeUndefined();
+    expect(table.lookUp(1001, 1)).toBeUndefined();
+  });
+
+  it('refuses a radius that is not one', () => {
+    const table = new BlastRadiusTable();
+    table.learn(1000, 0, Number.NaN, 800);
+    table.learn(1000, 0, MAX_BLAST_RADIUS_TILES + 1, 800);
+    table.learn(1000, 0, -1, 800);
+
+    expect(table.size).toBe(0);
+  });
+
+  // The two are separate measurements, and the one the planner reads is the
+  // radius. A detonation nothing predicted has no flight time to give, and
+  // throwing the sighting away over that would cost the number that matters.
+  it('keeps the radius when there is no flight time to go with it', () => {
+    const table = new BlastRadiusTable();
+    table.learn(1000, 0, 2, 0);
+    table.learn(1000, 0, 2, MAX_BLAST_FLIGHT_MS + 1);
+
+    expect(table.lookUp(1000, 0)?.radiusTiles).toBe(2);
+    expect(table.lookUp(1000, 0)?.flightMs).toBe(0);
+    expect(table.lookUp(1000, 0)?.seen).toBe(2);
+    expect(table.lookUp(1000, 0)?.timed).toBe(0);
+  });
+
+  it('survives a round trip through a file', () => {
+    const written = new BlastRadiusTable();
+    written.learn(1000, 5, 2.5, 900);
+    const read = new BlastRadiusTable();
+
+    expect(read.restore(JSON.parse(JSON.stringify(written.serialise())))).toBe(1);
+    expect(read.lookUp(1000, 5)?.radiusTiles).toBe(2.5);
+    expect(read.lookUp(1000, 5)?.flightMs).toBe(900);
+  });
+
+  it('degrades to knowing nothing when the file is not one', () => {
+    const table = new BlastRadiusTable();
+
+    expect(table.restore(undefined)).toBe(0);
+    expect(table.restore({ version: 99, blasts: [] })).toBe(0);
+    expect(table.restore({ version: 1, blasts: 'not a list' })).toBe(0);
+    expect(table.restore({ version: 1, blasts: [{ originType: 1 }] })).toBe(0);
+    expect(table.size).toBe(0);
   });
 });
 

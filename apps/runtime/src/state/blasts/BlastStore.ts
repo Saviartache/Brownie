@@ -15,23 +15,25 @@
  * one of the four a proxy can have — and, being the packet, the only one that
  * cannot drift when the game is patched.
  *
- * **What arrives is a telegraph, not a measurement.** The wire says where and
- * when; it does not say how wide. The blast radius is only known once the `AOE`
- * lands, which is too late to plan around — so a predicted blast carries
- * {@link DEFAULT_BLAST_RADIUS_TILES}, the reference implementation's own figure,
- * and the `AOE` that follows is used to *check* the prediction rather than to
- * dodge. See {@link BlastStore.landed}.
+ * **What arrives is a telegraph, and it says where and when but never how
+ * wide.** The width is measured afterwards, off the `AOE` that follows, and
+ * remembered against the thrower — see {@link BlastRadiusTable}. A key that has
+ * thrown before is planned around its measured radius from the moment it is
+ * announced; a key that has not gets {@link DEFAULT_BLAST_RADIUS_TILES}, because
+ * an unknown blast must still be treated as dangerous.
  */
 
 import type { BlastView } from '@brownie/plugin-api';
+import { BlastRadiusTable } from './BlastRadiusTable.js';
 
 /**
  * How wide a telegraphed blast is assumed to be, in tiles.
  *
  * The reference implementation's `kDefaultAoeRadiusTiles`. It is a guess in both
  * directions — the one blast it could measure properly came out around three
- * tiles — and it is the honest thing to use, because the alternative is to treat
- * an unknown radius as nought and walk into it.
+ * tiles — and it is the honest thing to use for a key nothing has been measured
+ * for, because the alternative is to treat an unknown radius as nought and walk
+ * into it.
  */
 export const DEFAULT_BLAST_RADIUS_TILES = 3.5;
 
@@ -68,6 +70,60 @@ export function isBlastEffect(effectType: number): boolean {
 export const MAX_TELEGRAPH_MS = 8000;
 export const DEFAULT_TELEGRAPH_MS = 600;
 
+/** What a telegraph carries. See {@link BlastStore.announce}. */
+export interface BlastTelegraph {
+  /** Where it will land. */
+  readonly x: number;
+  readonly y: number;
+  /**
+   * How long until it lands, from the telegraph's own duration field.
+   *
+   * Bounded and defaulted rather than trusted: the duration is one field of a
+   * packet whose body is read from a layout recovered out of the game's own
+   * metadata, and a nonsense value there should cost a measured or a sensible
+   * delay rather than a blast pencilled in for next week.
+   */
+  readonly armsInMs: number;
+  /**
+   * The object type of whatever announced it, or {@link UNKNOWN_ORIGIN_TYPE}.
+   *
+   * Half of the key the measured radius is remembered under, and nothing else:
+   * whether the *thrower* is worth dodging at all is decided before this, by
+   * whoever read the packet. See `StateStage`.
+   */
+  readonly originType: number;
+  /** The effect's colour, the other half of that key. */
+  readonly color: number;
+}
+
+/** What a detonation carries. See {@link BlastStore.landed}. */
+export interface BlastLanding {
+  readonly x: number;
+  readonly y: number;
+  /** How far it actually reached, which is the number worth remembering. */
+  readonly radiusTiles: number;
+  /**
+   * Whether it could hurt anybody.
+   *
+   * A teammate's heal is an area effect in every respect the wire cares about,
+   * and it lands where teammates are — which is where we are. One counted as a
+   * detonation confirms whatever prediction it happens to land near, cancelling
+   * a real bomb still on its way down, and teaches the radius table a number
+   * from an ability nobody has to dodge.
+   */
+  readonly harmful: boolean;
+}
+
+/**
+ * An origin nothing could be resolved for.
+ *
+ * Neither read from the table nor written to it: every unresolved thrower would
+ * otherwise share one key, and a radius measured off whichever of them landed
+ * first would be applied to all the rest. "We do not know whose this is" has to
+ * mean the default, not a stranger's measurement.
+ */
+export const UNKNOWN_ORIGIN_TYPE = -1;
+
 /** How long a landed blast is remembered, for matching a prediction to it. */
 const CONFIRM_WINDOW_MS = 1500;
 
@@ -83,10 +139,15 @@ interface TrackedBlast {
   radiusTiles: number;
   armsAtMs: number;
   confirmed: boolean;
+  /** When the telegraph arrived, so a landing gives the flight time away. */
+  announcedAtMs: number;
+  originType: number;
+  color: number;
 }
 
 export class BlastStore {
   #blasts: TrackedBlast[] = [];
+  readonly #radii: BlastRadiusTable;
 
   /**
    * How many predictions an `AOE` later landed on top of, and how many it did
@@ -101,6 +162,16 @@ export class BlastStore {
   confirmed = 0;
   unmatched = 0;
 
+  /**
+   * @param radii Where measurements are read from and written back to. Shared
+   *   across sessions and across runs, because what an enemy's bomb does is a
+   *   property of the game rather than of a connection. Its own by default, so
+   *   a store built without one still learns within the run.
+   */
+  constructor(radii: BlastRadiusTable = new BlastRadiusTable()) {
+    this.#radii = radii;
+  }
+
   get size(): number {
     return this.#blasts.length;
   }
@@ -108,25 +179,37 @@ export class BlastStore {
   /**
    * Records a blast a telegraph has announced.
    *
-   * @param armsInMs How long until it lands. Bounded and defaulted rather than
-   *   trusted: the duration is one field of a packet whose body is read from a
-   *   layout recovered out of the game's own metadata, and a nonsense value
-   *   there should cost a sensible default rather than a blast pencilled in for
-   *   next week.
+   * The radius is the one measured for this key when there is one, and the
+   * default when there is not. The delay is the telegraph's own duration when it
+   * reads as a duration, the measured flight time when it does not, and a flat
+   * default when neither is available — in that order, because the packet is
+   * talking about *this* bomb and the table is only talking about its siblings.
    */
-  announce(gameTimeMs: number, x: number, y: number, armsInMs: number): boolean {
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  announce(gameTimeMs: number, telegraph: BlastTelegraph): boolean {
+    if (!Number.isFinite(telegraph.x) || !Number.isFinite(telegraph.y)) return false;
+
+    const measured =
+      telegraph.originType === UNKNOWN_ORIGIN_TYPE
+        ? undefined
+        : this.#radii.lookUp(telegraph.originType, telegraph.color);
+    const armsInMs = telegraph.armsInMs;
+    const flightMs = measured?.flightMs ?? 0;
     const delay =
       Number.isFinite(armsInMs) && armsInMs > 0 && armsInMs <= MAX_TELEGRAPH_MS
         ? armsInMs
-        : DEFAULT_TELEGRAPH_MS;
+        : flightMs > 0
+          ? flightMs
+          : DEFAULT_TELEGRAPH_MS;
 
     this.#blasts.push({
-      x,
-      y,
-      radiusTiles: DEFAULT_BLAST_RADIUS_TILES,
+      x: telegraph.x,
+      y: telegraph.y,
+      radiusTiles: measured?.radiusTiles ?? DEFAULT_BLAST_RADIUS_TILES,
       armsAtMs: gameTimeMs + delay,
       confirmed: false,
+      announcedAtMs: gameTimeMs,
+      originType: telegraph.originType,
+      color: telegraph.color,
     });
     // Oldest first, so a burst cannot grow this without bound.
     if (this.#blasts.length > MAX_BLASTS) this.#blasts.shift();
@@ -136,27 +219,42 @@ export class BlastStore {
   /**
    * Records a blast that has already gone off.
    *
-   * Too late to dodge — this is the damage event — so it is kept only long
-   * enough to answer "did the telegraph get it right", and to give the true
-   * radius to anything reading the store for a picture.
+   * Too late to dodge — this is the damage event — so what it is kept for is
+   * everything the *next* one needs: whether the telegraph was read correctly,
+   * how wide the blast really was, and how long it was in the air. The last two
+   * are learned only from a detonation that matched a prediction, because the
+   * flight time only exists as the gap between the two and because a key learned
+   * from an unmatched landing is a key nothing would ever look up.
    */
-  landed(gameTimeMs: number, x: number, y: number, radiusTiles: number): void {
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  landed(gameTimeMs: number, landing: BlastLanding): void {
+    if (!Number.isFinite(landing.x) || !Number.isFinite(landing.y)) return;
+    // Nothing to dodge, nothing to confirm, nothing to learn. Not counted as
+    // unmatched either: it is not a missed prediction, it is not a blast.
+    if (!landing.harmful) return;
 
-    let matched = false;
     for (const blast of this.#blasts) {
       if (blast.confirmed) continue;
-      if (Math.hypot(blast.x - x, blast.y - y) > CONFIRM_TILES) continue;
+      if (Math.hypot(blast.x - landing.x, blast.y - landing.y) > CONFIRM_TILES) continue;
+
+      if (blast.originType !== UNKNOWN_ORIGIN_TYPE) {
+        this.#radii.learn(
+          blast.originType,
+          blast.color,
+          landing.radiusTiles,
+          gameTimeMs - blast.announcedAtMs,
+        );
+      }
       // Landed, so it is no longer something to walk out of — and the radius it
       // really had is worth keeping for whatever is drawing it.
       blast.confirmed = true;
       blast.armsAtMs = gameTimeMs;
-      if (Number.isFinite(radiusTiles) && radiusTiles > 0) blast.radiusTiles = radiusTiles;
-      matched = true;
-      break;
+      if (Number.isFinite(landing.radiusTiles) && landing.radiusTiles > 0) {
+        blast.radiusTiles = landing.radiusTiles;
+      }
+      this.confirmed += 1;
+      return;
     }
-    if (matched) this.confirmed += 1;
-    else this.unmatched += 1;
+    this.unmatched += 1;
   }
 
   /**
@@ -178,6 +276,13 @@ export class BlastStore {
     return this.#blasts;
   }
 
+  /**
+   * Drops everything this session knew.
+   *
+   * The measured radii are deliberately untouched: they describe the game rather
+   * than the connection, and a map change is exactly when the same enemy is
+   * about to be met again.
+   */
   clear(): void {
     this.#blasts.length = 0;
     this.confirmed = 0;

@@ -227,3 +227,19 @@ predictions a detonation landed on and detonations nothing predicted, and the
 World tab shows both. A layout that drifts after a patch therefore shows up as
 confirmations stopping and unmatched climbing — a number to look at, rather than
 a dodge that quietly stopped avoiding bombs.
+
+**Two of the six fields decide whether a telegraph is a threat at all.**
+`targetObjectId` is the object the effect hangs on, which is the thrower: a
+teammate's ability and a monster's bomb are otherwise the same packet with the
+same effect type, and the planner walked out of both. The catalog is what tells
+them apart — `<Player/>` and `<Pet/>` in `objects.xml` — so with no game data
+loaded every telegraph is treated as dangerous, which is the safe direction.
+`color` is not used to make that decision: it names the ability rather than the
+side, and a colour table would have to be maintained against a game that adds
+abilities. What it is used for is remembering how wide the blast turned out to
+be, keyed with the thrower's object type; see `state/blasts/BlastRadiusTable.ts`.
+
+`AOE` is read the same way. Its `damage` and `effect` say whether a detonation
+could hurt anybody, and one that could not is a heal or a buff landing on the
+party. Counting one as a detonation confirms — and so cancels — whatever real
+prediction it happens to land near.

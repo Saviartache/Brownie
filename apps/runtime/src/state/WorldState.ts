@@ -6,6 +6,7 @@ import type {
   WorldView,
 } from '@brownie/plugin-api';
 import { PLAYER_HALF_TILES } from '../features/dodge/hitbox.js';
+import type { BlastRadiusTable } from './blasts/BlastRadiusTable.js';
 import { BlastStore } from './blasts/BlastStore.js';
 import { EntityStore } from './EntityStore.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './ObjectCatalog.js';
@@ -25,6 +26,15 @@ const NO_MAP: MapInfo = { name: '', displayName: '', width: 0, height: 0 };
 export interface WorldStateOptions {
   readonly objects?: ObjectCatalog;
   readonly tiles?: TileCatalog;
+  /**
+   * What blasts have been measured at, shared across sessions.
+   *
+   * How wide an enemy's bomb is and how long it is in the air are properties of
+   * the game, not of a connection — so the table outlives both the session and,
+   * once the composition root persists it, the run. Its own when omitted, which
+   * is what a test wants.
+   */
+  readonly blastRadii?: BlastRadiusTable;
   /** Injected so a test can drive time without waiting for it. */
   readonly now?: () => number;
 }
@@ -47,7 +57,7 @@ export class WorldState implements WorldView {
   readonly entityStore: EntityStore;
   readonly tileMap: TileMap;
   readonly projectileStore = new ProjectileStore();
-  readonly blastStore = new BlastStore();
+  readonly blastStore: BlastStore;
   /** The catalog in use, so the state stage can look a shot up. */
   readonly objects: ObjectCatalog;
 
@@ -73,6 +83,7 @@ export class WorldState implements WorldView {
     this.objects = options.objects ?? EMPTY_CATALOG;
     this.entityStore = new EntityStore(this.objects);
     this.tileMap = new TileMap(options.tiles ?? EMPTY_TILE_CATALOG);
+    this.blastStore = new BlastStore(options.blastRadii);
     this.#now = options.now ?? Date.now;
   }
 

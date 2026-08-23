@@ -73,6 +73,16 @@ function straightShot(
   };
 }
 
+/** A sweep result before anything has been swept into it. */
+function emptySweep(): Sweep {
+  return {
+    impactMs: Infinity,
+    clearanceTiles: Infinity,
+    urgentClearanceTiles: Infinity,
+    unsafeAtMs: Infinity,
+  };
+}
+
 /** Nothing in the way, nothing that hurts, nobody to bump into. */
 const OPEN_GROUND: DodgeWorld = {
   canStand: () => true,
@@ -177,12 +187,14 @@ describe('the threat field', () => {
     driftTilesPerSecond: 0,
     reachTiles: 4,
     // Wider than anything these place, so the distance gate is out of the way
-    // of the tests that are about the geometry. It has its own two below.
+    // of the tests that are about the geometry. It has its own three below.
     reactTiles: 100,
+    // The whole horizon counts as now, for the same reason.
+    reactWithinMs: 600,
   };
 
   function sweepStanding(field: ThreatField, at: Position): Sweep {
-    const out: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
+    const out = emptySweep();
     field.sweep(at.x, at.y, 0, 0, 0.006, 0, 600, Infinity, 0, out);
     return out;
   }
@@ -261,8 +273,8 @@ describe('the threat field', () => {
     // Coming down onto a player who tries to walk east out of the way.
     field.build(0, 0, 0, [straightShot({ x: 3, y: -4 }, Math.PI / 2, 10, 0, 2000)], OPTIONS);
 
-    const free: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
-    const boxed: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
+    const free = emptySweep();
+    const boxed = emptySweep();
     field.sweep(0, 0, 1, 0, 0.006, 0, 600, Infinity, 0, free);
     // The same walk, with a wall a tenth of a tile away.
     field.sweep(0, 0, 1, 0, 0.006, 0, 600, 0.1, 0, boxed);
@@ -277,11 +289,13 @@ describe('the threat field', () => {
   // the reason a dodge starts.
   it('does not call a far shot trouble, and still measures it', () => {
     const field = new ThreatField();
-    // Coming straight at the player from six tiles out, so it lands well inside
-    // the horizon — but it is four tiles outside the reaction distance now.
+    // Coming straight at the player from six tiles out at ten tiles a second,
+    // so it lands well inside the horizon — but two hundred milliseconds from
+    // now it is still four tiles outside the reaction distance.
     field.build(0, 0, 0, [straightShot({ x: -6, y: 0 }, 0, 10, 0, 2000)], {
       ...OPTIONS,
       reactTiles: 2,
+      reactWithinMs: 200,
     });
 
     const swept = sweepStanding(field, { x: 0, y: 0 });
@@ -296,9 +310,50 @@ describe('the threat field', () => {
     field.build(0, 0, 0, [straightShot({ x: -1.5, y: 0 }, 0, 10, 0, 2000)], {
       ...OPTIONS,
       reactTiles: 2,
+      reactWithinMs: 200,
     });
 
     expect(sweepStanding(field, { x: 0, y: 0 }).unsafeAtMs).toBeLessThan(Infinity);
+  });
+
+  // **The gate read the wrong number.** Where a shot is at the instant of
+  // planning says very little: a bullet six tiles out doing thirty tiles a
+  // second is through the player in two hundred milliseconds, and calling it
+  // "far" left the fastest fire in the game — the fire hardest to dodge — unable
+  // to raise its hand at all.
+  it('calls a fast shot trouble while it is still a room away', () => {
+    const field = new ThreatField();
+    field.build(0, 0, 0, [straightShot({ x: -6, y: 0 }, 0, 30, 0, 2000)], {
+      ...OPTIONS,
+      reactTiles: 2,
+      reactWithinMs: 200,
+    });
+
+    expect(sweepStanding(field, { x: 0, y: 0 }).unsafeAtMs).toBeLessThan(Infinity);
+  });
+
+  // **What decides which way to go when the field is busy.** The full-horizon
+  // clearance is a minimum over a second of prediction, so it is set by whatever
+  // passes closest at the far end; the urgent one is set by what is arriving.
+  it('measures the room it has now apart from the room it has later', () => {
+    const field = new ThreatField();
+    field.build(
+      0,
+      0,
+      0,
+      [
+        // Alongside from the start, and never nearer than a comfortable margin.
+        straightShot({ x: -1, y: 1.4 }, 0, 10, 0, 2000),
+        // And shaving past much closer, but not until the far end of the
+        // horizon: four tiles away for the whole of the reaction window.
+        straightShot({ x: -4, y: 0.9 }, 0, 6, 0, 2000),
+      ],
+      { ...OPTIONS, reactWithinMs: 200 },
+    );
+
+    const swept = sweepStanding(field, { x: 0, y: 0 });
+    expect(swept.clearanceTiles).toBeCloseTo(0.9 - effectiveHalf(0.5, 1, 0), 2);
+    expect(swept.urgentClearanceTiles).toBeCloseTo(1.4 - effectiveHalf(0.5, 1, 0), 2);
   });
 });
 
@@ -419,7 +474,7 @@ describe('what the verdict is allowed to claim', () => {
   }
 
   /** Every plan over four seconds of it, walked as the module would walk it. */
-  function drivenPlans(): DodgePlan[] {
+  function drivenPlans(settings: DodgeSettings = SETTINGS): DodgePlan[] {
     const controller = new DodgeController();
     const shots = crossfire();
     const plans: DodgePlan[] = [];
@@ -431,7 +486,7 @@ describe('what the verdict is allowed to claim', () => {
       const gameTimeMs = step * 20;
       const plan = controller.plan(
         situation({ x, y, gameTimeMs, nowMs: 1_000_000 + gameTimeMs }),
-        SETTINGS,
+        settings,
         OPEN_GROUND,
         shots,
       );
@@ -470,6 +525,28 @@ describe('what the verdict is allowed to claim', () => {
     expect(abandoned).toHaveLength(0);
   });
 
+  // **The complaint in the user's own words: "we do not dodge, we take the
+  // hits."** Every branch below `unavoidable` claims to have found a course
+  // that survives the window, and one of them was admitting courses that do
+  // not: the filter asked when a course first runs *low on room*, which only
+  // the shots already near can answer, and then let alignment with the
+  // player's own heading outrank being hit. The only honest reason to settle
+  // for a course with a hit inside the window is that every course has one,
+  // which is what `unavoidable` is for.
+  it('never settles on a course it has already predicted a hit on', () => {
+    // At the tightest reaction distance the overlay offers, which is where the
+    // two questions genuinely come apart: a character covers four tiles inside
+    // the reaction window, so at two tiles of gate a shot can be predicted to
+    // land on a course without ever having counted as near.
+    const caught = drivenPlans({ ...SETTINGS, reactWithinTiles: 2 }).filter(
+      (plan) =>
+        (plan.verdict === 'guide' || plan.verdict === 'evade' || plan.verdict === 'spacing') &&
+        plan.impactMs <= SETTINGS.reactWithinMs,
+    );
+
+    expect(caught).toHaveLength(0);
+  });
+
   // Standing still *is* sometimes the answer — when every course is hit and
   // this one is hit latest. That is the honest verdict, and it must not be
   // confused with the two above.
@@ -490,19 +567,13 @@ describe('blasts on their way down', () => {
     armsAtMs: armsInMs,
   });
 
-  const swept = (): Sweep => ({
-    impactMs: Infinity,
-    clearanceTiles: Infinity,
-    unsafeAtMs: Infinity,
-  });
-
   it('catches a course that walks into where one lands', () => {
     const blasts = new Blasts();
     // Three tiles east, landing in half a second.
-    blasts.collect([blast(13, 10, 2, 500)], 0, 10, 10, 8, 1000);
+    blasts.collect([blast(13, 10, 2, 500)], 0, 10, 10, 8, 1000, 420);
     expect(blasts.count).toBe(1);
 
-    const out = swept();
+    const out = emptySweep();
     // Walking east at six tiles a second is inside it when it goes off.
     blasts.sweep(10, 10, 1, 0, 0.006, 0.006, 60, 1000, Infinity, 0.08, out);
     expect(out.impactMs).toBe(500);
@@ -515,9 +586,9 @@ describe('blasts on their way down', () => {
   // flight would be a leash.
   it('leaves a course alone that is gone before it lands', () => {
     const blasts = new Blasts();
-    blasts.collect([blast(13, 10, 2, 500)], 0, 10, 10, 8, 1000);
+    blasts.collect([blast(13, 10, 2, 500)], 0, 10, 10, 8, 1000, 420);
 
-    const out = swept();
+    const out = emptySweep();
     // Walking the other way: through none of it by the time it goes off.
     blasts.sweep(10, 10, -1, 0, 0.006, 0.006, 60, 1000, Infinity, 0.08, out);
     expect(out.impactMs).toBe(Infinity);
@@ -533,6 +604,7 @@ describe('blasts on their way down', () => {
       10,
       8,
       1000,
+      420,
     );
     expect(blasts.count).toBe(1);
   });
@@ -540,7 +612,7 @@ describe('blasts on their way down', () => {
   it('forgets one whose edge no course could reach', () => {
     const blasts = new Blasts();
     // Forty tiles away: the player can cover six inside the horizon.
-    blasts.collect([blast(50, 10, 2, 500)], 0, 10, 10, 6.4, 1000);
+    blasts.collect([blast(50, 10, 2, 500)], 0, 10, 10, 6.4, 1000, 420);
     expect(blasts.count).toBe(0);
   });
 
@@ -548,9 +620,9 @@ describe('blasts on their way down', () => {
   // game's projectile collision and wrong here — would call this a hit.
   it('measures a circle, so a corner of the bounding box is outside it', () => {
     const blasts = new Blasts();
-    blasts.collect([blast(10, 10, 3, 700)], 0, 10, 10, 8, 1000);
+    blasts.collect([blast(10, 10, 3, 700)], 0, 10, 10, 8, 1000, 420);
 
-    const out = swept();
+    const out = emptySweep();
     // Diagonally out to (12.6, 12.6) by the time it lands: 3.68 tiles from the
     // centre as a radius, against the 3.56 the blast and the body come to — but
     // only 2.6 by the square the projectile sweep measures in, which would have
@@ -658,8 +730,9 @@ describe('who is driving', () => {
       driftTilesPerSecond: SETTINGS.driftTilesPerSecond,
       reachTiles: 4,
       reactTiles: SETTINGS.reactWithinTiles,
+      reactWithinMs: SETTINGS.reactWithinMs,
     });
-    const swept: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
+    const swept = emptySweep();
     field.sweep(
       10,
       10,
@@ -738,6 +811,25 @@ describe('what counts as trouble now', () => {
     const plan = controller.plan(situation(), SETTINGS, OPEN_GROUND, [closingFrom(2.5)]);
 
     expect(plan.steer).toBe(true);
+  });
+
+  // **And the other half of the same question, which the gate had backwards.**
+  // Distance was read at the instant of planning, so a bullet crossing the room
+  // at twenty-four tiles a second counted as far — and being far it could not
+  // raise its hand, so the planner left the player standing exactly where it
+  // had predicted the shot would land. The fastest fire in the game was the one
+  // class it could not answer at all.
+  it('acts on a fast shot while it is still on the other side of the room', () => {
+    const controller = new DodgeController();
+    // The plugin's own reaction distance, not the wide one the tests above use.
+    const settings: DodgeSettings = { ...SETTINGS, reactWithinTiles: 6 };
+    const plan = controller.plan(situation(), settings, OPEN_GROUND, [
+      straightShot({ x: 10, y: 18 }, -Math.PI / 2, 24, 0, 4000),
+    ]);
+
+    expect(plan.steer).toBe(true);
+    // And the course it picked is one the shot does not reach.
+    expect(plan.impactMs).toBe(Infinity);
   });
 });
 

@@ -379,6 +379,8 @@ export class DodgeController {
   #impactMs = new Float64Array(0);
   #unsafeMs = new Float64Array(0);
   #clearance = new Float64Array(0);
+  /** The same, over the reaction window alone. See {@link Sweep.urgentClearanceTiles}. */
+  #urgentClearance = new Float64Array(0);
   /** How far out of the standoff band each course ends up, as a cost. */
   #standoff = new Float64Array(0);
   #headings = -1;
@@ -446,7 +448,12 @@ export class DodgeController {
    */
   #doomedBefore = false;
 
-  readonly #sweep: Sweep = { impactMs: Infinity, clearanceTiles: Infinity, unsafeAtMs: Infinity };
+  readonly #sweep: Sweep = {
+    impactMs: Infinity,
+    clearanceTiles: Infinity,
+    urgentClearanceTiles: Infinity,
+    unsafeAtMs: Infinity,
+  };
   readonly #probe: Reach = { wallTiles: Infinity, hazardTiles: Infinity, exitTiles: Infinity };
 
   /** Drops the commitment. Called when the session or the character changes. */
@@ -516,6 +523,7 @@ export class DodgeController {
       driftTilesPerSecond: settings.driftTilesPerSecond,
       reachTiles,
       reactTiles: settings.reactWithinTiles,
+      reactWithinMs,
     };
     this.#field.build(situation.gameTimeMs, situation.x, situation.y, shots, fieldOptions);
     this.#blasts.collect(
@@ -525,6 +533,7 @@ export class DodgeController {
       situation.y,
       reachTiles,
       horizonMs,
+      reactWithinMs,
     );
 
     const onHazard = settings.avoidDamagingGround && world.isDamaging(situation.x, situation.y);
@@ -676,6 +685,7 @@ export class DodgeController {
     this.#impactMs = new Float64Array(slots);
     this.#unsafeMs = new Float64Array(slots);
     this.#clearance = new Float64Array(slots);
+    this.#urgentClearance = new Float64Array(slots);
     this.#standoff = new Float64Array(slots);
 
     for (let tier = 0; tier < SPEED_TIERS.length; tier += 1) {
@@ -828,6 +838,7 @@ export class DodgeController {
       this.#impactMs[c] = Math.min(this.#sweep.impactMs, hazard);
       this.#unsafeMs[c] = Math.min(this.#sweep.unsafeAtMs, hazard);
       this.#clearance[c] = this.#sweep.clearanceTiles;
+      this.#urgentClearance[c] = this.#sweep.urgentClearanceTiles;
       this.#standoff[c] = this.#standoffFor(situation, world, c, speed, until, travel);
     }
   }
@@ -911,7 +922,7 @@ export class DodgeController {
       return this.#mostAligned(
         scored,
         Math.max(reactWithinMs, Math.min(bestWindow, this.#survivalCapMs) - URGENT_TRADE_MS),
-        -Infinity,
+        reactWithinMs,
         -Infinity,
         situation,
         true,
@@ -920,8 +931,16 @@ export class DodgeController {
     // There is time. Take the course closest to where they were going out of
     // everything that clears the window — the difference between a feature that
     // reads as help and one that reads as a hand on the shoulder.
+    //
+    // **"Clears the window" has to mean both numbers.** It used to mean
+    // `unsafeAtMs` alone, which is raised only by shots near enough to be this
+    // moment's problem — so a course that was predicted to be *hit* inside the
+    // window by anything the near test had not flagged was admitted anyway, and
+    // then won outright on being the heading the player was already pressing.
+    // That is the planner watching a bullet arrive and deciding to leave the
+    // wheel where it was.
     this.#verdict = 'guide';
-    return this.#mostAligned(scored, reactWithinMs, -Infinity, -Infinity, situation, true);
+    return this.#mostAligned(scored, reactWithinMs, reactWithinMs, -Infinity, situation, true);
   }
 
   /**
@@ -987,6 +1006,7 @@ export class DodgeController {
     let best = HOLD;
     let bestImpact = this.#survival(HOLD);
     let bestLane = this.#lane(HOLD);
+    let bestUrgentRoom = this.#urgentRoom(HOLD);
     let bestRoom = this.#room(HOLD);
     let bestStandoff = this.#standoffOf(HOLD);
 
@@ -994,16 +1014,21 @@ export class DodgeController {
       const impact = this.#survival(c);
       if (impact < bestImpact) continue;
       const lane = this.#lane(c);
+      const urgentRoom = this.#urgentRoom(c);
       const room = this.#room(c);
       const standoff = this.#standoffOf(c);
       const better =
         impact > bestImpact ||
         lane > bestLane ||
-        (lane === bestLane && (room > bestRoom || (room === bestRoom && standoff < bestStandoff)));
+        (lane === bestLane &&
+          (urgentRoom > bestUrgentRoom ||
+            (urgentRoom === bestUrgentRoom &&
+              (room > bestRoom || (room === bestRoom && standoff < bestStandoff)))));
       if (!better) continue;
       best = c;
       bestImpact = impact;
       bestLane = lane;
+      bestUrgentRoom = urgentRoom;
       bestRoom = room;
       bestStandoff = standoff;
     }
@@ -1026,6 +1051,29 @@ export class DodgeController {
   /** How much room a course has, in whole quanta. */
   #room(candidate: number): number {
     return inQuanta(this.#clearance[candidate] ?? -Infinity, ROOM_QUANTUM_TILES);
+  }
+
+  /**
+   * The same, counting only what is close enough to be this moment's problem.
+   *
+   * **Above {@link #room}, and that is what stops the planner answering the
+   * wrong shot.** The full-horizon figure is a minimum over a second of
+   * prediction, so in a busy fight it is set by whichever bullet happens to pass
+   * closest at the far end — and the direction was being chosen to thread a gap
+   * the player would be re-planned out of fifty times before reaching it, while
+   * the shot actually arriving went unanswered. Both numbers still count.
+   *
+   * **And below every preference, which is not a compromise.** Short-term room
+   * on its own is maximised by fleeing along the incoming line: a shot outruns a
+   * character, so running with it keeps the distance for exactly as long as the
+   * window lasts and is cornered a moment after. That is the behaviour `ground`
+   * exists to refuse, and putting this above it would reintroduce it.
+   *
+   * `Infinity` for every course when nothing comes near inside the window, so
+   * the term compares equal and decides nothing until there is something near.
+   */
+  #urgentRoom(candidate: number): number {
+    return inQuanta(this.#urgentClearance[candidate] ?? -Infinity, ROOM_QUANTUM_TILES);
   }
 
   /** How far out of the band a course ends up, in whole quanta. Lower is better. */
@@ -1121,6 +1169,7 @@ export class DodgeController {
     let best = -1;
     let bestDot = -Infinity;
     let bestSafety = -Infinity;
+    let bestUrgentRoom = -Infinity;
     let bestStandoff = Infinity;
     let bestGround = -Infinity;
     let bestImpact = -Infinity;
@@ -1181,6 +1230,10 @@ export class DodgeController {
         : -inQuanta(Math.max(0, dirX * flowX + dirY * flowY) * coherence, RETREAT_QUANTUM);
       const impact = this.#survival(c);
       const lane = this.#lane(c);
+      // Among courses that are equally good places to be, the one that answers
+      // what is arriving beats the one that answers what is still crossing the
+      // room. See {@link #urgentRoom} for why it sits exactly here.
+      const urgentRoom = this.#urgentRoom(c);
       const room = this.#room(c);
       const better =
         best < 0 ||
@@ -1191,13 +1244,16 @@ export class DodgeController {
             (ground === bestGround &&
               (standoff < bestStandoff ||
                 (standoff === bestStandoff &&
-                  (impact > bestImpact ||
-                    (impact === bestImpact &&
-                      (lane > bestLane || (lane === bestLane && room > bestRoom)))))))));
+                  (urgentRoom > bestUrgentRoom ||
+                    (urgentRoom === bestUrgentRoom &&
+                      (impact > bestImpact ||
+                        (impact === bestImpact &&
+                          (lane > bestLane || (lane === bestLane && room > bestRoom)))))))))));
       if (!better) continue;
       best = c;
       bestDot = dot;
       bestSafety = safety;
+      bestUrgentRoom = urgentRoom;
       bestStandoff = standoff;
       bestGround = ground;
       bestImpact = impact;
@@ -1300,6 +1356,8 @@ export class DodgeController {
     return (
       (this.#unsafeMs[held] ?? 0) >= (this.#unsafeMs[chosen] ?? 0) &&
       (this.#impactMs[held] ?? 0) >= (this.#impactMs[chosen] ?? 0) &&
+      (this.#urgentClearance[chosen] ?? -Infinity) <
+        (this.#urgentClearance[held] ?? -Infinity) + DWELL_BREAK_TILES &&
       (this.#clearance[chosen] ?? -Infinity) <
         (this.#clearance[held] ?? -Infinity) + DWELL_BREAK_TILES
     );

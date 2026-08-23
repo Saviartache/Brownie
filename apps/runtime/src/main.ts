@@ -79,6 +79,9 @@ async function main(): Promise<void> {
     // Written once per game build and kept: the metadata does not move while
     // the build does not, so walking it again would answer the same question.
     classDumpPath: join(process.cwd(), GAME_DATA_DIR, 'game-classes.txt'),
+    // And what this runtime measured blasts at, which is the same kind of thing
+    // again: read off the game, stale on a patch, and free to delete.
+    blastRadiiPath: join(process.cwd(), GAME_DATA_DIR, 'blast-radii.json'),
     // The one file this runtime writes on the user's behalf rather than for a
     // reader: every switch and knob they set, so a restart is not a re-setup.
     preferencesPath: PREFERENCES_PATH,

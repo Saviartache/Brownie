@@ -80,7 +80,7 @@ export interface ThreatFieldOptions {
    */
   readonly reachTiles: number;
   /**
-   * How near a shot has to be *now* before it may take the wheel, in tiles.
+   * How near a shot has to come before it may take the wheel, in tiles.
    *
    * **The distance half of "is this trouble now", and the time half is not
    * enough on its own.** A shot crossing the room at sixteen tiles a second is
@@ -94,10 +94,23 @@ export interface ThreatFieldOptions {
    * keeping them: reacting late is fine, walking into the wave behind the one
    * being dodged is not.
    *
-   * Measured from where the shot is at plan time. A shot that crosses the line
-   * is near on the next plan, twenty milliseconds later.
+   * **Measured over the reaction window, not at the instant of planning.** The
+   * distance a shot is at right now says very little: a bullet seven tiles out
+   * doing twenty tiles a second is on the player in a third of a second, and
+   * reading it as "far" left the one class of shot that is genuinely hard to
+   * dodge unable to raise its hand at all — the planner then only ever saw it
+   * through {@link Sweep.impactMs}, by which time the answer was to be hit. What
+   * decides is how near it gets while this decision is still the current one.
    */
   readonly reactTiles: number;
+  /**
+   * How long that window is, in milliseconds.
+   *
+   * The planner's own {@link DodgeSettings.reactWithinMs}, handed over so the
+   * field can answer both halves of "is this trouble now" itself. It also bounds
+   * {@link Sweep.urgentClearanceTiles}.
+   */
+  readonly reactWithinMs: number;
 }
 
 /** Where a straight walk ends up against the field. Reused; never handed out. */
@@ -118,6 +131,24 @@ export interface Sweep {
    * because it is `Infinity` for both.
    */
   clearanceTiles: number;
+  /**
+   * The same, counting only the part of the walk inside the reaction window.
+   *
+   * **The number that makes the planner answer the near shot rather than the far
+   * one.** `clearanceTiles` is a minimum over the whole horizon, so a bullet
+   * that will pass a tile away in nine hundred milliseconds weighs exactly as
+   * much as one passing a tile away in eighty — and in a busy fight the far one
+   * is almost always the tighter of the two, so the direction was being chosen
+   * to thread a gap the player would never reach while the shot actually about
+   * to arrive went unanswered.
+   *
+   * Ranked above the full-horizon figure, and above nothing else — see
+   * `DodgeController.#urgentRoom` for why maximising it outright is a planner
+   * that flees along the incoming line. `Infinity` when nothing comes near
+   * inside the window, which is most plans, so the term decides nothing at all
+   * until there is something arriving.
+   */
+  urgentClearanceTiles: number;
   /**
    * When the walk first has less than the caller's margin of room, counting
    * only the shots that are already near — see {@link ThreatFieldOptions.reactTiles}.
@@ -199,6 +230,8 @@ export class ThreatField {
   #considered = 0;
   #drift = 0;
   #horizonMs = 0;
+  /** How long "now" lasts, for both the near test and the urgent clearance. */
+  #reactWithinMs = 0;
   #flowX = 0;
   #flowY = 0;
   #flowCoherence = 0;
@@ -265,6 +298,7 @@ export class ThreatField {
     this.#samples = samples;
     this.#drift = Math.max(0, options.driftTilesPerSecond);
     this.#horizonMs = horizonMs;
+    this.#reactWithinMs = Math.max(0, Math.min(options.reactWithinMs, horizonMs));
     this.#tracked = 0;
     this.#considered = 0;
     // Accumulated as the shots are predicted, since the first two samples of a
@@ -312,6 +346,10 @@ export class ThreatField {
       let maxY = start.y;
       this.#sampleX[base] = start.x;
       this.#sampleY[base] = start.y;
+      // The closest this shot comes to where the player is standing, over the
+      // part of its path that is still this decision's problem. See
+      // {@link ThreatFieldOptions.reactTiles}.
+      let nearestSquared = (start.x - selfX) ** 2 + (start.y - selfY) ** 2;
 
       let taken = 1;
       for (let k = 1; k < this.#samples; k += 1) {
@@ -326,6 +364,10 @@ export class ThreatField {
         else if (at.x > maxX) maxX = at.x;
         if (at.y < minY) minY = at.y;
         else if (at.y > maxY) maxY = at.y;
+        if (k * stepMs <= this.#reactWithinMs) {
+          const squared = (at.x - selfX) ** 2 + (at.y - selfY) ** 2;
+          if (squared < nearestSquared) nearestSquared = squared;
+        }
         taken += 1;
       }
 
@@ -345,9 +387,7 @@ export class ThreatField {
       this.#sampleCount[slot] = taken;
       this.#half[slot] = half;
       this.#drifts[slot] = drift;
-      const awayX = start.x - selfX;
-      const awayY = start.y - selfY;
-      this.#near[slot] = awayX * awayX + awayY * awayY <= reactSquared ? 1 : 0;
+      this.#near[slot] = nearestSquared <= reactSquared ? 1 : 0;
       this.#minX[slot] = minX - widest;
       this.#minY[slot] = minY - widest;
       this.#maxX[slot] = maxX + widest;
@@ -424,10 +464,16 @@ export class ThreatField {
   ): void {
     out.impactMs = Infinity;
     out.clearanceTiles = Infinity;
+    out.urgentClearanceTiles = Infinity;
     out.unsafeAtMs = Infinity;
 
     const endMs = Math.min(this.#horizonMs, untilMs);
     if (endMs < 0 || this.#tracked === 0) return;
+
+    // Where "now" ends, for the urgent half of the clearance. Clipped to the
+    // sweep's own end so a course cut short by a wall or by damaging ground
+    // reports the window it actually walks, not the one it was offered.
+    const urgentUntilMs = Math.min(this.#reactWithinMs, endMs);
 
     // When the course stops advancing, having run out of ground. Measured from
     // the moment it starts, which is `leadMs` from now.
@@ -480,6 +526,7 @@ export class ThreatField {
             Math.abs((this.#sampleY[base] ?? 0) - startY),
           ) - half;
         if (room < out.clearanceTiles) out.clearanceTiles = room;
+        if (room < out.urgentClearanceTiles) out.urgentClearanceTiles = room;
         if (room <= 0 && out.impactMs > 0) out.impactMs = 0;
         if (near && room < safeMarginTiles && out.unsafeAtMs > 0) out.unsafeAtMs = 0;
         continue;
@@ -522,6 +569,11 @@ export class ThreatField {
           // fully explain is one to leave more room around.
           const room = closest - (half + (drift * to) / 1000);
           if (room < out.clearanceTiles) out.clearanceTiles = room;
+          // The piece begins inside the window, so what happens across it is
+          // still what this decision is about.
+          if (from <= urgentUntilMs && room < out.urgentClearanceTiles) {
+            out.urgentClearanceTiles = room;
+          }
           if (room <= 0 && from < out.impactMs) out.impactMs = from;
           if (near && room < safeMarginTiles && from < out.unsafeAtMs) out.unsafeAtMs = from;
 

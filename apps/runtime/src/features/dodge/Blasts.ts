@@ -68,6 +68,8 @@ export class Blasts {
   #radius = new Float64Array(0);
   #armsAt = new Float64Array(0);
   #count = 0;
+  /** How long "now" lasts, for {@link Sweep.urgentClearanceTiles}. */
+  #reactWithinMs = 0;
 
   get count(): number {
     return this.#count;
@@ -86,6 +88,8 @@ export class Blasts {
    * @param withinTiles How far the player could get within the horizon. A blast
    *   whose edge is further than that plus its own radius is one no course could
    *   walk into.
+   * @param reactWithinMs How long "now" lasts. Only decides which blasts count
+   *   towards {@link Sweep.urgentClearanceTiles}; every one collected is swept.
    */
   collect(
     blasts: Iterable<BlastView>,
@@ -94,8 +98,10 @@ export class Blasts {
     selfY: number,
     withinTiles: number,
     horizonMs: number,
+    reactWithinMs: number,
   ): void {
     this.#count = 0;
+    this.#reactWithinMs = Math.max(0, Math.min(reactWithinMs, horizonMs));
     for (const blast of blasts) {
       const armsIn = blast.armsAtMs - gameTimeMs;
       if (!(armsIn >= 0) || armsIn > horizonMs) continue;
@@ -173,6 +179,12 @@ export class Blasts {
       const room = Math.sqrt(dx * dx + dy * dy) - required;
 
       if (room < out.clearanceTiles) out.clearanceTiles = room;
+      // One landing inside the reaction window is what "now" means for a blast:
+      // it is a single instant rather than a path, so it either falls in the
+      // window or it does not.
+      if (armsAt <= this.#reactWithinMs && room < out.urgentClearanceTiles) {
+        out.urgentClearanceTiles = room;
+      }
       if (room <= 0 && armsAt < out.impactMs) out.impactMs = armsAt;
       if (room >= safeMarginTiles) continue;
 
