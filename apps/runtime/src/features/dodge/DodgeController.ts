@@ -64,18 +64,24 @@
  * **Not running away is most of what makes it a dodge.** Every course that
  * gives ground survives fractionally longer than every course that does not, so
  * a planner left to rank on survival and room alone backs off from everything —
- * out of weapon range, one safe step at a time, from a pattern it had room to
- * walk through. Three things say otherwise, in order: courses that cross the
- * fire beat courses that run along its axis either way, courses that stay
- * inside the weapon's reach beat courses that leave it, and the shortest step
- * that works beats every longer one. The last is the plain statement of the
- * whole feature — move as little as survival actually requires.
+ * from a pattern it had room to walk through, one safe step at a time. Three
+ * things say otherwise, in order: courses that cross the fire beat courses that
+ * run along its axis either way, courses that leave room to dodge in beat
+ * courses that end up under a monster, and the shortest step that works beats
+ * every longer one. The last is the plain statement of the whole feature — move
+ * as little as survival actually requires.
+ *
+ * **Room to dodge in is not a distance from the shots.** A monster pressed
+ * against the player has taken the space every sidestep is made in, and that is
+ * worth a step of its own even with nothing in the air; where the *fire* is
+ * going is a different question, answered by crossing it. Keeping the two
+ * separate is what stops "make room" from meaning "back away".
  *
  * **What is deliberately not here.** No goal-seeking, no orbit, no enemy lock,
- * no path drawing, and no bubble around a monster. The reach is a preference
- * over candidates, not a place to go; nothing here picks a destination. Folding
- * one in is how the reference ended up with a nine-hundred-line arbiter and a
- * mode-hysteresis timer. This decides one thing.
+ * no path drawing, and nothing about weapon range. The keep-away distance is a
+ * preference over candidates, not a place to go; nothing here picks a
+ * destination. Folding one in is how the reference ended up with a
+ * nine-hundred-line arbiter and a mode-hysteresis timer. This decides one thing.
  */
 
 import { Blasts, type BlastView } from './Blasts.js';
@@ -93,7 +99,7 @@ export type DodgeVerdict =
   | 'intent-safe'
   /** Not urgent: moved to the nearest course that is safe and still theirs. */
   | 'guide'
-  /** Nothing in the air; the player has drifted out of range. Stepping back in. */
+  /** Nothing in the air; something is standing too close. Making room. */
   | 'spacing'
   /**
    * Nowhere within reach stays clear. Running, while there is still time to.
@@ -218,6 +224,17 @@ export interface DodgePlan {
   readonly impactMs: number;
   /** The least room that course ever has, over the whole horizon. */
   readonly clearanceTiles: number;
+  /**
+   * Whether something is standing inside the keep-away distance right now.
+   *
+   * **What tells "get out of this" from every other reason to walk.** A dodge is
+   * a sidestep with a margin in hand; making room from a monster already on top
+   * of the player is a shove, and the difference is worth a little speed — see
+   * where the caller spends it. Reported rather than folded into
+   * {@link stepTiles}, because the step is about which candidate was chosen and
+   * this is about how hard to carry it out.
+   */
+  readonly crowded: boolean;
   /** How many shots could reach the player at all. */
   readonly trackedShots: number;
   /**
@@ -240,17 +257,17 @@ export interface DodgePlan {
  */
 export interface DodgeWorld extends Ground {
   /**
-   * How far past the weapon's reach a place leaves us, in tiles, and nought
-   * anywhere inside it. See `EnemyBodies.outOfRangeAt`.
+   * How far inside a monster's keep-away distance a place is, in tiles, and
+   * nought anywhere with room to spare. See `EnemyBodies.crowdingAt`.
    *
-   * **Scored, never a veto.** The only lane out of a volley sometimes runs out
-   * of range, and a planner that refuses it stands in the volley instead.
+   * **Scored, never a veto.** The only lane out of a volley sometimes runs past
+   * a monster, and a planner that refuses it stands in the volley instead.
    *
    * @param aheadMs When the player would be standing there, from now. The
-   *   monsters are carried forward over it, so the answer is about the fight as
-   *   it will be rather than as the last packet left it.
+   *   monsters are carried forward over it, which is what tells one the player
+   *   walked up to from one that is walking up to the player.
    */
-  outOfRangeAt(x: number, y: number, aheadMs: number): number;
+  crowdingAt(x: number, y: number, aheadMs: number): number;
 }
 
 /** The course that stays put. Always index nought, always considered. */
@@ -377,12 +394,12 @@ const IMPACT_QUANTUM_MS = 20;
  * The same, for how far out of weapon range a course leaves us.
  *
  * Coarse, and that is what keeps it from being a leash of its own: two
- * sidesteps at the same distance from the monster are equally good places to
- * fight from, and splitting them by a hundredth of a tile would spend the term
- * on a distinction nobody could see. What it is meant to separate is the
- * sidestep from the retreat, and those differ by tiles.
+ * sidesteps out of the same bubble are equally good places to fight from, and
+ * splitting them by a hundredth of a tile would spend the term on a distinction
+ * nobody could see. What it is meant to separate is having room from not having
+ * it, and those differ by tiles.
  */
-const RANGE_QUANTUM_TILES = 0.25;
+const CROWDING_QUANTUM_TILES = 0.25;
 /** The same, for how close a course is to the way the player is walking. */
 const ALIGNMENT_QUANTUM = 0.02;
 /**
@@ -433,14 +450,14 @@ interface Bars {
   /** And at least this much room over the horizon. */
   roomTiles: number;
   /**
-   * And strictly nearer the weapon's reach than this, in quanta.
+   * And strictly more room to dodge in than this, in quanta.
    *
-   * `Infinity` — the usual case — admits everything, which is what "we are in
-   * range" should mean. Finite only while the player has drifted out of it, and
-   * then it is how far out they already are: a course that does not improve on
-   * that is not an answer to being out of the fight.
+   * `Infinity` — the usual case — admits everything, which is what "nobody is
+   * inside the bubble" should mean. Finite only while something is, and then it
+   * is how crowded the player already is: a course that does not improve on that
+   * is not an answer to being stood on.
    */
-  range: number;
+  crowding: number;
 }
 
 export class DodgeController {
@@ -477,8 +494,8 @@ export class DodgeController {
   #clearance = new Float64Array(0);
   /** The same, over the reaction window alone. See {@link Sweep.urgentClearanceTiles}. */
   #urgentClearance = new Float64Array(0);
-  /** How far past the weapon's reach each course ends up, in tiles. */
-  #outOfRange = new Float64Array(0);
+  /** How far inside a monster's keep-away distance each course ends up, in tiles. */
+  #crowding = new Float64Array(0);
   /** How far each course actually walks, in tiles. Nought for standing still. */
   #travelTiles = new Float64Array(0);
   #headings = -1;
@@ -492,40 +509,38 @@ export class DodgeController {
   #verdict: DodgeVerdict = 'clear';
 
   /**
-   * Whether the monster being fought is further off than the weapon reaches.
+   * Whether something is standing closer than the keep-away distance allows.
    *
-   * **A tiebreak on its own is not enough.** Every course that gives ground
-   * survives a little longer than every course that does not, so a planner that
-   * only ever *ranks* on this drifts out of range one safe step at a time and
-   * then has nothing to say, because nothing is shooting at somebody nobody can
-   * reach. The live report was the plain one: "I do no damage, because I am far
-   * away." Being out of the fight is a reason to plan.
+   * **A tiebreak on its own is not enough.** The room a dodge is made in is
+   * taken by the time contact damage says so, and a term that can only ever
+   * *rank* watched a monster walk onto somebody in silence — every course looked
+   * survivable, because nothing was in the air. Being stood on is a reason to
+   * plan.
    *
-   * Bounded where it is measured rather than by a rule here: `outOfRangeAt`
-   * stops counting past a couple of tiles out of range, so every course a plan
-   * can reach is equally far from a monster across the room and the term decides
-   * nothing. That is what keeps this a step back into the fight and not a chase.
+   * Read by {@link #mostAligned} as well, where it changes one thing: a player
+   * who has let go of the keys is normally asking to stay where they are, and
+   * while something is on top of them that is not a request worth honouring.
    */
-  #tooFar = false;
+  #crowded = false;
 
   /**
-   * How far out of range the place the player is standing is, in tiles.
+   * How far inside the keep-away distance the player is standing, in tiles.
    *
-   * Kept because two decisions are made against it: whether they are out of the
-   * fight at all, and — once they are — which courses count as getting back
-   * into it rather than merely moving.
+   * Kept because two decisions are made against it: whether they are crowded at
+   * all, and — once they are — which courses count as making room rather than
+   * merely moving.
    */
-  #hereOutOfRange = 0;
+  #hereCrowding = 0;
 
   /**
-   * Whether being out of range is something the player is choosing.
+   * Whether being crowded is something the player is choosing.
    *
    * True while they are steering and the course they are steering leaves them
-   * nearer the fight than standing here would — which is what walking back
-   * towards a monster looks like. Read by the release test and by
-   * {@link #choose}, and both have to agree: releasing on it while the bar in
-   * the scoring still insisted on fixing the distance would hand the wheel back
-   * on one plan and take it on the next.
+   * more room than standing here would — which is what walking a route past a
+   * monster looks like. Read by the release test and by {@link #choose}, and
+   * both have to agree: releasing on it while the bar in the scoring still
+   * insisted on making room would hand the wheel back on one plan and take it on
+   * the next.
    */
   #yielding = false;
 
@@ -590,7 +605,7 @@ export class DodgeController {
     windowMs: -Infinity,
     impactMs: -Infinity,
     roomTiles: -Infinity,
-    range: Infinity,
+    crowding: Infinity,
   };
 
   /** Drops the commitment. Called when the session or the character changes. */
@@ -674,25 +689,25 @@ export class DodgeController {
     );
 
     const onHazard = settings.avoidDamagingGround && situation.onDamagingGround;
-    // How far out of the fight the place they are standing is. Not damage, and
-    // still a reason to speak: a dodge that has quietly backed its player out of
-    // weapon range has turned the damage off.
+    // How little room the place they are standing leaves. Not damage, and still
+    // a reason to speak: the room being taken is the room a dodge needs, and by
+    // the time contact damage says so there is nowhere left to go.
     //
     // Asked about right now, because "where am I standing" is a question about
     // the present. Where a *course* leaves the player is asked about the moment
-    // they would arrive; see {@link #outOfRangeFor}.
-    this.#hereOutOfRange = world.outOfRangeAt(situation.x, situation.y, 0);
-    this.#tooFar = this.#hereOutOfRange > 0;
+    // they would arrive; see {@link #crowdingFor}.
+    this.#hereCrowding = world.crowdingAt(situation.x, situation.y, 0);
+    this.#crowded = this.#hereCrowding > 0;
     const tracked = this.#field.tracked;
     const blastCount = this.#blasts.count;
     // Shots in flight and blasts on their way down. Either is a reason to think.
     const incoming = tracked + blastCount;
 
     // The cheapest way out, and the common one: nothing can reach us, the ground
-    // is fine, we are standing in range and nobody is walking anywhere. Asked
+    // is fine, nothing is standing on us and nobody is walking anywhere. Asked
     // before any probing, because probing the map is the expensive half of a
     // plan with nothing to decide.
-    if (incoming === 0 && !onHazard && !this.#tooFar && !steering) {
+    if (incoming === 0 && !onHazard && !this.#crowded && !steering) {
       return this.#nothing('clear', 0, 0);
     }
 
@@ -703,7 +718,7 @@ export class DodgeController {
     if (
       incoming === 0 &&
       !onHazard &&
-      !this.#tooFar &&
+      !this.#crowded &&
       (this.#hazardMs[own] ?? Infinity) > HAZARD_GUARD_MS
     ) {
       return this.#nothing('clear', 0, 0);
@@ -750,15 +765,15 @@ export class DodgeController {
     const ownUnsafeAt = this.#unsafeMs[own] ?? Infinity;
     const ownHazard = this.#hazardMs[own] ?? Infinity;
 
-    // **Whether their own walking is the answer to being out of range.** The
-    // plain question, and it costs a comparison because the numbers were already
-    // computed: does the course they are steering leave them nearer the fight
-    // than standing here would? Walking back towards a monster does; walking
-    // away from one matching their speed does not, because the bodies are
-    // carried forward and the gap comes out the same. None of it applies to a
-    // player who has let go of the keys — they have chosen nothing, so there is
-    // nothing to yield to.
-    this.#yielding = steering && this.#rangeOf(own) < this.#hereRange();
+    // **Whether their own walking is the answer to being crowded.** The plain
+    // question, and it costs a comparison because the numbers were already
+    // computed: does the course they are steering leave them more room than
+    // standing here would? A route past a monster does; shuffling against one
+    // that is on top of them does not; walking away from something matching
+    // their speed does not either, because the bodies are carried forward and
+    // the gap comes out the same. None of it applies to a player who has let go
+    // of the keys — they have chosen nothing, so there is nothing to yield to.
+    this.#yielding = steering && this.#crowdingOf(own) < this.#hereCost();
 
     // **Mid-escape, and letting go now would undo it.** A walk out of a pattern
     // takes several hundred milliseconds, and it passes through moments where
@@ -794,7 +809,7 @@ export class DodgeController {
       ownUnsafeAt > releaseBar &&
       ownImpact > releaseBar &&
       ownHazard > HAZARD_GUARD_MS &&
-      (!this.#tooFar || this.#yielding) &&
+      (!this.#crowded || this.#yielding) &&
       !committed;
 
     // **The full-length ring first, and the shorter steps whenever the answer
@@ -855,6 +870,7 @@ export class DodgeController {
         unsafeAtMs: ownUnsafeAt,
         impactMs: ownImpact,
         clearanceTiles: this.#clearance[own] ?? Infinity,
+        crowded: this.#crowded,
         trackedShots: tracked,
         trackedBlasts: blastCount,
       };
@@ -867,11 +883,11 @@ export class DodgeController {
       (this.#urgent ? settings.urgentWithinMs + this.#quantumMs : settings.urgentWithinMs);
     const chosen = this.#choose(scored, reactWithinMs, this.#urgent, situation);
 
-    // Said plainly when nothing in the air was the reason to move and the
-    // fighting distance was. The choice is the same one; the log is the only
-    // place a person can tell the two apart.
+    // Said plainly when nothing in the air was the reason to move and the room
+    // being taken was. The choice is the same one; the log is the only place a
+    // person can tell the two apart.
     const verdict =
-      this.#verdict === 'guide' && this.#tooFar && ownUnsafeAt > reactWithinMs
+      this.#verdict === 'guide' && this.#crowded && ownUnsafeAt > reactWithinMs
         ? 'spacing'
         : this.#verdict;
     return this.#commit(verdict, chosen, scored, situation, tracked, blastCount);
@@ -890,9 +906,9 @@ export class DodgeController {
     return this.#longestUnhitWindow(scored) < bar;
   }
 
-  /** How far out of range they are standing, on the scale the bars use. */
-  #hereRange(): number {
-    return inQuanta(this.#hereOutOfRange, RANGE_QUANTUM_TILES);
+  /** How crowded the place they are standing is, on the scale the bars use. */
+  #hereCost(): number {
+    return inQuanta(this.#hereCrowding, CROWDING_QUANTUM_TILES);
   }
 
   // ── Candidate tables ──────────────────────────────────────────────────────
@@ -914,7 +930,7 @@ export class DodgeController {
     this.#unsafeMs = new Float64Array(slots);
     this.#clearance = new Float64Array(slots);
     this.#urgentClearance = new Float64Array(slots);
-    this.#outOfRange = new Float64Array(slots);
+    this.#crowding = new Float64Array(slots);
     this.#travelTiles = new Float64Array(slots);
 
     for (let tier = 0; tier < STEP_TIERS.length; tier += 1) {
@@ -1094,42 +1110,50 @@ export class DodgeController {
       this.#unsafeMs[c] = Math.min(this.#sweep.unsafeAtMs, hazard);
       this.#clearance[c] = this.#sweep.clearanceTiles;
       this.#urgentClearance[c] = this.#sweep.urgentClearanceTiles;
-      this.#outOfRange[c] = this.#outOfRangeFor(situation, world, c, until);
+      this.#crowding[c] = this.#crowdingFor(situation, world, c, until, speed, settings.leadMs);
     }
   }
 
   /**
-   * How far past the weapon's reach a course leaves us, in tiles. Lower is better.
+   * How little room a course leaves, in tiles. Lower is better.
    *
-   * **Where it ends, and not the worst place along it.** Reach is a radius, so a
-   * straight walk between two points inside one stays inside it — the only thing
-   * a midpoint adds is a penalty on the first half of a walk *back* into range,
-   * which is the correction this term exists to ask for. Measured at the moment
-   * the course arrives, so the monsters are where they will be rather than where
-   * the last packet left them.
+   * **One moment, halfway through the plan, and both bodies taken at it.** A
+   * monster's own velocity is only believed for part of a horizon — see
+   * `EnemyBodies` — so asking where the *player* ends up at the far edge of one
+   * compares a walk that was carried the whole way against a monster that was
+   * frozen partway, and every course long enough to outrun the freeze scored as
+   * having opened a gap it will not open. Half the horizon is inside what the
+   * velocity is worth, and it is where a short step has already arrived.
+   *
+   * **And it is where the course *is*, not the worst place it passes.** The
+   * bubble is a place to stand rather than a place never to cross: it is several
+   * times wider than the body inside it, so most of any escape *from* one is
+   * spent inside it, and scoring the way out as badly as the place left is what
+   * turns "make room" into "run". Crossing one is a moment of contact, and the
+   * file's note on why this is a preference and never a veto covers it.
    */
-  #outOfRangeFor(
+  #crowdingFor(
     situation: DodgeSituation,
     world: DodgeWorld,
     candidate: number,
     untilMs: number,
+    tilesPerMs: number,
+    leadMs: number,
   ): number {
     const dirX = this.#dirX[candidate] ?? 0;
     const dirY = this.#dirY[candidate] ?? 0;
     const travelTiles = this.#travelTiles[candidate] ?? 0;
     if ((dirX === 0 && dirY === 0) || travelTiles <= 0) {
-      // Standing still is not standing still relative to something walking away
-      // from you, so this asks about the far moment too and takes the worse.
+      // Standing still is not standing still relative to something walking
+      // towards you, so this asks about the far moment too and takes the worse.
       return Math.max(
-        world.outOfRangeAt(situation.x, situation.y, 0),
-        world.outOfRangeAt(situation.x, situation.y, untilMs),
+        world.crowdingAt(situation.x, situation.y, 0),
+        world.crowdingAt(situation.x, situation.y, untilMs),
       );
     }
-    return world.outOfRangeAt(
-      situation.x + dirX * travelTiles,
-      situation.y + dirY * travelTiles,
-      untilMs,
-    );
+    const atMs = untilMs / 2;
+    const walked = Math.min(travelTiles, tilesPerMs * Math.max(0, atMs - leadMs));
+    return world.crowdingAt(situation.x + dirX * walked, situation.y + dirY * walked, atMs);
   }
 
   // ── Choosing ──────────────────────────────────────────────────────────────
@@ -1169,8 +1193,8 @@ export class DodgeController {
         Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - DOOMED_TRADE_MS;
       this.#bars.roomTiles = (this.#clearance[best] ?? -Infinity) - DOOMED_TRADE_TILES;
       // Nothing survives the window, so where a course leaves us has stopped
-      // being a question.
-      this.#bars.range = Infinity;
+      // being a question — including whether it leaves the bubble.
+      this.#bars.crowding = Infinity;
       return this.#mostAligned(scored, situation, false);
     }
     if (urgent) {
@@ -1183,9 +1207,9 @@ export class DodgeController {
       );
       this.#bars.impactMs = reactWithinMs;
       this.#bars.roomTiles = -Infinity;
-      // Something lands in a moment. Being out of range is the lesser problem
-      // and insisting on it here would throw away courses that survive.
-      this.#bars.range = Infinity;
+      // Something lands in a moment. Being crowded is the lesser problem and
+      // insisting on the bubble here would throw away courses that survive.
+      this.#bars.crowding = Infinity;
       return this.#mostAligned(scored, situation, true);
     }
     if (this.#caught) {
@@ -1201,7 +1225,7 @@ export class DodgeController {
       // in {@link #mostAligned} would hand the answer straight back to the
       // player's own keys, and their keys are what walked into the wall. What is
       // still allowed to argue below it is where the course leaves us — an
-      // escape that ends out of weapon range is one to prefer second, not one to
+      // escape that ends up under a monster is one to prefer second, not one to
       // refuse — and, through it, crossing the fire rather than running with it.
       const best = this.#bestSurvival(scored);
       this.#verdict = 'outrun';
@@ -1209,7 +1233,7 @@ export class DodgeController {
       this.#bars.impactMs =
         Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - OUTRUN_TRADE_MS;
       this.#bars.roomTiles = -Infinity;
-      this.#bars.range = Infinity;
+      this.#bars.crowding = Infinity;
       return this.#mostAligned(scored, situation, true);
     }
     // There is time. Take the course closest to where they were going out of
@@ -1227,16 +1251,16 @@ export class DodgeController {
     this.#bars.windowMs = reactWithinMs;
     this.#bars.impactMs = reactWithinMs;
     this.#bars.roomTiles = -Infinity;
-    // **And when the player has drifted out of the fight, a course has to be
-    // fixing it.** Every term that measures where a course leaves us sits below
-    // the one that prefers the heading they are pressing — so their own course
-    // won outright and the planner watched them drift out of range without a
-    // word. A bar rather than a reordering, because that is what the other three
-    // are: survival still comes first, and among the courses that survive *and*
-    // step back into range, theirs is still preferred. Lifted entirely while
-    // their own walking is what is fixing it: that is a route, not a mistake to
+    // **And when something has walked onto the player, a course has to be
+    // making room.** Every term that measures where a course leaves us sits
+    // below the one that prefers the heading they are pressing — so their own
+    // course won outright and the planner watched a monster stand on them
+    // without a word. A bar rather than a reordering, because that is what the
+    // other three are: survival still comes first, and among the courses that
+    // survive *and* make room, theirs is still preferred. Lifted entirely while
+    // their own walking is what is making it: that is a route, not a mistake to
     // correct.
-    this.#bars.range = this.#tooFar && !this.#yielding ? this.#hereRange() : Infinity;
+    this.#bars.crowding = this.#crowded && !this.#yielding ? this.#hereCost() : Infinity;
     return this.#mostAligned(scored, situation, true);
   }
 
@@ -1289,7 +1313,7 @@ export class DodgeController {
     let bestLane = this.#lane(HOLD);
     let bestUrgentRoom = this.#urgentRoom(HOLD);
     let bestRoom = this.#room(HOLD);
-    let bestRange = this.#rangeOf(HOLD);
+    let bestCrowding = this.#crowdingOf(HOLD);
 
     for (let c = 1; c < scored; c += 1) {
       const impact = this.#survival(c);
@@ -1297,21 +1321,21 @@ export class DodgeController {
       const lane = this.#lane(c);
       const urgentRoom = this.#urgentRoom(c);
       const room = this.#room(c);
-      const range = this.#rangeOf(c);
+      const crowding = this.#crowdingOf(c);
       const better =
         impact > bestImpact ||
         lane > bestLane ||
         (lane === bestLane &&
           (urgentRoom > bestUrgentRoom ||
             (urgentRoom === bestUrgentRoom &&
-              (room > bestRoom || (room === bestRoom && range < bestRange)))));
+              (room > bestRoom || (room === bestRoom && crowding < bestCrowding)))));
       if (!better) continue;
       best = c;
       bestImpact = impact;
       bestLane = lane;
       bestUrgentRoom = urgentRoom;
       bestRoom = room;
-      bestRange = range;
+      bestCrowding = crowding;
     }
     return best;
   }
@@ -1360,9 +1384,9 @@ export class DodgeController {
     return inQuanta(this.#urgentClearance[candidate] ?? -Infinity, ROOM_QUANTUM_TILES);
   }
 
-  /** How far out of weapon range a course ends up, in whole quanta. Lower is better. */
-  #rangeOf(candidate: number): number {
-    return inQuanta(this.#outOfRange[candidate] ?? 0, RANGE_QUANTUM_TILES);
+  /** How little room a course leaves, in whole quanta. Lower is better. */
+  #crowdingOf(candidate: number): number {
+    return inQuanta(this.#crowding[candidate] ?? 0, CROWDING_QUANTUM_TILES);
   }
 
   /**
@@ -1447,11 +1471,12 @@ export class DodgeController {
    * measurement of room. **Across the fire** rather than along its line: a
    * course that runs with the shots and a course that runs into them are both
    * moving down the axis the pattern has no gaps along, and the way between two
-   * shots is square to it. **In range** rather than out of it, which is the same
-   * preference stated about the monsters rather than about their fire, and is
-   * what remains when the shots do not agree on a direction at all. And then
-   * **the shortest step that works**, which is the plain form of the whole
-   * thing: a window is a step away, and the far side of the room is not.
+   * shots is square to it. **Room to dodge in**, which is a distance from a
+   * body rather than from its fire — the one thing that has to be kept clear
+   * whatever the shots are doing, and what remains when they do not agree on a
+   * direction at all. And then **the shortest step that works**, which is the
+   * plain form of the whole thing: a window is a step away, and the far side of
+   * the room is not.
    *
    * What a course has to clear before it is considered at all is in
    * {@link #bars}, which the caller fills. **They are bars and not terms on
@@ -1474,7 +1499,7 @@ export class DodgeController {
     let bestDot = -Infinity;
     let bestSafety = -Infinity;
     let bestAcross = -Infinity;
-    let bestRange = Infinity;
+    let bestCrowding = Infinity;
     let bestTravel = Infinity;
     let bestImpact = -Infinity;
     let bestLane = -Infinity;
@@ -1485,7 +1510,7 @@ export class DodgeController {
       if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
       if ((this.#impactMs[c] ?? 0) <= bars.impactMs) continue;
       if ((this.#clearance[c] ?? -Infinity) < bars.roomTiles) continue;
-      if (this.#rangeOf(c) >= bars.range) continue;
+      if (this.#crowdingOf(c) >= bars.crowding) continue;
       const dirX = this.#dirX[c] ?? 0;
       const dirY = this.#dirY[c] ?? 0;
       const standing = dirX === 0 && dirY === 0;
@@ -1498,9 +1523,9 @@ export class DodgeController {
       // the first candidate to clear the bar is taken whatever it scores.
       //
       // **Unless standing is not a request worth honouring**, which is two
-      // cases. One: they have drifted out of range of everything, and staying
-      // there is exactly what the terms below exist to leave. Two — and this is
-      // what looked like the dodge shuffling on the spot instead of getting out
+      // cases. One: something has walked on top of them, and staying there is
+      // exactly what the terms below exist to leave. Two — and this is what
+      // looked like the dodge shuffling on the spot instead of getting out
       // — nothing clears the window at all. Holding still then outranked *every*
       // moving course before their room was so much as looked at, because it is
       // index nought and wins the first key outright; so under saturated fire
@@ -1510,7 +1535,7 @@ export class DodgeController {
       const dot = standing
         ? steering
           ? -Infinity
-          : this.#tooFar || this.#caught || !keepPosition
+          : this.#crowded || this.#caught || !keepPosition
             ? 0
             : 1
         : steering
@@ -1541,7 +1566,7 @@ export class DodgeController {
       const across = standing
         ? 0
         : inQuanta((1 - 2 * Math.abs(along) - Math.max(0, along)) * coherence, ACROSS_QUANTUM);
-      const range = keepPosition ? this.#rangeOf(c) : 0;
+      const crowding = keepPosition ? this.#crowdingOf(c) : 0;
       const travel = keepPosition ? this.#travelOf(c) : 0;
       const impact = this.#survival(c);
       const lane = this.#lane(c);
@@ -1557,8 +1582,8 @@ export class DodgeController {
         (safety === bestSafety &&
           (across > bestAcross ||
             (across === bestAcross &&
-              (range < bestRange ||
-                (range === bestRange &&
+              (crowding < bestCrowding ||
+                (crowding === bestCrowding &&
                   (travel < bestTravel ||
                     (travel === bestTravel &&
                       (impact > bestImpact ||
@@ -1572,7 +1597,7 @@ export class DodgeController {
       bestDot = dot;
       bestSafety = safety;
       bestAcross = across;
-      bestRange = range;
+      bestCrowding = crowding;
       bestTravel = travel;
       bestImpact = impact;
       bestLane = lane;
@@ -1634,6 +1659,7 @@ export class DodgeController {
       unsafeAtMs: this.#unsafeMs[chosen] ?? Infinity,
       impactMs: this.#impactMs[chosen] ?? Infinity,
       clearanceTiles: this.#clearance[chosen] ?? -Infinity,
+      crowded: this.#crowded,
       trackedShots: tracked,
       trackedBlasts: blasts,
     };
@@ -1695,6 +1721,7 @@ export class DodgeController {
       unsafeAtMs: Infinity,
       impactMs: Infinity,
       clearanceTiles: Infinity,
+      crowded: false,
       trackedShots: tracked,
       trackedBlasts: blasts,
     };

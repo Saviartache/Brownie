@@ -23,11 +23,12 @@
  * front of them: the advanced sliders then show what is actually in use, and
  * moving one is what turns the label into Custom. See `dodgePlugin`.
  *
- * **What a preset is about is the shots.** How close a bullet gets before the
- * planner moves, and how much room it insists on when it looks for a way past
- * one, are what a person feels as "twitchy" or "calm" — they change the answer
- * fifty times a second. Where the monsters are standing is not a style, so
- * nothing in the spacing group is a preset's business.
+ * **What a preset is mostly about is the shots, not the monsters.** How close a
+ * bullet gets before the planner moves, and how much room it insists on when it
+ * looks for a way past one, are what a person feels as "twitchy" or "calm" —
+ * they change the answer fifty times a second. How near a monster may stand is a
+ * safety floor rather than a style: nothing should be allowed inside two tiles
+ * whatever the preset says, and the presets differ above that by a little.
  */
 
 /** The numbers a preset assigns. Every one is also a setting of its own. */
@@ -52,6 +53,8 @@ export interface DodgeTuning {
   readonly driftTilesPerSecond: number;
   /** How much room counts as comfortable. */
   readonly safeClearanceTiles: number;
+  /** How much space to keep between the character and a monster. */
+  readonly keepAwayTiles: number;
 }
 
 export const DodgePresetId = {
@@ -80,6 +83,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.05,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.05,
+    keepAwayTiles: 2,
   },
   balanced: {
     horizonMs: 1000,
@@ -92,6 +96,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.1,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.08,
+    keepAwayTiles: 2.5,
   },
   cautious: {
     horizonMs: 1200,
@@ -104,6 +109,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.2,
     driftTilesPerSecond: 0.25,
     safeClearanceTiles: 0.14,
+    keepAwayTiles: 3,
   },
 };
 

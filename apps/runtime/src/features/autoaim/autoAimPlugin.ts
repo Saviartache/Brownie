@@ -107,21 +107,6 @@ export interface AimOutput {
    * renewed expires, and the player's own aim is theirs again.
    */
   aimAt(x: number, y: number, holdMs: number): void;
-  /**
-   * Which enemy the shots are being pointed at, or nothing while none is.
-   *
-   * **Not for the module, and the only thing here that is not.** It goes to the
-   * dodge, which keeps the player inside their weapon's reach — and "reach of
-   * *what*" has one right answer and it is this one. Measured against the
-   * nearest body instead, the band held the player in range of whatever
-   * happened to be closest while the thing they were actually shooting walked
-   * away. An object id rather than a point, so the reader gets the target's live
-   * position and its velocity rather than a lead point from a moment ago.
-   *
-   * Stated on every decision, including the ones that decide on nothing: an aim
-   * that has stopped is exactly as much news as one that has started.
-   */
-  lockedOn(objectId: number | undefined): void;
 }
 
 export interface AutoAimOptions {
@@ -284,15 +269,8 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         tracker.prune(now);
       });
 
-      /**
-       * Points the shots, and says what at.
-       *
-       * The return is what {@link AimOutput.lockedOn} is told, so every way out
-       * of this function states one — including the ways out that decided on
-       * nothing, because "no longer aiming at anything" is what the dodge needs
-       * to hear to stop holding a distance to a monster that is dead.
-       */
-      const aimAndChoose = (session: SessionView): number | undefined => {
+      /** Points the shots at whatever is worth shooting, or at nothing. */
+      const aim = (session: SessionView): void => {
         // Before every early return below it: whether the module should be
         // measuring the cursor depends on the setting and on nothing else, and
         // a claim that lapsed because the player put a weapon away would come
@@ -300,7 +278,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         claimCursor(priority.get() === TargetPriority.ClosestToCursor, Date.now());
 
         const self = session.self;
-        if (!self.alive) return undefined;
+        if (!self.alive) return;
 
         const world = session.world;
         const now = world.gameTimeMs;
@@ -310,7 +288,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         // say where a shot can reach and where to lead it to. An unfamiliar
         // weapon makes the feature go quiet rather than lead by a guess.
         const projectile = self.weaponType < 0 ? undefined : options.weapon(self.weaponType);
-        if (projectile === undefined) return undefined;
+        if (projectile === undefined) return;
 
         // **The weapon's own reach, and there is no setting.** How far to aim is
         // not a preference: a target further off than the shot travels is one
@@ -378,16 +356,11 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
           cursorRadiusTiles: cursorRadius.get(),
           accept: (enemy) => isShootable(enemy, rules) && aimPointFor(enemy) !== undefined,
         });
-        if (target === undefined) return undefined;
+        if (target === undefined) return;
 
         const point = aimPointFor(target);
-        if (point === undefined) return undefined;
+        if (point === undefined) return;
         options.output.aimAt(point.x, point.y, holdMs.get());
-        return target.objectId;
-      };
-
-      const aim = (session: SessionView): void => {
-        options.output.lockedOn(aimAndChoose(session));
       };
 
       // **Deciding is not packet work, so it does not wait for a packet.** The

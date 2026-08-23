@@ -5,7 +5,7 @@
  * genuinely turns on all twenty-odd of its numbers and every one of them has a
  * reason, but a feature that asks twenty questions before it will switch on is a
  * feature nobody switches on. A preset answers the one question a person
- * actually has — how hard should it try — by writing the ten numbers that
+ * actually has — how hard should it try — by writing the eleven numbers that
  * trade caution against interference; the rest belong to the machine and the
  * connection and are left alone. Moving one by hand is what turns the label into
  * Custom, so it never claims a preset the numbers are not.
@@ -28,19 +28,7 @@ import {
   type DodgeTuning,
 } from './dodgePresets.js';
 
-/**
- * What a resolved weapon range is allowed to come out as, in tiles.
- *
- * The reference implementation's bounds, and its reason: the figure comes from
- * data somebody else maintains, and a weapon whose numbers say it reaches sixty
- * tiles would park the planner on the other side of the map. Melee weapons sit
- * at the bottom of it — a sword is three and a half tiles — and nothing in the
- * game reaches the top.
- */
-export const MIN_RANGE_TILES = 1;
-export const MAX_RANGE_TILES = 16;
-
-/** The ten a preset owns, as handles. See {@link DodgeTuning}. */
+/** The eleven a preset owns, as handles. See {@link DodgeTuning}. */
 export type DodgeTuningHandles = {
   readonly [K in keyof DodgeTuning]: SettingHandle<number>;
 };
@@ -62,9 +50,6 @@ export interface DodgeControls {
   readonly avoidBlasts: SettingHandle<boolean>;
   readonly spacing: {
     readonly mindMonsters: SettingHandle<boolean>;
-    readonly stayInRange: SettingHandle<boolean>;
-    readonly rangePercent: SettingHandle<number>;
-    readonly fallbackRangeTiles: SettingHandle<number>;
   };
   readonly driving: {
     readonly respectIntent: SettingHandle<boolean>;
@@ -132,7 +117,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 
   // ── What the preset writes ──────────────────────────────────────────────
   //
-  // The ten below are a preset's whole assignment: how soon and how near
+  // The eleven below are a preset's whole assignment: how soon and how near
   // trouble has to be, how much margin to leave around it, and how hard to
   // think about the answer. Moving any of them by hand is what turns the label
   // above into Custom — see `applyPreset` and `onTuningChanged`.
@@ -269,6 +254,29 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 0.5,
     step: 0.01,
   });
+  // **Room to dodge in, and the reason it is a distance rather than a hit
+  // test.** A monster pressed against the player has already taken the space
+  // every escape needs, so by the time contact damage says so there is nowhere
+  // left to go. Raised on its own to the distance at which the bodies touch, so
+  // nought here still means "not inside it".
+  //
+  // Stated from the middle of an ordinary, one-tile monster; what actually holds
+  // is the gap it works out to, so a boss four tiles across is kept four times
+  // as far off its centre and exactly as far off its edge. See
+  // `EnemyBodies.nearEdgeOf`.
+  //
+  // Owned by the preset, unlike the switch in the spacing group: how much room
+  // to insist on is exactly the trade the preset is about.
+  const keepAwayTiles = settings.range('keepAwayTiles', {
+    label: 'Keep monsters at least (tiles)',
+    group: 'Spacing',
+    advanced: true,
+    default: 2.5,
+    min: 0,
+    max: 6,
+    step: 0.25,
+  });
+
   // ── What is yours whatever the preset says ──────────────────────────────
   //
   // Latency, the character's own speed, how far off a wall to plan, and every
@@ -343,48 +351,13 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     default: true,
   });
   // **The master switch for the planner knowing where the monsters are.** Off,
-  // it is a pure bullet-dodger: it will back out of weapon range answering a
-  // wave it had room to cross, and have nothing left to shoot at. Everything in
-  // this group is off with it.
+  // it is a pure bullet-dodger: it will thread a perfect gap and finish standing
+  // inside a boss.
   const mindMonsters = settings.boolean('avoidEnemyBodies', {
     label: 'Mind where the monsters are',
     group: 'Spacing',
     advanced: true,
     default: true,
-  });
-  // **The far edge, and the point of the whole group.** A dodge is not the
-  // objective; staying alive while shooting is. Every course that gives ground
-  // survives a little longer than every course that does not, so a planner with
-  // nothing to say about range walks itself out of the fight one safe step at a
-  // time — and, having drifted, has nothing to dodge and no reason to come back.
-  const stayInRange = settings.boolean('stayInRange', {
-    label: "Stay within your weapon's range",
-    group: 'Spacing',
-    advanced: true,
-    default: true,
-  });
-  // Nine tenths of it, which is the reference implementation's figure and its
-  // reasoning: parked exactly at maximum range, a shot that leads a moving
-  // target expires before it arrives.
-  const rangePercent = settings.range('rangePercent', {
-    label: 'Keep within (% of weapon range)',
-    group: 'Spacing',
-    advanced: true,
-    default: 90,
-    min: 50,
-    max: 100,
-    step: 5,
-  });
-  // What stands in when the weapon is unknown — no data files, or an item the
-  // catalog does not describe. The reference implementation's default.
-  const fallbackRangeTiles = settings.range('fallbackRangeTiles', {
-    label: 'Assume a range of (tiles)',
-    group: 'Spacing',
-    advanced: true,
-    default: 5,
-    min: MIN_RANGE_TILES,
-    max: MAX_RANGE_TILES,
-    step: 0.5,
   });
 
   const respectIntent = settings.boolean('respectIntent', {
@@ -438,6 +411,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     padTiles,
     driftTilesPerSecond,
     safeClearanceTiles,
+    keepAwayTiles,
   };
 
   bindPreset(context, preset, tuning);
@@ -449,7 +423,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     walls: { avoid: avoidWalls, clearanceTiles: wallClearanceTiles },
     hazards: { avoid: avoidDamagingGround, clearanceTiles: hazardClearanceTiles },
     avoidBlasts,
-    spacing: { mindMonsters, stayInRange, rangePercent, fallbackRangeTiles },
+    spacing: { mindMonsters },
     driving: { respectIntent, interceptControl, speedPercent, holdMs, cursorWalk },
   };
 }
@@ -457,9 +431,9 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 /**
  * Keeps the label and the numbers telling the same story.
  *
- * Choosing a preset writes its ten; moving any of the ten by hand makes the
- * label Custom. The guard is what stops the first of the ten writes flipping
- * the label and the remaining nine landing on a preset nobody chose.
+ * Choosing a preset writes its eleven; moving any of the eleven by hand makes
+ * the label Custom. The guard is what stops the first of the eleven writes
+ * flipping the label and the remaining ten landing on a preset nobody chose.
  */
 function bindPreset(
   context: PluginContext,
@@ -477,6 +451,7 @@ function bindPreset(
     padTiles: tuning.padTiles.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
+    keepAwayTiles: tuning.keepAwayTiles.get(),
   });
 
   let applying = false;

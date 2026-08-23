@@ -22,7 +22,6 @@ import {
   ENEMY_CONTACT_HALF_TILES,
   EnemyBodies,
   MAX_BODY_LOOKAHEAD_MS,
-  OUT_OF_RANGE_CAP_TILES,
   type BodySighting,
 } from '../src/features/dodge/EnemyBodies.js';
 import { Blasts, type BlastView } from '../src/features/dodge/Blasts.js';
@@ -118,19 +117,19 @@ function sized(tiles: number): (enemy: EntityView) => BodySighting {
   return (enemy) => ({ ...ANY_BODY(enemy), halfTiles: tiles / 2 });
 }
 
-/** Nothing in the way, nothing that hurts, nobody to stay in range of. */
+/** Nothing in the way, nothing that hurts, nobody to bump into. */
 const OPEN_GROUND: DodgeWorld = {
   canStand: () => true,
   isDamaging: () => false,
-  outOfRangeAt: () => 0,
+  crowdingAt: () => 0,
 };
 
-/** Open ground with monsters in it, judged against one weapon reach. */
-function keepingRange(bodies: EnemyBodies, stayWithinTiles: number): DodgeWorld {
+/** Open ground with monsters in it, judged against one keep-away distance. */
+function standingOff(bodies: EnemyBodies, keepAwayTiles: number): DodgeWorld {
   return {
     canStand: () => true,
     isDamaging: () => false,
-    outOfRangeAt: (x, y, aheadMs) => bodies.outOfRangeAt(x, y, stayWithinTiles, aheadMs),
+    crowdingAt: (x, y, aheadMs) => bodies.crowdingAt(x, y, keepAwayTiles, aheadMs),
   };
 }
 
@@ -1223,7 +1222,7 @@ describe('where it refuses to go', () => {
   const lavaEastOf = (edge: number): DodgeWorld => ({
     canStand: () => true,
     isDamaging: (x) => x > edge,
-    outOfRangeAt: () => 0,
+    crowdingAt: () => 0,
   });
 
   it('steers the player around ground that is about to hurt them', () => {
@@ -1291,7 +1290,7 @@ describe('where it refuses to go', () => {
       // Everything north of the player is solid.
       canStand: (_x, y) => y <= 10.2,
       isDamaging: () => false,
-      outOfRangeAt: () => 0,
+      crowdingAt: () => 0,
     };
     const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
 
@@ -1356,51 +1355,38 @@ describe('the shot paths that get drawn', () => {
   });
 });
 
-describe('the distance to fight from', () => {
-  const REACH = 7;
+describe('the room a place leaves to dodge in', () => {
+  const KEEP_AWAY = 2;
 
   it('has no opinion when there is nobody to have one about', () => {
-    expect(new EnemyBodies().outOfRangeAt(0, 0, REACH)).toBe(0);
+    expect(new EnemyBodies().crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
   });
 
-  it('is content anywhere inside the reach', () => {
+  it('is content anywhere with room to spare', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBe(0);
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
   });
 
-  // **No bubble, and that is the point of it.** Keeping a set distance from
-  // whatever is shooting reads as running away from the shots, because the room
-  // it insists on is taken by walking back. Standing on top of a monster is
-  // somewhere to fight from as far as this is concerned.
-  it('has nothing to say about standing on top of something', () => {
+  it('says how far inside the distance a place is', () => {
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 0.1, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBe(0);
+    bodies.collect([{ x: 1.5, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBeCloseTo(0.5, 6);
   });
 
-  it('says how far past weapon range a place is', () => {
+  // The bodies touching is a floor under whatever the setting says, so nought
+  // still means "not standing inside it".
+  it('keeps the contact distance even when the setting is nought', () => {
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 8, y: 0 } as EntityView], 0, 0, 12, ANY_BODY);
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBeCloseTo(1, 6);
+    bodies.collect([{ x: 0.4, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
+    expect(bodies.crowdingAt(0, 0, 0)).toBeCloseTo(
+      ENEMY_CONTACT_HALF_TILES + PLAYER_HALF_TILES - 0.4,
+      6,
+    );
   });
 
-  it('has no opinion at all while range is not being kept', () => {
-    const bodies = new EnemyBodies();
-    bodies.collect([{ x: 20, y: 0 } as EntityView], 0, 0, 30, ANY_BODY);
-    expect(bodies.outOfRangeAt(0, 0, Infinity)).toBe(0);
-  });
-
-  // Past the cap it stops being a preference and would be a chase. Two places
-  // both well out of range are the same answer, so nothing pulls between them.
-  it('stops caring once out of range is simply far away', () => {
-    const bodies = new EnemyBodies();
-    bodies.collect([{ x: 20, y: 0 } as EntityView], 0, 0, 30, ANY_BODY);
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBe(OUT_OF_RANGE_CAP_TILES);
-    expect(bodies.outOfRangeAt(1, 0, REACH)).toBe(OUT_OF_RANGE_CAP_TILES);
-  });
-
-  it('judges by the nearest body, whoever that is', () => {
+  // Being crowded by the second-nearest of two is being crowded.
+  it('takes the worst offender, whoever that is', () => {
     const bodies = new EnemyBodies();
     bodies.collect(
       [{ x: 9, y: 0 } as EntityView, { x: 1, y: 0 } as EntityView],
@@ -1409,7 +1395,7 @@ describe('the distance to fight from', () => {
       12,
       ANY_BODY,
     );
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBe(0);
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBeCloseTo(1, 6);
   });
 
   it('forgets everybody too far to matter', () => {
@@ -1420,151 +1406,115 @@ describe('the distance to fight from', () => {
 
   // **Better than a quarter of what the catalog marks as an enemy is scenery.**
   // A wall in this game is an object with hit points and the enemy flag, and
-  // spawners, emitters and room controllers all answer to it — so the reach was
-  // satisfied by a decoration while the monster stood well outside it.
+  // spawners, emitters and room controllers all answer to it — so a three-tile
+  // no-go circle went round every decoration in the room.
   it('does not let the scenery answer for the monsters', () => {
     const bodies = new EnemyBodies();
     const pillar = { objectId: 1, objectType: 10, x: 0.5, y: 0 } as EntityView;
-    const monster = { objectId: 2, objectType: 20, x: 9, y: 0 } as EntityView;
+    const monster = { objectId: 2, objectType: 20, x: 5, y: 0 } as EntityView;
 
     bodies.collect([pillar, monster], 0, 0, 12, (enemy) =>
       enemy.objectType === 10 ? undefined : ANY_BODY(enemy),
     );
 
     expect(bodies.count).toBe(1);
-    // The monster is two tiles past the reach, and the pillar under the
-    // player's feet does not answer for it.
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBeCloseTo(2, 6);
+    // Content: the monster five tiles off leaves room, and the pillar half a
+    // tile away is not a monster.
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
   });
 
-  // A monster walking out of reach and one walking into it look identical
-  // frozen, and a place judged against the last packet is judged against a
-  // fight that has moved on.
+  // **The distance means nothing against something that follows.** Every course
+  // that walks away scores as making room while the monsters are frozen where
+  // they were last seen, which is how a melee minion matching the player's
+  // speed was answered with "you are already dealing with it".
   it('asks where a body will be, not only where it was', () => {
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(6, 0));
+    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
 
-    expect(bodies.outOfRangeAt(0, 0, REACH)).toBe(0);
-    expect(bodies.outOfRangeAt(0, 0, REACH, 600)).toBeCloseTo(1.6, 6);
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY, 600)).toBeCloseTo(0.6, 6);
   });
 
-  // **"Stay within your weapon's range" is a distance to something.** Measured
-  // to the nearest body it kept the player in reach of whatever wandered
-  // closest — a minion, a summon — while the thing they were actually shooting
-  // walked away and the damage stopped. What they are shooting is a question
-  // only auto-aim can answer, and it answers it.
-  it('measures the reach to what is being shot at, not to whatever is nearest', () => {
-    const minion = { objectId: 1, x: 2, y: 0 } as EntityView;
-    const boss = { objectId: 2, x: 9, y: 0 } as EntityView;
+  // **The live report: "they walk right up to me and I die."** The setting that
+  // keeps an ordinary monster at arm's length was measured from its middle, so
+  // against a boss four tiles across it left the player standing inside the
+  // body. The gap the setting asks for is what has to hold, whatever is
+  // standing there.
+  it('keeps the same gap from a big body as from a small one', () => {
+    const gap = KEEP_AWAY - ENEMY_CONTACT_HALF_TILES;
 
-    // With nobody named, the nearest body is what the reach is about, and the
-    // player is comfortably inside range of it.
-    const nearest = new EnemyBodies();
-    nearest.collect([minion, boss], 0, 0, 20, ANY_BODY);
-    expect(nearest.outOfRangeAt(0, 0, REACH)).toBe(0);
+    const ordinary = new EnemyBodies();
+    ordinary.collect([{ x: KEEP_AWAY, y: 0 } as EntityView], 0, 0, 12, ANY_BODY);
+    expect(ordinary.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
 
-    // Named, the boss two tiles past the weapon's reach is what counts.
-    const aimed = new EnemyBodies();
-    aimed.collect([minion, boss], 0, 0, 20, ANY_BODY, 2);
-    expect(aimed.outOfRangeAt(0, 0, REACH)).toBeCloseTo(2, 6);
+    // Four tiles across, so its edge sits where the ordinary one's did only if
+    // the distance moved out with it.
+    const boss = new EnemyBodies();
+    boss.collect([{ x: 2 + gap, y: 0 } as EntityView], 0, 0, 12, sized(4));
+    expect(boss.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
+    // And half a tile nearer is half a tile inside it.
+    expect(boss.crowdingAt(0.5, 0, KEEP_AWAY)).toBeCloseTo(0.5, 6);
   });
 
   // A velocity carried a whole second is a claim about a decision the monster
   // has not made yet.
   it('stops believing a velocity long before the horizon does', () => {
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(6, 0));
+    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
 
-    expect(bodies.outOfRangeAt(0, 0, REACH, 5000)).toBe(
-      bodies.outOfRangeAt(0, 0, REACH, MAX_BODY_LOOKAHEAD_MS),
+    expect(bodies.crowdingAt(0, 0, KEEP_AWAY, 5000)).toBe(
+      bodies.crowdingAt(0, 0, KEEP_AWAY, MAX_BODY_LOOKAHEAD_MS),
     );
   });
 });
 
-describe('keeping the fight', () => {
-  const REACH = 7;
+describe('room to dodge in', () => {
+  const KEEP_AWAY = 2.5;
 
-  // **Nothing is kept away from any more, and this is what that means.** A
-  // monster standing on the player is not a reason to walk: the room it would
-  // take is taken by backing off, which is the one direction a wave of fire is
-  // never crossed by.
-  it('says nothing about a monster standing on top of the player', () => {
+  // **The live report: "they just walk up and kill me."** By the time contact
+  // damage says a monster is on top of you, the room every sidestep is made in
+  // has already been taken.
+  it('makes room when something walks onto the player', () => {
     const controller = new DodgeController();
     const bodies = new EnemyBodies();
     // A body a tile north, with nothing in the air at all.
     bodies.collect([{ x: 10, y: 11 } as EntityView], 10, 10, 12, ANY_BODY);
 
-    const plan = controller.plan(situation(), SETTINGS, keepingRange(bodies, REACH), []);
+    const plan = controller.plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
-    expect(plan.verdict).toBe('clear');
-    expect(plan.steer).toBe(false);
+    expect(plan.verdict).toBe('spacing');
+    expect(plan.steer).toBe(true);
+    expect(plan.crowded).toBe(true);
+    // Any course that leaves the bubble is as good as any other — it is a
+    // distance, not a gradient — so what is asserted is that it does not walk
+    // further in.
+    expect(plan.dirY).toBeLessThanOrEqual(0);
+    // And a step out of it, not a sprint across the room.
+    expect(plan.stepTiles).toBeLessThan(3);
   });
 
-  it('stands still anywhere inside the reach', () => {
+  it('stands still once the room is made', () => {
     const controller = new DodgeController();
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 10, y: 14 } as EntityView], 10, 10, 12, ANY_BODY);
 
-    const plan = controller.plan(situation(), SETTINGS, keepingRange(bodies, REACH), []);
+    const plan = controller.plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
     expect(plan.verdict).toBe('clear');
     expect(plan.steer).toBe(false);
   });
 
-  // The whole point of the reach. Both ways out of this shot are safe; the one
-  // that stays in range is the one that keeps doing damage.
-  it('dodges across the fire rather than out of weapon range', () => {
+  // The player asked to be there. A knight walking into a boss is not a mistake
+  // to correct, and a dodge that argues about it is one they will switch off.
+  it('does not push back against a player walking in', () => {
     const controller = new DodgeController();
     const bodies = new EnemyBodies();
-    // The shooter due south, at the edge of what the weapon reaches.
-    bodies.collect([{ x: 10, y: 3.5 } as EntityView], 10, 10, 12, ANY_BODY);
-    // Its shot coming straight up at the player.
-    const shot = straightShot({ x: 10, y: 3.5 }, Math.PI / 2, 9, 0, 1400);
-
-    const plan = controller.plan(
-      situation({ gameTimeMs: 400 }),
-      SETTINGS,
-      keepingRange(bodies, REACH),
-      [shot],
-    );
-
-    expect(plan.steer).toBe(true);
-    // Sideways or forwards, but not straight back up the shot's own line.
-    expect(plan.dirY).toBeLessThan(0.5);
-  });
-
-  // **The live report: "I do no damage, because I am far away."** Preferring the
-  // course that keeps the range is not enough on its own — every course that
-  // gives ground survives fractionally longer, so the drift outwards happens a
-  // safe step at a time and there was nothing that ever walked it back.
-  it('steps back into weapon range once the shooting stops', () => {
-    const controller = new DodgeController();
-    const bodies = new EnemyBodies();
-    // A tile past what the weapon reaches, and nothing in the air at all.
-    bodies.collect([{ x: 10, y: 18 } as EntityView], 10, 10, 12, ANY_BODY);
-
-    const plan = controller.plan(situation(), SETTINGS, keepingRange(bodies, REACH), []);
-
-    expect(plan.verdict).toBe('spacing');
-    expect(plan.steer).toBe(true);
-    expect(plan.dirY).toBeGreaterThan(0);
-    // A step back in, and no more than the correction needs: the reach is a
-    // tile away and a second of walking is six.
-    expect(plan.stepTiles).toBeLessThan(2);
-  });
-
-  // A player already walking back towards the fight is fixing it themselves,
-  // and a planner that overrules them is arguing about the direction they
-  // already chose.
-  it('leaves a player alone who is walking back into range', () => {
-    const controller = new DodgeController();
-    const bodies = new EnemyBodies();
-    bodies.collect([{ x: 10, y: 18 } as EntityView], 10, 10, 12, ANY_BODY);
+    bodies.collect([{ x: 10, y: 11 } as EntityView], 10, 10, 12, ANY_BODY);
 
     const plan = controller.plan(
       situation({ intentX: 0, intentY: 1 }),
       SETTINGS,
-      keepingRange(bodies, REACH),
+      standingOff(bodies, KEEP_AWAY),
       [],
     );
 
@@ -1572,17 +1522,91 @@ describe('keeping the fight', () => {
     expect(plan.verdict).toBe('intent-safe');
   });
 
-  // And it is a step back into the fight, not a chase: past the point where
-  // closing in stops being the player's own intent, every course is equally far
-  // and the difference decides nothing.
-  it('does not walk across the room after something out of reach', () => {
+  // **What replaced the key test.** Crowding used to stand down the moment a
+  // key went down, so a melee minion closing on a player who was walking
+  // anywhere at all went unanswered — and walking is what a player under fire
+  // spends their time doing. What decides it now is whether their own walking
+  // is opening a gap, which against something matching their speed it is not.
+  it('answers a monster keeping pace with a player who is already walking', () => {
     const controller = new DodgeController();
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 10, y: 30 } as EntityView], 10, 10, 40, ANY_BODY);
+    // A tile behind, following east at the character's own six tiles a second
+    // while the player walks east.
+    bodies.collect([{ x: 8.5, y: 10 } as EntityView], 10, 10, 12, chasing(6, 0));
 
-    const plan = controller.plan(situation(), SETTINGS, keepingRange(bodies, REACH), []);
+    const plan = controller.plan(
+      situation({ intentX: 1, intentY: 0 }),
+      SETTINGS,
+      standingOff(bodies, KEEP_AWAY),
+      [],
+    );
+
+    expect(plan.verdict).toBe('spacing');
+    expect(plan.steer).toBe(true);
+    // Off its line, because running from something as fast as you are is not an
+    // escape. Still broadly the way they were going.
+    expect(plan.dirY).not.toBe(0);
+    expect(plan.dirX).toBeGreaterThan(0);
+  });
+
+  // And the other side of it: something standing still is something the player
+  // walked up to, which is a decision and not a mistake.
+  it('leaves the same player alone when the monster is not following', () => {
+    const controller = new DodgeController();
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 8.5, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
+
+    const plan = controller.plan(
+      situation({ intentX: 1, intentY: 0 }),
+      SETTINGS,
+      standingOff(bodies, KEEP_AWAY),
+      [],
+    );
 
     expect(plan.steer).toBe(false);
+  });
+
+  // **A preference and never a veto.** The only lane out of a volley sometimes
+  // runs past a monster, and a planner that refuses it stands in the volley.
+  it('takes a lane past a monster rather than a shot in the face', () => {
+    const controller = new DodgeController();
+    const bodies = new EnemyBodies();
+    // Standing in the one direction that is clear of the shot.
+    bodies.collect([{ x: 10, y: 11.5 } as EntityView], 10, 10, 12, ANY_BODY);
+    const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
+
+    const plan = controller.plan(
+      situation({ gameTimeMs: 900 }),
+      SETTINGS,
+      standingOff(bodies, KEEP_AWAY),
+      [shot],
+    );
+
+    expect(plan.steer).toBe(true);
+    expect(plan.impactMs).toBe(Infinity);
+  });
+
+  // **The other half of the same live report, and the case where being crowded
+  // costs most.** The distance is stated against an ordinary monster, so a body
+  // four times the width has to be kept four times as far off its middle to
+  // leave the same room — and it is the big ones that kill you for standing in
+  // them.
+  it('makes more room for a bigger body', () => {
+    const at = (read: (enemy: EntityView) => BodySighting): DodgePlan => {
+      const controller = new DodgeController();
+      const bodies = new EnemyBodies();
+      // Two and a half tiles north, which is exactly the stated distance.
+      bodies.collect([{ x: 10, y: 12.5 } as EntityView], 10, 10, 12, read);
+      return controller.plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
+    };
+
+    // An ordinary monster there is where it should be, and nothing is said.
+    expect(at(ANY_BODY).steer).toBe(false);
+    // Something four tiles across at the same place is on top of the player.
+    const boss = at(sized(4));
+    expect(boss.verdict).toBe('spacing');
+    expect(boss.crowded).toBe(true);
+    expect(boss.dirY).toBeLessThanOrEqual(0);
   });
 });
 
@@ -1687,7 +1711,7 @@ describe('the picture of what it is thinking', () => {
       selfY: 10,
       gameTimeMs: 0,
       engageTiles: 2.5,
-      rangeTiles: 7 as number | undefined,
+      keepAwayTiles: 2.5 as number | undefined,
       bodies: new EnemyBodies(),
       blasts: [] as BlastView[],
       ...overrides,
@@ -1697,21 +1721,11 @@ describe('the picture of what it is thinking', () => {
   const of = (marks: readonly DodgeMark[], kind: DodgeMarkKind): DodgeMark[] =>
     marks.filter((mark) => mark.kind === kind);
 
-  it('draws the character, the ring it answers inside, and its reach', () => {
+  it('draws the character and the ring it answers inside', () => {
     const marks = dodgeMarks(scene());
 
     expect(of(marks, DodgeMarkKind.Player)).toHaveLength(1);
     expect(of(marks, DodgeMarkKind.Engage)[0]?.radiusTiles).toBe(2.5);
-    expect(of(marks, DodgeMarkKind.InRange)[0]?.radiusTiles).toBe(7);
-  });
-
-  // The point of drawing the reach at all is the case where there is none to
-  // draw: a picture with a ring on it when range is not being kept would say
-  // the planner is minding something it is not.
-  it('draws no reach while range is not being kept', () => {
-    const marks = dodgeMarks(scene({ rangeTiles: Infinity }));
-
-    expect(of(marks, DodgeMarkKind.InRange)).toHaveLength(0);
   });
 
   // **The picture is drawn far more often than it is published, and where the
@@ -1722,7 +1736,7 @@ describe('the picture of what it is thinking', () => {
   it('says which circles belong to the character', () => {
     const marks = dodgeMarks(scene());
 
-    for (const kind of [DodgeMarkKind.Player, DodgeMarkKind.Engage, DodgeMarkKind.InRange]) {
+    for (const kind of [DodgeMarkKind.Player, DodgeMarkKind.Engage]) {
       expect(of(marks, kind)[0]?.anchor).toBe(DodgeMarkAnchor.Player);
     }
   });
@@ -1742,28 +1756,34 @@ describe('the picture of what it is thinking', () => {
     expect(body?.anchor).toBe(DodgeMarkAnchor.Place);
     expect(body?.velocityX).toBeCloseTo(2, 6);
     expect(body?.velocityY).toBeCloseTo(-1, 6);
+    // The room around it moves with it, or the pair comes apart on the screen.
+    expect(of(marks, DodgeMarkKind.KeepAway)[0]?.velocityX).toBeCloseTo(2, 6);
     // A blast is ground that will be dangerous at a moment. It goes nowhere.
     expect(of(marks, DodgeMarkKind.Blast)[0]?.velocityX).toBe(0);
   });
 
-  it('draws each monster at the size the catalog gave it', () => {
+  it('draws each monster and the room it is being given', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, sized(4));
 
     const marks = dodgeMarks(scene({ bodies }));
 
-    // So a boss drawn as a rat is visible as one.
+    // The body at the size the catalog gave it, so a boss drawn as a rat is
+    // visible as one.
     expect(of(marks, DodgeMarkKind.Body)[0]?.radiusTiles).toBe(2);
+    // And the circle the planner refuses to be inside, which is the body plus
+    // the gap the setting asks for.
+    expect(of(marks, DodgeMarkKind.KeepAway)[0]?.radiusTiles).toBeCloseTo(4, 6);
   });
 
   it('draws nothing about the monsters while it is not minding them', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
 
-    const marks = dodgeMarks(scene({ bodies, rangeTiles: undefined }));
+    const marks = dodgeMarks(scene({ bodies, keepAwayTiles: undefined }));
 
     expect(of(marks, DodgeMarkKind.Body)).toHaveLength(0);
-    expect(of(marks, DodgeMarkKind.InRange)).toHaveLength(0);
+    expect(of(marks, DodgeMarkKind.KeepAway)).toHaveLength(0);
   });
 
   // A bomb two seconds out and one landing this instant are the same circle in
@@ -1792,7 +1812,7 @@ describe('the picture of what it is thinking', () => {
 
   // A busy screen is unreadable whatever is drawn, and every one of these
   // crosses a pipe fifty times a second.
-  it('keeps a busy screen bounded', () => {
+  it('keeps a busy screen bounded, and never half a monster', () => {
     const bodies = new EnemyBodies();
     const crowd = Array.from(
       { length: 200 },
@@ -1802,7 +1822,8 @@ describe('the picture of what it is thinking', () => {
 
     const marks = dodgeMarks(scene({ bodies }));
 
-    expect(marks.length).toBe(MAX_DRAWN_MARKS);
+    expect(marks.length).toBeLessThanOrEqual(MAX_DRAWN_MARKS);
+    expect(of(marks, DodgeMarkKind.Body)).toHaveLength(of(marks, DodgeMarkKind.KeepAway).length);
   });
 });
 
@@ -1991,12 +2012,10 @@ describe('when the plugin decides', () => {
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
         view: { wanted: () => view.on },
-        weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
         isScenery: map.scenery ?? ((): boolean => false),
         bodyTiles: () => undefined,
-        aimTarget: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);
@@ -2192,45 +2211,44 @@ describe('when the plugin decides', () => {
     expect(showPicture.mock.calls[1]?.[1]).toEqual([]);
   });
 
-  // **The live report: "it keeps walking me across the room."** A wall in this
-  // game is an object with hit points and the enemy flag, and a brazier is
-  // `<Enemy/>` with no health bar at all — so the planner set off towards every
-  // decoration it had drifted away from. The rule that answers it is the one
-  // auto-aim already uses to decide what is worth shooting: the two lists are
-  // the same list.
-  it('stays in range of monsters and not of the scenery', () => {
-    const decoration = { objectId: 9, objectType: 500, x: 16, y: 10, maxHp: 0 } as EntityView;
-    const monster = { objectId: 9, objectType: 500, x: 16, y: 10, maxHp: 4000 } as EntityView;
+  // **The live report: "I cannot get through there."** A wall in this game is an
+  // object with hit points and the enemy flag, and a brazier is `<Enemy/>` with
+  // no health bar at all — so a three-tile no-go circle went round every
+  // decoration in the room. The rule that answers it is the one auto-aim already
+  // uses to decide what is worth shooting: the two lists are the same list.
+  it('keeps its distance from monsters and not from the scenery', () => {
+    const decoration = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 0 } as EntityView;
+    const monster = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 4000 } as EntityView;
 
     // Nothing near enough to dodge, so the only thing that could move the
-    // player is the reach. A torch across the room is not a fight to keep.
+    // player is the room being taken. Standing beside a torch is not a mistake.
     const past = underFire(0, { enemies: [decoration] });
     past.plan();
     expect(past.moveBy).not.toHaveBeenCalled();
 
-    const away = underFire(0, { enemies: [monster] });
-    away.plan();
-    expect(away.moveBy).toHaveBeenCalled();
+    const crowded = underFire(0, { enemies: [monster] });
+    crowded.plan();
+    expect(crowded.moveBy).toHaveBeenCalled();
   });
 
   // **The live report: a Shatters lever.** It is `<Enemy/>` and it carries five
   // thousand hit points until somebody pulls it, so it is neither a wall nor
-  // invincible and every cull the reach had let it through — and the planner
-  // spent the village walking towards a thing that cannot move and cannot fire.
-  // The rule auto-aim uses cannot answer this one, because a lever is shot on
-  // purpose; the catalog's own word for it is what does.
-  it('does not walk back into range of a lever it is meant to shoot', () => {
-    const lever = { objectId: 9, objectType: 600, x: 16, y: 10, maxHp: 5000 } as EntityView;
+  // invincible and every cull there was let it through — and the planner spent
+  // the village walking round a thing that cannot move and cannot fire. The rule
+  // auto-aim uses cannot answer this one, because a lever is shot on purpose;
+  // the catalog's own word for it is what does.
+  it('keeps no distance from a lever it is meant to shoot', () => {
+    const lever = { objectId: 9, objectType: 600, x: 11, y: 10, maxHp: 5000 } as EntityView;
 
-    const left = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
-    left.plan();
-    expect(left.moveBy).not.toHaveBeenCalled();
+    const beside = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
+    beside.plan();
+    expect(beside.moveBy).not.toHaveBeenCalled();
 
     // The same entity with the same health, and the only difference is what the
     // catalog calls it.
-    const away = underFire(0, { enemies: [lever] });
-    away.plan();
-    expect(away.moveBy).toHaveBeenCalled();
+    const crowded = underFire(0, { enemies: [lever] });
+    crowded.plan();
+    expect(crowded.moveBy).toHaveBeenCalled();
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
@@ -2406,6 +2424,7 @@ function readTuning(settings: SettingsRegistry): DodgeTuning {
     padTiles: number('latencyPadTiles'),
     driftTilesPerSecond: number('driftTilesPerSecond'),
     safeClearanceTiles: number('safeClearanceTiles'),
+    keepAwayTiles: number('keepAwayTiles'),
   };
 }
 
@@ -2483,12 +2502,10 @@ describe('the hit redirect', () => {
         cursorWalk: { target: () => undefined },
         steer: { direction: () => undefined },
         view: { wanted: () => false },
-        weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
         isScenery: () => false,
         bodyTiles: () => undefined,
-        aimTarget: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);

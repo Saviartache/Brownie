@@ -115,25 +115,11 @@ export interface SteerInput {
  */
 export interface DodgeCatalog {
   /**
-   * How far the equipped weapon's own shot reaches, in tiles.
-   *
-   * **The distance the planner is trying not to drift past**, because a dodge
-   * that ends out of range is a dodge that turned the damage off. It is in
-   * `objects.xml` and nowhere on the wire, and a plugin is not given the object
-   * catalog — so the composition root hands it over, exactly as it does for
-   * auto-aim. `undefined` for a weapon the catalog does not describe, or for no
-   * weapon at all, and the setting's own figure stands in.
-   *
-   * Asked once a plan and answered from `gamedata/EquippedWeapon`, which
-   * resolves a weapon once and remembers it.
-   */
-  readonly weaponRange: (weaponType: number) => number | undefined;
-  /**
    * Whether one of these stands in the way rather than fighting.
    *
    * **A wall in this game is an object with hit points and the enemy flag**, so
    * to anything ranking enemies by distance it is simply the closest one — and
-   * the spacing band, which is exactly such a ranking, spent a dungeon measuring
+   * the spacing rule, which is exactly such a ranking, spent a dungeon measuring
    * the corridor instead of the monster in it. `OccupySquare` and `FullOccupy`
    * in `objects.xml`, which is not on the plugin surface; the same lookup
    * auto-aim is handed, for the same reason.
@@ -152,7 +138,7 @@ export interface DodgeCatalog {
    *
    * **The live report is a Shatters lever.** It is `<Enemy/>`, it carries five
    * thousand hit points until somebody pulls it, and it is neither a wall nor
-   * invincible — so it passed every cull the band had and got a no-go circle
+   * invincible — so it passed every cull there was and got a no-go circle
    * drawn round it. It also never moves and never fires, which is the whole of
    * why it does not belong in a list of things to keep away from.
    *
@@ -169,24 +155,9 @@ export interface DodgeCatalog {
    * `objects.xml`, so the composition root hands it over exactly as it does the
    * two above. `undefined` for a type the catalog cannot describe, and for every
    * type while no data file has been read, in which case the ordinary body
-   * stands in and the band behaves as it did before it could tell.
+   * stands in and the distance behaves as it did before it could tell.
    */
   readonly bodyTiles: (objectType: number) => number | undefined;
-  /**
-   * Which enemy auto-aim is pointing the shots at, when it is pointing at one.
-   *
-   * **"Stay within your weapon's range" has to mean range of *something*.**
-   * Measured against the nearest monster it kept the player in reach of
-   * whatever happened to be closest — a minion, a summon, whatever wandered
-   * past — while the thing they were actually shooting walked out of range and
-   * the damage stopped. What they are shooting is a question only auto-aim can
-   * answer, and it answers it here; see `AimOutput.lockedOn`.
-   *
-   * `undefined` while nothing is being aimed at, or while auto-aim is off, and
-   * the band falls back to the nearest body — which is the best guess available
-   * and is what it always did.
-   */
-  readonly aimTarget: () => number | undefined;
 }
 
 export interface DodgeInputs extends DodgeCatalog {

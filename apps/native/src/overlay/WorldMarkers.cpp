@@ -173,13 +173,12 @@ void DrawDodgeRings(const RingMark* marks, int count) {
         return;
     }
 
-    // The three the theme keeps for data rather than for chrome. Which is which
+    // The two the theme keeps for data rather than for chrome. Which is which
     // matters less than that they differ in every stock theme: what tells these
     // apart in a fight is size and position, and the colour is there to stop two
     // circles the same size reading as the same thing.
     const ImU32 line = Solid(ImGuiCol_PlotLines);
     const ImU32 mark = Solid(ImGuiCol_PlotHistogram);
-    const ImU32 pick = Solid(ImGuiCol_CheckMark);
 
     for (int i = 0; i < count; ++i) {
         const RingMark& ring = marks[i];
@@ -206,8 +205,8 @@ void DrawDodgeRings(const RingMark* marks, int count) {
                 list->AddCircleFilled(centre, ring.radius, Faded(mark, kBodyFill));
                 list->AddCircle(centre, ring.radius, mark, 0, kRingStroke);
                 break;
-            case RingRole::InRange:
-                list->AddCircle(centre, ring.radius, pick, 0, kRingStroke);
+            case RingRole::KeepAway:
+                list->AddCircle(centre, ring.radius, mark, 0, kStroke);
                 break;
             case RingRole::Blast:
                 // **The one that is coloured by its own number**, for the same

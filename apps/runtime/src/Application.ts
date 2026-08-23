@@ -169,14 +169,6 @@ export class Application {
   /// walk-to-cursor chord walks to it.
   readonly #cursor = new CursorTracker();
 
-  /// Which enemy auto-aim has settled on, for the dodge to keep in range of.
-  ///
-  /// **The one place two plugins meet, and it is one number.** Neither can read
-  /// the other and neither should: what auto-aim knows is which monster the
-  /// shots are going to, and what the dodge does with it is measure a distance.
-  /// Restated on every aim decision, including the ones that decide on nothing.
-  #aimTarget: number | undefined = undefined;
-
   /// Whether the module says that chord is held down.
   ///
   /// An edge, not a poll: the module reports the press and the release and
@@ -556,19 +548,7 @@ export class Application {
         // And whether anybody is looking at the result. Nothing is predicted
         // for the picture while the box is unticked.
         view: { wanted: () => this.#dodgeView },
-        // What auto-aim has settled on, which is what the range half of the
-        // spacing band is measured against. `undefined` while it is aiming at
-        // nothing, or while it is switched off — and then the band falls back
-        // to the nearest monster, which is the best guess available.
-        aimTarget: () => this.#aimTarget,
-        // How far the equipped weapon reaches, which is the distance the
-        // planner tries not to drift past. Same catalog and same reason as
-        // auto-aim's `weapon`: it is in `objects.xml` and nowhere on the wire.
-        weaponRange: (weaponType) => {
-          const reach = this.#weapon.of(weaponType)?.reachTiles;
-          return reach !== undefined && reach > 0 ? reach : undefined;
-        },
-        // The two the spacing band cannot work without, and the same two
+        // The two the spacing rule cannot work without, and the same two
         // auto-aim is handed for the same reason: a wall in this game is an
         // object with hit points and the enemy flag, and a quarter of what
         // `objects.xml` marks as an enemy is a spawner or a room controller.
@@ -580,7 +560,7 @@ export class Application {
         // unkillable: a lever carries a health bar, is meant to be shot, and
         // never hurts anybody.
         isScenery: (objectType) => this.#objects.isScenery(objectType),
-        // And the third thing the band cannot work without: how big the monster
+        // And the third thing it cannot work without: how big the monster
         // actually is. The distance that keeps an ordinary one at arm's length
         // leaves the player standing well inside a boss four times the width.
         bodyTiles: (objectType) => this.#objects.bodyTiles(objectType),
@@ -615,14 +595,6 @@ export class Application {
             this.#native.publishRecord(
               ['aim', Math.round(x * 100), Math.round(y * 100), Math.round(holdMs)].join('|'),
             );
-          },
-          // Nothing on the link: this one is for the dodge, which keeps the
-          // player inside their weapon's reach *of the thing they are shooting*
-          // rather than of whatever happens to be nearest. Held here because
-          // one plugin cannot read another, and the composition root is where
-          // two of them are allowed to meet.
-          lockedOn: (objectId) => {
-            this.#aimTarget = objectId;
           },
         },
         // Resolved once per weapon and read through `this`, so a session that

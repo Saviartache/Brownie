@@ -54,10 +54,10 @@ import { registerHitRedirect } from './hitRedirect.js';
  * Short enough that a shot entering the action window is acted on within a frame
  * or two of doing so. **Measured rather than assumed**: the worst case this
  * planner has — twenty-five shots arranged so that every step tier has to be
- * scored, with twenty monsters in range for the reach term to measure against —
- * costs about 1.5 ms, so fifty plans a second is a few per cent of one core and
- * the ordinary case is a fraction of that, because a plan with nothing in reach
- * does no sweeping at all.
+ * scored, with twenty monsters in reach for the spacing term to measure against
+ * — costs about 1.5 ms, so fifty plans a second is a few per cent of one core
+ * and the ordinary case is a fraction of that, because a plan with nothing in
+ * reach does no sweeping at all.
  */
 const PLAN_INTERVAL_MS = 20;
 
@@ -214,6 +214,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           plan,
           intent,
           speedTilesPerSecond: speed,
+          fullSpeedTilesPerSecond: self.walkSpeedTilesPerSecond,
           cancelIntent: controls.driving.interceptControl.get(),
           holdMs: hold,
         });

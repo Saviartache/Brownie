@@ -52,6 +52,8 @@ export interface WalkRequest {
   readonly intent: Position | undefined;
   /** What the planner is allowed to spend, in tiles per second. */
   readonly speedTilesPerSecond: number;
+  /** And what the character can actually do, for a shove. */
+  readonly fullSpeedTilesPerSecond: number;
   /** Whether their own input is being cancelled rather than added to. */
   readonly cancelIntent: boolean;
   /** How long the offset stands, which is what decides how far it reaches. */
@@ -73,7 +75,13 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   // and how far to go is the plan's own answer rather than something to spend
   // speed on. Crossing a lane of fire slowly is the one way of crossing it that
   // does not work.
-  const speed = request.speedTilesPerSecond;
+  //
+  // **Except when something is standing on the player**, which is a shove rather
+  // than a sidestep and is worth the margin the ordinary speed keeps in hand —
+  // the whole complaint is that monsters get close anyway. The margin exists
+  // because a command past the server's own limit is what makes it pull the
+  // character back; the *limit* is what this spends, and no more.
+  const speed = plan.crowded ? request.fullSpeedTilesPerSecond : request.speedTilesPerSecond;
   let wantX = plan.dirX * speed;
   let wantY = plan.dirY * speed;
 

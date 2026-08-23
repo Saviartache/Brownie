@@ -78,7 +78,7 @@ export class DodgePictureFeed {
         selfY: self.y,
         gameTimeMs: world.gameTimeMs,
         engageTiles: controls.tuning.engageWithinTiles.get(),
-        rangeTiles: scene.rangeTiles,
+        keepAwayTiles: scene.keepAwayTiles,
         bodies: scene.bodies,
         blasts: scene.blastsIn(world, controls),
       }),
