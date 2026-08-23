@@ -647,22 +647,10 @@ void Engine::InstallProjectileNoclip() {
     route.tile_at = binding_.FieldOffset(game::kMapObjectTile).value_or(0);
     route.layer_at = binding_.FieldOffset(game::kTileCollisionLayer).value_or(0);
 
-    const Status installed =
-        shot_noclip_.Install(route, binding_.MethodAddress(game::kShotHitsWall).value_or(nullptr),
-                             binding_.MethodAddress(game::kShotTileBlocks).value_or(nullptr));
-    if (!installed.ok()) {
-        // The ordinary answer until the first shot of the session, and the loop
-        // is the retry. Saying so every half second would fill the runtime's
-        // log with the fact that nobody has fired yet.
-        return;
-    }
-
-    // Said out loud once, for the same reason the aim hook's install is: a hook
-    // is the one thing this module does that can take the game down with it, so
-    // which methods it went onto belongs in the log rather than in a panel
-    // somebody may not open.
-    Say("projectile noclip: detoured " + std::string{game::kShotHitsWall} + " and " +
-        std::string{game::kShotTileBlocks});
+    // Failure is the ordinary answer until the first shot of the session, and
+    // the loop is the retry, so it stays out of the runtime's log.
+    (void)shot_noclip_.Install(route, binding_.MethodAddress(game::kShotHitsWall).value_or(nullptr),
+                               binding_.MethodAddress(game::kShotTileBlocks).value_or(nullptr));
 }
 
 void Engine::InstallPlayerNoclip() {
