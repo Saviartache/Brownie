@@ -1090,7 +1090,7 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
         edit.Clear();
     }
 
-    ImGui::SetNextWindowSize(ImVec2{800.0F, 600.0F}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2{900.0F, 600.0F}, ImGuiCond_FirstUseEver);
     // Collapsing the main window must not take the inspector with it: they are
     // separate windows, and the one is not inside the other.
     if (!ImGui::Begin("Brownie")) {
@@ -1119,8 +1119,12 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
                     model.dropped_actions);
     }
 
-    // Everything starts collapsed. The window sits over a game, and opening
-    // what you came for beats closing three things you did not.
+    // Everything else starts collapsed. The window sits over a game, and
+    // opening what you came for beats closing three things you did not — and
+    // what you came for is the plugins, so that one starts open. `FirstUseEver`
+    // rather than `Always`: closing it has to stick for as long as the overlay
+    // is up.
+    ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
     if (ImGui::CollapsingHeader("Plugins")) {
         DrawPlugins(model, edit, emit);
     }

@@ -409,6 +409,14 @@ environment ← command line, resolved once at startup into a frozen, validated
 object. Validation is explicit, not a cast: a bad config fails at startup with
 the offending key named, not at 3 a.m. inside a packet handler.
 
+What the user configures from the overlay is a separate file and a separate
+mechanism: `config/plugins.json` holds each plugin's switch and settings, is
+read once before any plugin loads, and is written back — coalesced, and by
+rename — whenever one of them moves. It is not layered and not validated at
+startup, because it is not a contract with the operator: every value in it is
+checked against the declaration of the setting that named it, at the moment that
+setting is declared. See [`docs/plugins.md`](./plugins.md).
+
 Logging is level-based (`trace debug info warn error fatal`) with a component
 tag and, where one exists, a session id. Formatting is deferred behind a level
 check so a disabled `trace` costs a comparison. Binary buffers are never logged
@@ -457,7 +465,7 @@ Startup, in order, each step failing loudly:
 2. load protocol definitions and game data (validated)
 3. build the object graph
 4. start the IPC server
-5. discover and load plugins, replay persisted settings
+5. read persisted preferences, then discover and load plugins into them
 6. bind the TCP listener
 
 The native module starts on its own schedule, because it is loaded by whoever
@@ -470,7 +478,8 @@ module unattended through `BROWNIE_NATIVE_ANY_HOST` and starts straight away.
 Shutdown is the exact reverse and is deterministic:
 
 1. stop accepting connections
-2. disable and dispose plugins (each isolated, with a timeout)
+2. disable and dispose plugins (each isolated, with a timeout), then flush their
+   preferences — after disposal, so a plugin that writes on its way out is kept
 3. close proxy sessions (flush, then destroy sockets)
 4. close the IPC server and let the native side reset its mirror
 5. stop timers and watchers

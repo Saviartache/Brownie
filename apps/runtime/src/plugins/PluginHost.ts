@@ -16,11 +16,13 @@ import {
   type Unsubscribe,
 } from '@brownie/plugin-api';
 import { toError, type Logger } from '../core/logging/Logger.js';
-import { MEMORY_ONLY_STORE, SettingsRegistry, type SettingsStore } from './SettingsRegistry.js';
+import { MEMORY_ONLY_STORE, type PluginStore } from './PluginStore.js';
+import { SettingsRegistry } from './SettingsRegistry.js';
 
 export interface PluginHostOptions {
   readonly log: Logger;
-  readonly settingsStore?: SettingsStore;
+  /** Where settings and switches survive a restart. Defaults to nowhere. */
+  readonly store?: PluginStore;
   readonly native: NativeApi;
   readonly sessions: SessionApi;
   /**
@@ -98,7 +100,7 @@ interface LoadedPlugin {
  */
 export class PluginHost {
   readonly #log: Logger;
-  readonly #store: SettingsStore;
+  readonly #store: PluginStore;
   readonly #native: NativeApi;
   readonly #sessions: SessionApi;
   readonly #maxHandlerErrors: number;
@@ -126,7 +128,7 @@ export class PluginHost {
 
   constructor(options: PluginHostOptions) {
     this.#log = options.log;
-    this.#store = options.settingsStore ?? MEMORY_ONLY_STORE;
+    this.#store = options.store ?? MEMORY_ONLY_STORE;
     this.#native = options.native;
     this.#sessions = options.sessions;
     this.#maxHandlerErrors = options.maxHandlerErrors ?? 10;
@@ -180,7 +182,15 @@ export class PluginHost {
       plugin.setup(this.#buildContext(entry));
       entry.settings.seal();
       entry.state = PluginState.Loaded;
-      this.#log.info(`loaded plugin "${id}"`);
+      // A plugin comes back the way it was left, falling back to what it asks
+      // for the first time it is ever seen. Assigned rather than routed through
+      // `setEnabled`: restoring is not a change, and writing it back would
+      // rewrite the file on every start.
+      if (this.#store.readEnabled(id) ?? plugin.meta.enabledByDefault ?? false) {
+        entry.enabled = true;
+        entry.state = PluginState.Enabled;
+      }
+      this.#log.info(`loaded plugin "${id}"${entry.enabled ? ' (enabled)' : ''}`);
     } catch (cause) {
       const error = toError(cause);
       entry.state = PluginState.Failed;
@@ -223,6 +233,9 @@ export class PluginHost {
 
     entry.enabled = enabled;
     entry.state = enabled ? PluginState.Enabled : PluginState.Loaded;
+    // Only here, and not on the restore path above: this is the one place the
+    // switch is actually moved, so it is the one place worth persisting.
+    this.#store.writeEnabled(pluginId, enabled);
     // A plugin gets a fresh budget each time it is switched on: the user has
     // just said "try again", and refusing to would need them to restart. The
     // recorded reason goes with it — a stale "disabled after 10 handler errors"

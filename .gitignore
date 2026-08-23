@@ -59,6 +59,10 @@ references/
 docs/migration/plan.md
 
 config/local.json
+# Every switch and knob the user set from the overlay, written by the runtime
+# rather than by hand. One person's preferences, not part of the project.
+config/plugins.json
+config/plugins.json.tmp
 logs/
 *.log
 

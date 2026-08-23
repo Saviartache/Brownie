@@ -8,13 +8,13 @@ import {
   type PluginContext,
   type SessionApi,
   type SessionView,
-  type SettingValue,
 } from '@brownie/plugin-api';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import { createPacket, decodeFrame, encodePacket } from '@brownie/protocol';
 import { describe, expect, it, vi } from 'vitest';
 import { PluginHost } from '../src/plugins/PluginHost.js';
-import type { SettingsStore } from '../src/plugins/SettingsRegistry.js';
+import { PluginPreferences } from '../src/plugins/PluginPreferences.js';
+import type { PluginStore } from '../src/plugins/PluginStore.js';
 import { RecordingSink, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
@@ -42,7 +42,7 @@ const SESSIONS: SessionApi = {
 };
 
 function host(
-  options: { store?: SettingsStore; maxHandlerErrors?: number; sink?: RecordingSink } = {},
+  options: { store?: PluginStore; maxHandlerErrors?: number; sink?: RecordingSink } = {},
 ): { host: PluginHost; sink: RecordingSink; changes: number } {
   const sink = options.sink ?? new RecordingSink();
   const state = { changes: 0 };
@@ -50,7 +50,7 @@ function host(
     log: testLogger(sink),
     native: NATIVE,
     sessions: SESSIONS,
-    ...(options.store === undefined ? {} : { settingsStore: options.store }),
+    ...(options.store === undefined ? {} : { store: options.store }),
     ...(options.maxHandlerErrors === undefined
       ? {}
       : { maxHandlerErrors: options.maxHandlerErrors }),
@@ -481,15 +481,8 @@ describe('settings', () => {
   });
 
   it('restores a persisted value, and ignores one that no longer fits', () => {
-    const stored: Record<string, Record<string, SettingValue>> = {
-      p: { hp: 60, gone: 1, tooBig: 1000 },
-    };
-    const store: SettingsStore = {
-      read: (id) => stored[id],
-      write: (id, values) => {
-        stored[id] = { ...values };
-      },
-    };
+    const store = new PluginPreferences();
+    store.load({ p: { settings: { hp: 60, gone: 1, tooBig: 1000 } } });
     const h = host({ store });
     h.host.load(
       plugin('p', (ctx) => {
@@ -505,18 +498,53 @@ describe('settings', () => {
   });
 
   it('persists a change', () => {
-    const stored: Record<string, Record<string, SettingValue>> = {};
-    const store: SettingsStore = {
-      read: (id) => stored[id],
-      write: (id, values) => {
-        stored[id] = { ...values };
-      },
-    };
+    const store = new PluginPreferences();
     const h = host({ store });
     h.host.load(plugin('p', (ctx) => ctx.settings.boolean('on', { default: false })));
     h.host.settingsOf('p')!.apply('on', true);
 
-    expect(stored['p']).toEqual({ on: true });
+    expect(store.read('p')).toEqual({ on: true });
+  });
+
+  it('restores the switch, and persists moving it', () => {
+    const store = new PluginPreferences();
+    store.load({ on: { enabled: true }, off: { enabled: false } });
+
+    const h = host({ store });
+    h.host.load(plugin('on', () => undefined));
+    h.host.load(plugin('off', () => undefined));
+
+    expect(h.host.isEnabled('on')).toBe(true);
+    expect(h.host.status('on')?.state).toBe(PluginState.Enabled);
+    expect(h.host.isEnabled('off')).toBe(false);
+
+    h.host.setEnabled('on', false);
+    expect(store.readEnabled('on')).toBe(false);
+  });
+
+  it('starts a plugin it has never seen the way the plugin asks to start', () => {
+    const store = new PluginPreferences();
+    const h = host({ store });
+    h.host.load(
+      definePlugin({
+        meta: {
+          id: 'eager',
+          name: 'eager',
+          category: PluginCategory.Utility,
+          enabledByDefault: true,
+        },
+        setup: () => undefined,
+      }),
+    );
+
+    expect(h.host.isEnabled('eager')).toBe(true);
+    // Restoring is not a change: nothing was written, so a later build changing
+    // the default still applies.
+    expect(store.readEnabled('eager')).toBeUndefined();
+
+    // Switched off by hand, that *is* a change, and it outranks the default.
+    h.host.setEnabled('eager', false);
+    expect(store.readEnabled('eager')).toBe(false);
   });
 
   it('refuses a duplicate key, a bad select default, and a late declaration', () => {

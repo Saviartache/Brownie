@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Application } from './Application.js';
 import { ConfigError, resolveConfig } from './core/config/Config.js';
 import { ConsoleSink } from './core/logging/ConsoleSink.js';
@@ -17,6 +17,16 @@ import { FileSink, writeToAll } from './core/logging/FileSink.js';
  */
 
 const CONFIG_PATH = process.env['BROWNIE_CONFIG'] ?? resolve('config', 'runtime.json');
+
+/**
+ * Where what the user configured from the overlay is kept.
+ *
+ * Beside the configuration file rather than in a directory of its own, because
+ * it is configuration — just the half written by clicking rather than by
+ * editing. Following `CONFIG_PATH` means pointing the runtime at a different
+ * configuration takes its preferences with it.
+ */
+const PREFERENCES_PATH = join(dirname(CONFIG_PATH), 'plugins.json');
 
 /**
  * Where everything learned about the game is written.
@@ -69,6 +79,9 @@ async function main(): Promise<void> {
     // Written once per game build and kept: the metadata does not move while
     // the build does not, so walking it again would answer the same question.
     classDumpPath: join(process.cwd(), GAME_DATA_DIR, 'game-classes.txt'),
+    // The one file this runtime writes on the user's behalf rather than for a
+    // reader: every switch and knob they set, so a restart is not a re-setup.
+    preferencesPath: PREFERENCES_PATH,
     // An argument, not an environment variable: the environment is not where
     // anyone looks, and this one decides whether bytes from a real session end
     // up in a file.

@@ -12,18 +12,7 @@ import {
   type TextSettingOptions,
   type Unsubscribe,
 } from '@brownie/plugin-api';
-
-/** Where persisted setting values come from and go. */
-export interface SettingsStore {
-  read(pluginId: string): Readonly<Record<string, SettingValue>> | undefined;
-  write(pluginId: string, values: Readonly<Record<string, SettingValue>>): void;
-}
-
-/** A store that forgets everything — the default until config is wired up. */
-export const MEMORY_ONLY_STORE: SettingsStore = {
-  read: () => undefined,
-  write: () => undefined,
-};
+import type { SettingsStore } from './PluginStore.js';
 
 export interface SettingsRegistryOptions {
   readonly pluginId: string;

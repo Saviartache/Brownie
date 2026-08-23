@@ -124,6 +124,40 @@ persists.
 because a plugin with one knob per planner would otherwise show several sets of
 greyed-out controls that can never apply at once.
 
+## Persistence
+
+Every setting value and every plugin's on/off switch survives a restart. They
+are kept in `config/plugins.json`, beside the runtime's own configuration:
+
+```json
+{
+  "version": 1,
+  "plugins": {
+    "auto-nexus": { "enabled": true, "settings": { "hpPercent": 40 } }
+  }
+}
+```
+
+The file is the user's, not the project's — it is written by clicking rather
+than by editing, and it is not in the repository.
+
+A plugin reads its persisted values while it is *declaring* them, so there is no
+replay step afterwards and no window in which a plugin is running on defaults it
+was never meant to have. A value that no longer fits its declaration — bounds
+tightened, an option removed, a key renamed — falls back to the new default
+rather than being restored out of range, and a key this build no longer declares
+is ignored rather than being an error.
+
+`meta.enabledByDefault` decides how a plugin starts **the first time it is ever
+seen**. After that the stored switch wins, including when the user switched the
+plugin off. Restoring never writes: only moving a switch or changing a value
+does, so a build that changes a default still applies it to anyone who never
+touched that setting.
+
+Writes are coalesced — dragging a slider is one write, not one per frame — and
+land by renaming a complete file over the old one, so a run that dies mid-write
+cannot leave half a configuration behind.
+
 ## Packets
 
 `packet.fields` is read-only; `packet.set(field, value)` marks the packet for

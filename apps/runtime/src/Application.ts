@@ -42,6 +42,7 @@ import { CommandStage } from './pipeline/stages/CommandStage.js';
 import { PluginStage } from './pipeline/stages/PluginStage.js';
 import { PluginHost } from './plugins/PluginHost.js';
 import { PluginLoader } from './plugins/PluginLoader.js';
+import { PreferencesFile } from './plugins/PreferencesFile.js';
 import { AllowlistTargets } from './proxy/AllowlistTargets.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './state/ObjectCatalog.js';
 import { EMPTY_TILE_CATALOG, type TileCatalog } from './state/TileMap.js';
@@ -74,6 +75,12 @@ export interface ApplicationOptions {
    * out. Off by default: those bytes come from a real session.
    */
   readonly sampleBodies?: boolean;
+  /**
+   * Where each plugin's switch and settings are kept between runs. Omitted
+   * means nowhere — a test run neither reads a machine's preferences nor leaves
+   * any behind.
+   */
+  readonly preferencesPath?: string;
 }
 
 /**
@@ -104,6 +111,8 @@ export class Application {
   /** Set only when this run minted the key, so only it removes the file. */
   readonly #publishedKeyPath: string | undefined;
   readonly #plugins: PluginHost;
+  /** Undefined when this run was not given a path to remember anything in. */
+  readonly #preferences: PreferencesFile | undefined;
   readonly #overlay: OverlayControlPlane;
   readonly #loader: PluginLoader;
   readonly #proxy: ProxyServer;
@@ -329,10 +338,15 @@ export class Application {
     // the host to say what. Same shape as above, same reason: the callback is
     // only ever invoked after both exist.
     const overlayHolder: { plane?: OverlayControlPlane } = {};
+    this.#preferences =
+      options.preferencesPath === undefined
+        ? undefined
+        : new PreferencesFile({ path: options.preferencesPath, log: this.#log });
     this.#plugins = new PluginHost({
       log: this.#log,
       native: this.#native,
       sessions: this.#proxy,
+      ...(this.#preferences === undefined ? {} : { store: this.#preferences.store }),
       onChanged: () => overlayHolder.plane?.publish(),
     });
     holder.plugins = this.#plugins;
@@ -389,6 +403,11 @@ export class Application {
     this.#log.info(`protocol: ${String(this.#registry.packetCount)} packet definitions`);
 
     await this.#loadGameData();
+
+    // Before a single plugin is loaded, and deliberately: a plugin reads its
+    // persisted values while it is *declaring* them, so the file has to be in
+    // hand first. There is no replay afterwards to get wrong.
+    await this.#preferences?.load();
 
     // Built in, and loaded before anything from disk: it needs a way to tell
     // the module to walk, which is the composition root's to hand over and not
@@ -743,6 +762,9 @@ export class Application {
     this.#loader.stop();
     this.#overlay.stop();
     this.#plugins.disposeAll();
+    // After disposal, so a plugin that writes a setting on its way out is still
+    // captured, and before the pipe closes, so a failure to save is reportable.
+    await this.#preferences?.close();
     if (this.#pipe !== undefined) await this.#pipe.close();
     else this.#native.disconnect('runtime shutting down');
 
