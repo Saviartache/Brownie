@@ -64,13 +64,23 @@ const PLAN_INTERVAL_MS = 25;
 const CURSOR_FEATURE_KEY = 'cursor.track';
 
 /**
- * How often that claim is restated.
+ * The module's switch for letting shots through walls.
+ *
+ * A pair of detours over the client's own projectile collision check — see
+ * `apps/native/src/game/ProjectileNoclip.h`. It lives with auto-aim because it
+ * is the other half of the same complaint: a shot pointed at the right enemy is
+ * no use if the scenery in front of them eats it.
+ */
+const SHOT_NOCLIP_FEATURE_KEY = 'shots.noclip';
+
+/**
+ * How often a claim is restated.
  *
  * The module's lease is a few seconds, and this is comfortably inside it —
  * often enough that a late tick does not drop the reading mid-fight, rare
  * enough that it is one message a second rather than one per plan.
  */
-const CURSOR_CLAIM_INTERVAL_MS = 1000;
+const CLAIM_INTERVAL_MS = 1000;
 
 /**
  * How the player's own shots move, from the game's own data.
@@ -196,6 +206,15 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         max: 1000,
         step: 50,
       });
+      // Nothing to do with choosing a target, and it changes nothing on the
+      // wire: the client stops testing its own projectiles against the scenery,
+      // so a shot that would have died on a wall carries on. Kept here because
+      // it is the other half of "the shot did not reach the enemy it was
+      // pointed at" — see {@link SHOT_NOCLIP_FEATURE_KEY}.
+      const passWalls = context.settings.boolean('passWalls', {
+        label: 'Shots pass walls',
+        default: false,
+      });
 
       const tracker = new MotionTracker();
 
@@ -206,24 +225,31 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       // difference between those two, and it is the only thing that is.
       let cursorSeen = false;
 
-      // **The module measures the cursor only while somebody is reading it**,
-      // so the mode that reads it has to ask — and keep asking. The claim
-      // expires on the far side, which is what stops a plugin that was disabled
-      // or unloaded from leaving the camera being queried for nobody. Restated
-      // an order of magnitude more often than the lease is long.
-      let claimedAtMs = 0;
-      let claiming = false;
-      const claimCursor = (wanted: boolean, now: number): void => {
-        if (!wanted && !claiming) return;
-        if (wanted && claiming && now - claimedAtMs < CURSOR_CLAIM_INTERVAL_MS) return;
-        claiming = wanted;
-        claimedAtMs = now;
-        context.native.setFeature(CURSOR_FEATURE_KEY, wanted);
+      // **The module does each of these only while somebody is asking**, so
+      // whatever reads one has to ask — and keep asking. The claim expires on
+      // the far side, which is what stops a plugin that was disabled or
+      // unloaded from leaving the camera queried for nobody, or the projectile
+      // detours live under a player who switched them off. Restated an order of
+      // magnitude more often than the lease is long.
+      const claimer = (key: string): ((wanted: boolean, now: number) => void) => {
+        let claimedAtMs = 0;
+        let claiming = false;
+        return (wanted: boolean, now: number): void => {
+          if (!wanted && !claiming) return;
+          if (wanted && claiming && now - claimedAtMs < CLAIM_INTERVAL_MS) return;
+          claiming = wanted;
+          claimedAtMs = now;
+          context.native.setFeature(key, wanted);
+        };
       };
+      const claimCursor = claimer(CURSOR_FEATURE_KEY);
+      const claimPassWalls = claimer(SHOT_NOCLIP_FEATURE_KEY);
 
       context.onDispose(() => {
         tracker.clear();
-        claimCursor(false, Date.now());
+        const now = Date.now();
+        claimCursor(false, now);
+        claimPassWalls(false, now);
       });
 
       // Object ids are unique within a map and re-used across one, so a
@@ -353,6 +379,11 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       // them. Waiting for one before pointing anywhere is what put up to a tick
       // between an enemy being worth shooting at and the shots going its way.
       context.timers.setInterval(() => {
+        // Outside the session check below it, unlike the cursor's: what this
+        // one claims is a pair of detours in the client, and it is as true
+        // between maps as it is in one.
+        claimPassWalls(passWalls.get(), Date.now());
+
         const session = context.sessions.current();
         if (session !== undefined) aim(session);
       }, PLAN_INTERVAL_MS);

@@ -526,23 +526,40 @@ process ends: `DllMain` may not tear anything down (loader lock), and
 ### The scene
 
 `ScenePatches` owns what the module does through the scene itself: the local
-player's health bar held at a colour picked in the overlay, the local player's
-collision radius scaled — which is what area damage is decided against, not what
-walls are — and a line of the game's own floating text shown over the player.
-The first two are off until switched on under **Scene**, because each needs a
-detour or a write, and a detour nobody asked for is still in the way of every
-call the game makes through it. The third has no switch: it does nothing until
-the runtime sends a `text` record, which today is noclip's countdown.
+player's health bar held at one colour, the local player's collision radius
+scaled — which is what area damage is decided against, not what walls are — and
+a line of the game's own floating text shown over the player.
 
-The collision radius is the one thing here with **two askers**: the overlay's
-"no hitbox" switch asks for the whole circle gone, and the runtime's collider
-plugin asks for a fraction of one. There is a single field under both, so
-`Engine::ColliderWanted` settles them into the single number the pass writes —
-and because the write replaces a value the game chose, the pass keeps the
-game's own multiplier and puts it back once nobody is asking. See
-`src/game/PlayerCollision.h`.
+**Every switch over any of it belongs to a plugin.** The overlay holds only the
+switches that *draw*, under **Visualisation**; anything that reaches into the
+game is a plugin, so it is configured in one place, persisted with everything
+else, and reachable by a chat command or another plugin rather than only by a
+mouse. The collision radius is `player-collider` — where "no hitbox" is that
+plugin asking for a multiplier of nought — and letting shots through walls is a
+setting of `auto-aim`. The floating text has no switch at all: it does nothing
+until the runtime sends a `text` record, which today is noclip's countdown.
 
-All three need the same walk through Unity's own object model — `GameObject.Find`,
+The health bar tint has no switch of its own either, and deliberately: it is a
+**sign**, claimed by whatever feature needs to be visible while it is on. Today
+that is "no hitbox", which paints the bar purple — a player with no collision
+circle looks exactly like one with a circle until something fails to hit them,
+and by then it is too late to notice the switch was off.
+
+**Each of those is a lease, not a flag**, for the reason player noclip's is: a
+plugin can be disabled, can fail, can be unloaded, and the runtime behind it can
+be killed — and none of those say so. The runtime restates a claim once a second
+while it wants it, the module gives it three, and what the claim was applying is
+put back when it lapses. A value the claim applies — the collider's multiplier,
+the tint's colour — travels ahead of the claim and only when it has moved.
+
+A detour goes in only once something has asked for it, because a detour nobody
+asked for is still in the way of every call the game makes through it; it never
+comes out, because removing one suspends every thread in the game. With nothing
+claimed it forwards each call unchanged. Because the collision write replaces a
+value the game chose, the pass keeps the game's own multiplier and puts it back
+once nobody is asking. See `src/game/PlayerCollision.h`.
+
+All three still need the same walk through Unity's own object model — `GameObject.Find`,
 `transform`, `GetChild`, `GetComponent` and the rest — which is `UnityScene`, and
 which is why they share an owner. Those calls are managed code, so they run on
 the game's thread, from inside the frame; and they are expensive enough

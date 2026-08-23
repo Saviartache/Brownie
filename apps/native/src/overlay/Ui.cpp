@@ -198,9 +198,9 @@ void CopyStateAsJson(const OverlayModel& model) {
 /// the widest of *these* — which is how a value ends up printed over the label
 /// beside it, and it is not a thing a font size can be guessed around.
 constexpr const char* kTintStatus = "Health bar tint";
-/// Not "No hitbox", which is what the switch beside it says: the switch is one
-/// of the two things that can ask for this, and the other asks for a fraction
-/// of a circle rather than none of one.
+/// Not "No hitbox", which is one of the two things the collider plugin can ask
+/// for: the other is a fraction of a circle rather than none of one, and this
+/// line reports whichever arrived.
 constexpr const char* kColliderStatus = "Collision radius";
 constexpr const char* kShotWallStatus = "Shots pass walls";
 constexpr const char* kMarkerStatus = "Show where we are walking";
@@ -209,9 +209,9 @@ constexpr const char* kDodgeMarkerStatus = "Show where we are dodging";
 constexpr const char* kNoclipStatus = "Player noclip";
 constexpr const char* kTextStatus = "Floating text";
 
-constexpr const char* kSceneStatuses[] = {kTintStatus,      kColliderStatus,     kShotWallStatus,
-                                          kMarkerStatus,    kAimMarkerStatus,    kDodgeMarkerStatus,
-                                          kNoclipStatus,    kTextStatus};
+constexpr const char* kVisualisationStatuses[] = {
+    kTintStatus,       kColliderStatus,     kShotWallStatus, kMarkerStatus,
+    kAimMarkerStatus,  kDodgeMarkerStatus,  kNoclipStatus,   kTextStatus};
 
 /// Where the value column starts: past the longest label there is, and a
 /// couple of characters clear of it.
@@ -220,7 +220,7 @@ constexpr const char* kSceneStatuses[] = {kTintStatus,      kColliderStatus,    
 /// being right for the one it was picked against.
 [[nodiscard]] float StatusColumn() {
     float widest = 0.0F;
-    for (const char* label : kSceneStatuses) {
+    for (const char* label : kVisualisationStatuses) {
         widest = std::max(widest, ImGui::CalcTextSize(label).x);
     }
     return widest + ImGui::GetFontSize() * 2.0F;
@@ -241,7 +241,7 @@ void StatusLine(float column, const char* label, const char* format, ...) {
     va_end(args);
 }
 
-/// What the module changes about the game, and what each change has done.
+/// What the module draws, and what everything it does to the game has done.
 ///
 /// **Every switch first, then every count.** They are two different jobs: one
 /// is done with the mouse and once, the other is read while playing — and
@@ -249,40 +249,15 @@ void StatusLine(float column, const char* label, const char* format, ...) {
 /// lines of numbers happen to sit above it. A separator between the two, and
 /// the counts as one column that can be read down.
 ///
-/// The counts are the point of the panel. A switch that is on and a feature
+/// The counts are the point of the panel, and they are most of it now that the
+/// switches over the game itself are plugins. A plugin that is on and a feature
 /// that is working look identical without them — the bar the tint holds is one
 /// the player may not be looking at, and a collision radius nobody walks into
 /// says nothing at all.
-void DrawScene(const OverlayModel& model, UiState& state) {
-    ImGui::Checkbox("Health bar tint", &state.health_bar_tint);
-    if (state.health_bar_tint) {
-        // Only while the switch is on, and indented under it: a colour for a
-        // feature that is off is a control that does nothing. It stays up here
-        // with the switches, because it is one.
-        //
-        // `ColorEdit4` rather than a set of sliders because ImGui already has
-        // the widget, and it is the one place in this overlay where a colour is
-        // the subject rather than the styling — the rule in `Overlay.h` is that
-        // nothing here *paints itself* in colours of its own choosing.
-        ImGui::Indent();
-        ImGui::ColorEdit4("Colour", state.tint_colour.data(),
-                          ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
-        ImGui::Unindent();
-    }
-
-    // Named for what it does to the player rather than for the field it writes:
-    // "no collision" read as walking through walls, which is not what zeroing
-    // the collision radius does. What it stops is what the client decides by
-    // that radius, and the one people notice is area damage.
-    //
-    // The whole circle, and this is the switch that asks for that. Part of one
-    // is the runtime's collider plugin, which writes the same field through the
-    // same pass — see `Engine::ColliderWanted` for how the two are settled.
-    ImGui::Checkbox("No hitbox", &state.no_hitbox);
-    ImGui::Checkbox("Shots pass walls", &state.shots_pass_walls);
-    // The two switches here that change nothing about the game — they draw over
-    // it. Grouped with the rest anyway, because what they draw is what the lines
-    // below describe in numbers.
+void DrawVisualisation(const OverlayModel& model, UiState& state) {
+    // The switches that change nothing about the game — they draw over it — and
+    // the only ones left here. Everything that reaches into the game is under
+    // Plugins, where it can be persisted and reached from one place.
     ImGui::Checkbox("Show where we are walking", &state.movement_markers);
     ImGui::Checkbox("Show where we are aiming", &state.aim_markers);
     // The third of them, and the only one that costs anything on the wire: it
@@ -293,7 +268,11 @@ void DrawScene(const OverlayModel& model, UiState& state) {
 
     const float column = StatusColumn();
 
-    if (!state.health_bar_tint) {
+    // Every line below reads the switch off the model rather than off a
+    // checkbox: each of these is a plugin's claim now, and "off" here means the
+    // runtime is not asking — which covers the plugin being off, the link being
+    // down and the claim having lapsed alike.
+    if (!model.tint_wanted) {
         StatusLine(column, kTintStatus, "off");
     } else if (!model.tint_installed) {
         StatusLine(column, kTintStatus, "waiting for Graphic::set_color");
@@ -301,9 +280,8 @@ void DrawScene(const OverlayModel& model, UiState& state) {
         StatusLine(column, kTintStatus, "%u call(s) recoloured", model.tinted);
     }
 
-    // Off the model rather than off the checkbox above it: the runtime's
-    // collider plugin asks for the same field, and what this line is for is
-    // saying which number is actually in the game.
+    // The number rather than a flag: what this line is for is saying which
+    // multiplier is actually in the game.
     if (!model.collision_scale.has_value()) {
         StatusLine(column, kColliderStatus, "off");
     } else if (!model.collision_bound) {
@@ -313,7 +291,7 @@ void DrawScene(const OverlayModel& model, UiState& state) {
                    static_cast<double>(*model.collision_scale), model.collisions_written);
     }
 
-    if (!state.shots_pass_walls) {
+    if (!model.shot_noclip_wanted) {
         StatusLine(column, kShotWallStatus, "off");
     } else if (!model.shot_noclip_installed) {
         // Not a failure. The game builds the projectile class the first time
@@ -1129,8 +1107,8 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
         DrawPlugins(model, edit, emit);
     }
 
-    if (ImGui::CollapsingHeader("Scene")) {
-        DrawScene(model, state);
+    if (ImGui::CollapsingHeader("Visualisation")) {
+        DrawVisualisation(model, state);
     }
 
     if (ImGui::CollapsingHeader("World")) {

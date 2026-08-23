@@ -148,6 +148,9 @@ constexpr std::string_view kPlayerNoclipFeature = "player.noclip";
 constexpr std::string_view kCursorTrackFeature = "cursor.track";
 constexpr std::string_view kColliderFeature = "player.collider";
 constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultiplier";
+constexpr std::string_view kTintFeature = "scene.healthBarTint";
+constexpr std::string_view kTintColourFeature = "scene.healthBarTintColour";
+constexpr std::string_view kShotNoclipFeature = "shots.noclip";
 constexpr std::string_view kFeatureOn = "true";
 
 /// The number a feature value carries, or nothing when it does not carry one.
@@ -173,6 +176,32 @@ constexpr std::string_view kFeatureOn = "true";
         return std::nullopt;
     }
     return parsed;
+}
+
+/// The colour a feature value carries as `0xRRGGBBAA`, or nothing when it does
+/// not carry one.
+///
+/// `#rrggbbaa` is the one spelling a claimant sends, so that is the one this
+/// reads. Everything else is refused rather than guessed at from a short form:
+/// a colour read as black because a digit was missing looks like a feature that
+/// worked, which is the opposite of what a sign is for.
+[[nodiscard]] std::optional<std::uint32_t> FeatureColour(std::string_view value) noexcept {
+    constexpr std::size_t kDigits = 8;
+    if (value.size() != kDigits + 1 || value.front() != '#') {
+        return std::nullopt;
+    }
+    std::uint32_t packed = 0;
+    for (const char digit : value.substr(1)) {
+        const std::uint32_t nibble = digit >= '0' && digit <= '9'   ? std::uint32_t(digit - '0')
+                                     : digit >= 'a' && digit <= 'f' ? std::uint32_t(digit - 'a' + 10)
+                                     : digit >= 'A' && digit <= 'F' ? std::uint32_t(digit - 'A' + 10)
+                                                                    : 16u;
+        if (nibble > 15u) {
+            return std::nullopt;
+        }
+        packed = (packed << 4u) | nibble;
+    }
+    return packed;
 }
 
 /// How much of a chunk to fill before sending it.
@@ -324,6 +353,24 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
         if (parsed.has_value()) {
             collider_multiplier_.store(std::clamp(*parsed, 0.0F, 1.0F), std::memory_order_relaxed);
         }
+        return;
+    }
+    if (key == kTintFeature) {
+        tint_until_ms_.store(on ? now + kTintLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kTintColourFeature) {
+        // Kept whether or not the claim is live, like the multiplier above and
+        // for the same reason: it arrives ahead of the claim. A value that is
+        // not a colour is dropped, so the bar keeps the last one that was.
+        const auto parsed = FeatureColour(value);
+        if (parsed.has_value()) {
+            tint_colour_.store(*parsed, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (key == kShotNoclipFeature) {
+        shot_noclip_until_ms_.store(on ? now + kShotNoclipLeaseMs : 0, std::memory_order_relaxed);
     }
 }
 
@@ -1104,29 +1151,24 @@ void Engine::DrawFrame() {
     SendCursorPoint(now, pointed);
     ObserveSteer(steering, key_right, key_up, screen, steer_due);
 
-    // The same argument, and the same thread: what the operator switched on is
-    // held in the overlay's own state, but a switch that only acted while the
-    // window happened to be open would be a switch that turns itself off.
-    // And the collision circle, which is the one thing here both sides can ask
-    // for: `ColliderWanted` is where the overlay's switch and the runtime's
-    // claim become the single number there is a single field for.
+    // What the scene pass acts on, and every part of it is the runtime's claim
+    // read on this thread: a lease says whether it is still wanted, and a value
+    // beside it says what it asked for. Both stop being true on their own if
+    // the runtime stops saying them.
     const std::optional<float> collider = ColliderWanted(now);
-    patches_.Want({frame_ui_.health_bar_tint,
-                   game::UiColor{frame_ui_.tint_colour[0], frame_ui_.tint_colour[1],
-                                 frame_ui_.tint_colour[2], frame_ui_.tint_colour[3]},
-                   collider});
+    const bool tint = TintWanted(now);
+    patches_.Want({tint, game::UnpackColour(TintColour()), collider});
     patches_.Apply(now);
 
-    // The same argument again, and this one is a store: what the switch says is
-    // the whole of what the detours read. Written every frame rather than on a
+    // A store rather than a claim acted on once: what the lease says is the
+    // whole of what the detours read. Written every frame rather than on a
     // change, because that is one relaxed store against remembering what was
     // last sent — and it is what puts the feature back on after an install that
     // failed and switched itself off.
-    shot_noclip_.SetEnabled(frame_ui_.shots_pass_walls);
+    const bool shots_pass_walls = ShotNoclipWanted(now);
+    shot_noclip_.SetEnabled(shots_pass_walls);
 
-    // The same store, from the other side: this switch is the runtime's, so
-    // what it says arrives on the IPC thread and is read here — and it stops
-    // being true on its own if the runtime stops saying it.
+    // The same store again, for the claim that made the pattern.
     const bool walk_wanted = WalkNoclipWanted(now);
     walk_noclip_.SetEnabled(walk_wanted);
 
@@ -1141,14 +1183,19 @@ void Engine::DrawFrame() {
     // Read straight off the objects rather than published with the rest of the
     // model: the counters move on every repaint the tint substitutes, and a
     // model republished for that would copy the whole offset report with it.
+    // Every switch below is the runtime's, so what it says is shown here too:
+    // without it a detour that is in and doing nothing is indistinguishable
+    // from a plugin nobody enabled.
+    frame_model_.tint_wanted = tint;
     frame_model_.tint_installed = patches_.tint_installed();
     frame_model_.tinted = patches_.tinted();
     frame_model_.collision_bound = patches_.collision_bound();
     frame_model_.collisions_written = patches_.collisions_written();
-    // What is being asked for, not merely that something is: with two askers
-    // and one of them a plugin, "on" without the number says nothing about
-    // which of them the panel is describing.
+    // What is being asked for, not merely that something is: "on" without the
+    // number says nothing about which end of the plugin's slider the panel is
+    // describing.
     frame_model_.collision_scale = collider;
+    frame_model_.shot_noclip_wanted = shots_pass_walls;
     frame_model_.shot_noclip_installed = shot_noclip_.installed();
     frame_model_.shots_passed = shot_noclip_.passed();
     frame_model_.walk_noclip_wanted = walk_wanted;

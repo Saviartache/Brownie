@@ -689,3 +689,114 @@ describe('the auto-aim plugin', () => {
     });
   });
 });
+
+describe('the auto-aim plugin: letting shots through walls', () => {
+  const features: [string, boolean | number | string][] = [];
+
+  function load(): PluginHost {
+    const host = new PluginHost({
+      log: testLogger(),
+      native: {
+        connected: true,
+        setFeature: (key, value) => {
+          features.push([key, value]);
+        },
+        onConnected: () => () => undefined,
+      } satisfies NativeApi,
+      // No session at all, deliberately: the detours this claims are in the
+      // client, and they are as wanted between maps as they are in one.
+      sessions: {
+        current: () => undefined,
+        all: () => [],
+        onConnected: () => () => undefined,
+        onDisconnected: () => () => undefined,
+      } satisfies SessionApi,
+      onChanged: () => undefined,
+    });
+    host.load(
+      createAutoAimPlugin({
+        output: { aimAt: () => undefined },
+        weapon: () => undefined,
+        isObstacle: () => false,
+        isInvincible: () => false,
+        cursorPoint: () => undefined,
+      }),
+    );
+    host.setEnabled('auto-aim', true);
+    return host;
+  }
+
+  beforeEach(() => {
+    features.length = 0;
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('claims nothing until the switch is on', () => {
+    const host = load();
+    vi.advanceTimersByTime(3000);
+    expect(features).toEqual([]);
+
+    host.settingsOf('auto-aim')?.apply('passWalls', true);
+    // On the next planning interval rather than at once: the claim rides the
+    // loop that is already running, and a detour going in a frame later is not
+    // something anybody can perceive.
+    vi.advanceTimersByTime(25);
+
+    expect(features).toEqual([['shots.noclip', true]]);
+  });
+
+  it('restates the claim once a second, because it is a lease', () => {
+    const host = load();
+    host.settingsOf('auto-aim')?.apply('passWalls', true);
+
+    vi.advanceTimersByTime(3000);
+
+    // Not once per planning interval, which is a hundred times as often as the
+    // lease needs and a hundred times the messages.
+    expect(features).toEqual([
+      ['shots.noclip', true],
+      ['shots.noclip', true],
+      ['shots.noclip', true],
+    ]);
+  });
+
+  it('says stop once when the switch goes off, and then nothing', () => {
+    const host = load();
+    host.settingsOf('auto-aim')?.apply('passWalls', true);
+    vi.advanceTimersByTime(1000);
+    features.length = 0;
+
+    host.settingsOf('auto-aim')?.apply('passWalls', false);
+    vi.advanceTimersByTime(3000);
+
+    expect(features).toEqual([['shots.noclip', false]]);
+  });
+
+  it('stops restating when the plugin is switched off, and lets the lease end it', () => {
+    const host = load();
+    host.settingsOf('auto-aim')?.apply('passWalls', true);
+    vi.advanceTimersByTime(1000);
+    features.length = 0;
+
+    host.setEnabled('auto-aim', false);
+    vi.advanceTimersByTime(5000);
+
+    expect(features).toEqual([]);
+  });
+
+  it('drops the claim outright when the plugin is unloaded', () => {
+    const host = load();
+    host.settingsOf('auto-aim')?.apply('passWalls', true);
+    vi.advanceTimersByTime(1000);
+    features.length = 0;
+
+    host.unload('auto-aim');
+
+    expect(features).toContainEqual(['shots.noclip', false]);
+  });
+});

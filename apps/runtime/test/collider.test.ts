@@ -83,6 +83,62 @@ describe('the collider plugin', () => {
     ]);
   });
 
+  it('claims the whole circle when the hitbox is switched off, and signs it', () => {
+    const { settings } = load(true);
+    settings.apply('multiplier', 0.8);
+    features.length = 0;
+
+    settings.apply('noHitbox', true);
+
+    // The colour once, ahead of the claim that applies it; the multiplier is
+    // nought whatever the slider was left at.
+    expect(features).toEqual([
+      ['player.colliderMultiplier', 0],
+      ['player.collider', true],
+      ['scene.healthBarTintColour', '#a855f7ff'],
+      ['scene.healthBarTint', true],
+    ]);
+  });
+
+  it('restates the sign with the claim, and says the colour only once', () => {
+    const { settings } = load(true);
+    settings.apply('noHitbox', true);
+    features.length = 0;
+
+    vi.advanceTimersByTime(2000);
+
+    expect(features).toEqual([
+      ['player.collider', true],
+      ['scene.healthBarTint', true],
+      ['player.collider', true],
+      ['scene.healthBarTint', true],
+    ]);
+  });
+
+  it('gives the slider back and drops the sign at once when the hitbox returns', () => {
+    const { settings } = load(true);
+    settings.apply('noHitbox', true);
+    features.length = 0;
+
+    settings.apply('noHitbox', false);
+
+    // The sign is said off rather than left to lapse: three seconds of a bar
+    // still wearing it reads as a switch that did not work.
+    expect(features).toEqual([
+      ['player.colliderMultiplier', 0.5],
+      ['player.collider', true],
+      ['scene.healthBarTint', false],
+    ]);
+  });
+
+  it('never mentions the sign while the hitbox is left alone', () => {
+    const { settings } = load(true);
+    settings.apply('multiplier', 0.2);
+    vi.advanceTimersByTime(3000);
+
+    expect(features.some(([key]) => key.startsWith('scene.'))).toBe(false);
+  });
+
   it('refuses a value the slider cannot hold', () => {
     const { settings } = load(true);
 
@@ -130,6 +186,19 @@ describe('the collider plugin', () => {
     // running out, which is what covers the ways a plugin stops without saying
     // so; see `Engine::AcceptFeature`.
     expect(features).toEqual([]);
+  });
+
+  it('drops the sign as well as the claim when it is unloaded wearing one', () => {
+    const { host, settings } = load(true);
+    settings.apply('noHitbox', true);
+    features.length = 0;
+
+    host.unload('player-collider');
+
+    expect(features).toEqual([
+      ['player.collider', false],
+      ['scene.healthBarTint', false],
+    ]);
   });
 
   it('drops the claim outright when it is unloaded', () => {

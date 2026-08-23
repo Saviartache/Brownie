@@ -218,26 +218,27 @@ struct OverlayModel {
     /// done. Filled by the frame rather than published with the rest of the
     /// model — the counters change on every repaint, and a model republished
     /// for them would copy a vector of offsets each time.
+    ///
+    /// Every one of them is switched on from the runtime, so what the switch
+    /// says is shown here too: without it a detour that is in and doing nothing
+    /// is indistinguishable from a plugin nobody enabled.
+    bool tint_wanted = false;
     bool tint_installed = false;
     std::uint32_t tinted = 0;
     bool collision_bound = false;
     std::uint32_t collisions_written = 0;
     /// What the player's collision circle is being scaled by, or nothing while
-    /// the game's own value is in place. Not read off the switch beside it:
-    /// the runtime's collider plugin asks for this too, and a panel that only
-    /// knew about the checkbox would report a working feature as off.
+    /// the game's own value is in place. The number rather than a flag: which
+    /// end of the plugin's slider is in the game is what the panel is for.
     std::optional<float> collision_scale;
     /// Whether the projectile collision detours are in place, and how many
-    /// shots have been let through a wall. Same argument as the pair above: a
-    /// switch that is on and a feature that is working look identical without
-    /// a count, and this one cannot be installed until the game has built a
-    /// projectile — so "waiting" is a state worth telling apart from "broken".
+    /// shots have been let through a wall. A switch that is on and a feature
+    /// that is working look identical without a count, and this one cannot be
+    /// installed until the game has built a projectile — so "waiting" is a
+    /// state worth telling apart from "broken".
+    bool shot_noclip_wanted = false;
     bool shot_noclip_installed = false;
     std::uint32_t shots_passed = 0;
-    /// Player noclip, which unlike everything above it is switched on from the
-    /// runtime — so what the switch says is shown here too. Without it a
-    /// detour that is in and doing nothing is indistinguishable from a plugin
-    /// nobody enabled.
     bool walk_noclip_wanted = false;
     std::uint32_t walks_allowed = 0;
     /// How many walkability predicates are detoured.
@@ -351,27 +352,14 @@ struct UiState {
     PendingEdit edit;
     InspectorInput inspector;
 
-    /// The changes the module can make to the game itself, all off until
-    /// somebody switches them on here. The first two are scene passes — see
-    /// `app/ScenePatches.h`; the third is a pair of detours over the projectile
-    /// collision check — see `game/ProjectileNoclip.h`.
-    ///
-    /// **Held by the overlay rather than by the runtime**, unlike everything
-    /// under Plugins: these act on the game through this process alone, there
-    /// is nothing for the runtime to decide about them, and a switch that could
-    /// only be reached over a link that has to be up would be one nobody could
-    /// use to find out why the link is down.
-    bool health_bar_tint = false;
-    bool no_hitbox = false;
-    bool shots_pass_walls = false;
-
     /// Whether to draw where the module is walking, and where it is pointing
     /// the player's shots, over the map itself.
     ///
-    /// Held here for the same reason as the three above — they change nothing
-    /// on the wire and the runtime has nothing to decide about them — and they
-    /// are the two switches in this list that do nothing to the game at all.
-    /// See `WorldMarkers.h`.
+    /// **Held by the overlay rather than by the runtime**, unlike everything
+    /// under Plugins: they change nothing on the wire, they do nothing to the
+    /// game at all, and a switch that could only be reached over a link that
+    /// has to be up would be one nobody could use to find out why the link is
+    /// down. See `WorldMarkers.h`.
     bool movement_markers = false;
     bool aim_markers = false;
     /// Whether to draw every shot's remaining path over the map, coloured by
@@ -382,15 +370,6 @@ struct UiState {
     /// the box asks for it and unticking it stops the traffic. See
     /// `Engine::PublishDodgeView` and `ShotTrails.h`.
     bool dodge_markers = false;
-
-    /// What colour the health bar's fill is held at, as RGBA in 0..1 — the
-    /// layout `ImGui::ColorEdit4` edits in place.
-    ///
-    /// Filled in by whoever owns this state, because the default belongs to the
-    /// feature rather than to the widget that shows it — see
-    /// `game::HealthBarTint::kDefaultColour`. The overlay knows nothing about
-    /// the game layer and must not carry a second copy of its number.
-    std::array<float, 4> tint_colour{};
 };
 
 /// Draws the whole overlay. Call between `NewFrame` and `Render`.

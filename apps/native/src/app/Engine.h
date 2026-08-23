@@ -92,14 +92,7 @@ class Engine {
     /// than it moves a mouse.
     static constexpr std::uint32_t kSteerIntervalMs = 100;
 
-    explicit Engine(EngineOptions options) noexcept : options_{std::move(options)} {
-        // The tint's own default, put where the picker will show it. Here
-        // rather than in `UiState` because the overlay knows nothing about the
-        // game layer, and a colour spelled out in both would be two numbers to
-        // keep in step.
-        const game::UiColor colour = game::HealthBarTint::kDefaultColour;
-        frame_ui_.tint_colour = {colour.r, colour.g, colour.b, colour.a};
-    }
+    explicit Engine(EngineOptions options) noexcept : options_{std::move(options)} {}
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -164,6 +157,14 @@ class Engine {
     /// the game's own multiplier back, so three seconds is how long a killed
     /// runtime leaves the player smaller than the game built them.
     static constexpr std::uint64_t kColliderLeaseMs = 3000;
+
+    /// The same again, for the runtime's claim on the health bar's colour and
+    /// for its claim on letting shots through walls. Nothing dangerous is left
+    /// behind by either lapsing — one repaints a bar the game repaints itself,
+    /// the other stops a detour substituting — but a claim that outlives its
+    /// claimant is a claim nobody can revoke.
+    static constexpr std::uint64_t kTintLeaseMs = 3000;
+    static constexpr std::uint64_t kShotNoclipLeaseMs = 3000;
 
     /// How long the next poll may wait: until the soonest job is due, and no
     /// longer than one poll's worth.
@@ -299,20 +300,35 @@ class Engine {
     /// What the player's collision circle should be scaled by at `now_ms`, or
     /// nothing to leave the game's own value alone.
     ///
-    /// **Where the overlay's switch and the runtime's claim are settled**, and
-    /// there is one field under both: the switch is the whole circle gone, so
-    /// it wins over a plugin asking for part of one.
-    ///
-    /// **Render thread**, because that is the thread the overlay's own state
-    /// belongs to — unlike the two above, which either side may ask.
+    /// One asker now that the overlay's "no hitbox" switch has moved into the
+    /// plugin that owns this field: the whole circle gone is that plugin asking
+    /// for a multiplier of nought, which is a value this already carries.
     [[nodiscard]] std::optional<float> ColliderWanted(std::uint64_t now_ms) const noexcept {
-        if (frame_ui_.no_hitbox) {
-            return 0.0F;
-        }
         if (now_ms >= collider_until_ms_.load(std::memory_order_relaxed)) {
             return std::nullopt;
         }
         return collider_multiplier_.load(std::memory_order_relaxed);
+    }
+
+    /// Whether the runtime's claim on the health bar's colour is still good at
+    /// `now_ms`, and what colour it asked for as `0xRRGGBBAA`.
+    ///
+    /// The colour is read whether or not the claim is live, for the reason the
+    /// collider's multiplier is: it arrives ahead of the claim and only when it
+    /// has moved, so a value refused for arriving first would leave the claim
+    /// painting with the colour before it.
+    [[nodiscard]] bool TintWanted(std::uint64_t now_ms) const noexcept {
+        return now_ms < tint_until_ms_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::uint32_t TintColour() const noexcept {
+        return tint_colour_.load(std::memory_order_relaxed);
+    }
+
+    /// Whether the runtime's claim on letting shots through walls is still good
+    /// at `now_ms`.
+    [[nodiscard]] bool ShotNoclipWanted(std::uint64_t now_ms) const noexcept {
+        return now_ms < shot_noclip_until_ms_.load(std::memory_order_relaxed);
     }
 
     /// Installs the connect redirect once Winsock is loaded. Ordinary to be too
@@ -395,14 +411,13 @@ class Engine {
 
     /// When the runtime's claim on player noclip runs out.
     ///
-    /// **A lease rather than a flag**, and it is the only switch here that is
-    /// one. Everything else the module does to the game is switched off by the
-    /// same overlay that switched it on, and that switch cannot go away. This
-    /// one can: it is a plugin, and a plugin can be disabled, can fail, can be
-    /// unloaded, and the runtime behind it can be killed — and every one of
-    /// those leaves the game with a player who walks through walls and no way
-    /// to say stop. So the runtime restates it while it wants it and the claim
-    /// expires on its own; see `kWalkNoclipLeaseMs`.
+    /// **A lease rather than a flag**, which is what every switch the runtime
+    /// owns is and for the reason this one made plainest: it is a plugin, and a
+    /// plugin can be disabled, can fail, can be unloaded, and the runtime behind
+    /// it can be killed — and every one of those leaves the game with a player
+    /// who walks through walls and no way to say stop. So the runtime restates
+    /// it while it wants it and the claim expires on its own; see
+    /// `kWalkNoclipLeaseMs`.
     ///
     /// Written by the IPC thread, read by the game's on every frame and by the
     /// setup pass.
@@ -523,6 +538,22 @@ class Engine {
     /// Written by the IPC thread, read by the game's on every frame.
     std::atomic<std::uint64_t> collider_until_ms_{0};
     std::atomic<float> collider_multiplier_{1.0F};
+
+    /// When the runtime's claim on the health bar's colour runs out, and what
+    /// colour it asked for, packed as `0xRRGGBBAA`.
+    ///
+    /// Packed rather than four floats for the reason `game::PackColour` gives:
+    /// one word is one load, so a colour changing cannot be observed half-done
+    /// by the thread reading it.
+    ///
+    /// Written by the IPC thread, read by the game's on every frame.
+    std::atomic<std::uint64_t> tint_until_ms_{0};
+    std::atomic<std::uint32_t> tint_colour_{game::PackColour(game::HealthBarTint::kDefaultColour)};
+
+    /// When the runtime's claim on letting shots through walls runs out.
+    ///
+    /// Written by the IPC thread, read by the game's on every frame.
+    std::atomic<std::uint64_t> shot_noclip_until_ms_{0};
 
     std::thread thread_;
     std::atomic<bool> running_{false};

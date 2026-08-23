@@ -40,6 +40,28 @@ const FEATURE_KEY = 'player.collider';
 const MULTIPLIER_KEY = 'player.colliderMultiplier';
 
 /**
+ * The health bar, held at one colour, and the colour to hold it at.
+ *
+ * **A sign rather than a feature of its own.** Nothing about the collision
+ * circle is visible: a player with no hitbox looks exactly like a player with
+ * one until something fails to hit them, and by then it is too late to notice
+ * the switch was off. So the bar says which it is, in a colour nothing in this
+ * game's palette is near, and it says it for as long as the claim below is
+ * live — see `game::HealthBarTint` for how the module paints it.
+ */
+const TINT_KEY = 'scene.healthBarTint';
+const TINT_COLOUR_KEY = 'scene.healthBarTintColour';
+
+/**
+ * The sign's colour: violet, as `#rrggbbaa`.
+ *
+ * The one spelling the module reads — see `FeatureColour` in
+ * `apps/native/src/app/Engine.cpp`, which refuses any other rather than
+ * guessing, because a colour read wrong looks like a feature that worked.
+ */
+const NO_HITBOX_COLOUR = '#a855f7ff';
+
+/**
  * How often the claim is restated. The second player noclip restates on, and
  * the module's lease is three of these — so a late turn of the loop does not
  * put the collider back under somebody who is using it.
@@ -59,12 +81,28 @@ export function createColliderPlugin(): Plugin {
     },
 
     setup(context) {
+      // The whole circle rather than part of one, and it is the same claim on
+      // the same field — a multiplier of nought. A switch rather than "drag the
+      // slider to zero" because it is the thing people actually want, and
+      // because a slider left at zero reads as a slider nobody finished moving.
+      //
+      // Named for what it does to the player rather than for the field it
+      // writes: what it stops is what the *client* decides against that circle,
+      // and the one people notice is area damage. It is not a wall clip.
+      const noHitbox = context.settings.boolean('noHitbox', {
+        label: 'No hitbox',
+        default: false,
+      });
       const multiplier = context.settings.range('multiplier', {
         label: 'Collision radius multiplier',
         default: 0.5,
         min: 0,
         max: 1,
         step: 0.05,
+        // Hidden rather than disabled, which is this overlay's exception and
+        // the case it exists for: while the circle is gone entirely there is no
+        // fraction of one to choose.
+        visibleWhen: { key: 'noHitbox', equals: [false] },
       });
 
       /**
@@ -78,8 +116,12 @@ export function createColliderPlugin(): Plugin {
        */
       let sent: number | undefined;
 
+      /** Whether the module was last told to hold the bar at the sign colour. */
+      let signing = false;
+
       const claim = (): void => {
-        const value = multiplier.get();
+        const gone = noHitbox.get();
+        const value = gone ? 0 : multiplier.get();
         // Before the claim, always: a claim the module heard first would be a
         // claim on the last number it happened to hold.
         if (value !== sent) {
@@ -87,16 +129,35 @@ export function createColliderPlugin(): Plugin {
           sent = value;
         }
         context.native.setFeature(FEATURE_KEY, true);
+
+        if (gone) {
+          // The colour once, ahead of the claim that applies it, for the same
+          // reason the multiplier goes first. The claim itself is restated on
+          // every tick, because it is the same kind of lease as the collider's.
+          if (!signing) {
+            context.native.setFeature(TINT_COLOUR_KEY, NO_HITBOX_COLOUR);
+            signing = true;
+          }
+          context.native.setFeature(TINT_KEY, true);
+          return;
+        }
+        if (signing) {
+          // Said rather than left to lapse, unlike everything else here: three
+          // seconds of a bar still wearing the sign after the switch went off
+          // reads as a switch that did not work.
+          signing = false;
+          context.native.setFeature(TINT_KEY, false);
+        }
       };
 
       // Answered now rather than on the next tick: a slider whose result
       // arrives a second after it is dragged is one nobody can aim. Gated,
       // because a setting changed on a disabled plugin is not a claim.
-      context.onDispose(
-        multiplier.onChange(() => {
-          if (context.enabled) claim();
-        }),
-      );
+      const answerNow = (): void => {
+        if (context.enabled) claim();
+      };
+      context.onDispose(multiplier.onChange(answerNow));
+      context.onDispose(noHitbox.onChange(answerNow));
 
       // The heartbeat, and the whole of the switch: the host runs this only
       // while the plugin is enabled, so switching it off is what stops the
@@ -107,6 +168,7 @@ export function createColliderPlugin(): Plugin {
       // ways that cannot.
       context.onDispose(() => {
         context.native.setFeature(FEATURE_KEY, false);
+        if (signing) context.native.setFeature(TINT_KEY, false);
       });
     },
   });

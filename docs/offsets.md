@@ -316,9 +316,9 @@ play does.
 until something reads it; a hook is a write into the game's own code and is in
 the way of every shot from the moment it exists. So the module installs the aim
 detours the first time the runtime sends an `aim` record — which it only does
-while auto-aim is switched on — the collision detours the first time the
-overlay's **Shots pass walls** switch is on, and the walkability detours the
-first time the runtime claims `player.noclip`. Each says in the runtime's log
+while auto-aim is switched on — the projectile collision detours the first
+time the runtime claims `shots.noclip` — auto-aim's **Shots pass walls** setting
+— and the walkability detours the first time it claims `player.noclip`. Each says in the runtime's log
 which methods it went onto.
 
 To find another, from one live run:
