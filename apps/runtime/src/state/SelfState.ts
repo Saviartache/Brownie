@@ -80,6 +80,20 @@ export class SelfState implements SelfView {
     return this.#maxHpBase + this.#hpBonus;
   }
 
+  /**
+   * The base on its own — the number the server actually stated.
+   *
+   * **The only one of the two the game client also holds.** {@link maxHp} is
+   * this plus a bonus, computed here and stored nowhere: it is a threshold to
+   * measure against, not a value that exists. So anything comparing itself to
+   * the client's own memory has to ask for the base — see
+   * `overlay/WorldStatusStage.ts`, which sends it, and `game/PlayerHandle.h`,
+   * which finds the stat block by looking for it.
+   */
+  get maxHpBase(): number {
+    return this.#maxHpBase;
+  }
+
   get maxMp(): number {
     return this.#maxMpBase + this.#mpBonus;
   }

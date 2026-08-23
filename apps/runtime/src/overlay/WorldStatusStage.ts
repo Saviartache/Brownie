@@ -109,7 +109,12 @@ export class WorldStatusStage implements PipelineStage {
     const record = [
       WORLD_RECORD_KIND,
       Math.round(self.hp),
-      Math.round(self.maxHp),
+      // The base, not `maxHp`. The module reads the client's own stat block and
+      // finds it by looking for the health the server stated — so what travels
+      // has to be a number the client holds. `maxHp` is the base plus a bonus,
+      // added up here and stored nowhere, and sending it left the search with
+      // nothing to match: the stats went unread on any character wearing gear.
+      Math.round(self.maxHpBase),
       Math.round(self.x * 100),
       Math.round(self.y * 100),
       this.#world.entityStore.size,

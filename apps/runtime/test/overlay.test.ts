@@ -443,6 +443,21 @@ describe('WorldStatusStage', () => {
     expect(h.records[0]).toMatch(/^world\|800\|1000\|/);
   });
 
+  it('sends the maximum the server stated, not the boosted one', () => {
+    const h = harness();
+    h.world.self.applyStats([
+      { id: StatType.MaxHp, value: 1000, stackCount: 0 },
+      { id: StatType.Hp, value: 800, stackCount: 0 },
+      { id: StatType.HpBoost, value: 200, stackCount: 0 },
+    ]);
+    h.stage.handle(newtick(), context);
+    // The module matches this against the client's own stat block to find where
+    // the anti-tamper moved it. 1200 is a sum this side computes and the client
+    // holds nowhere, so sending it left the search with nothing to match.
+    expect(h.records[0]).toMatch(/^world\|800\|1000\|/);
+    expect(h.world.self.maxHp).toBe(1200);
+  });
+
   it('says nothing when nothing has changed', () => {
     const h = harness();
     h.stage.handle(newtick(), context);

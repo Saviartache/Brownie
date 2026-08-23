@@ -143,6 +143,13 @@ void CopyStateAsJson(const OverlayModel& model) {
         if (model.memory.defense_known) {
             append(", \"defense\": %d", model.memory.defense);
         }
+        // A reading can be partial — a position and nothing else — and then the
+        // reason belongs here too. Reported only when there is nothing at all,
+        // it left "the stats are missing and I cannot say why" as the one state
+        // a pasted report could not describe.
+        if (!model.memory.trouble.empty()) {
+            append(", \"trouble\": \"%s\"", model.memory.trouble.c_str());
+        }
         out.append(" }");
     }
 
@@ -505,8 +512,10 @@ void DrawWorld(const OverlayModel& model) {
     ImGui::EndTable();
 
     // Only when there is something the matter. An empty client column with no
-    // explanation is a question; this is the answer to it.
-    if (!model.memory.known && !model.memory.trouble.empty()) {
+    // explanation is a question; this is the answer to it — and a reading that
+    // has a position but no stats is exactly that question, so the reason is
+    // shown whenever there is one rather than only when there is no reading.
+    if (!model.memory.trouble.empty()) {
         ImGui::TextDisabled("%s", model.memory.trouble.c_str());
     }
 }
