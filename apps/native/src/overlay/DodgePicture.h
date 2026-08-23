@@ -63,13 +63,12 @@ enum class MarkKind : int {
     Player = 0,
     Engage = 1,
     Body = 2,
-    KeepAway = 3,
-    InRange = 4,
-    Blast = 5,
+    InRange = 3,
+    Blast = 4,
 };
 
 /// The largest kind this build knows, for refusing the ones it does not.
-inline constexpr int kMaxMarkKind = 5;
+inline constexpr int kMaxMarkKind = 4;
 
 /// One circle on the ground.
 struct DodgeMark {

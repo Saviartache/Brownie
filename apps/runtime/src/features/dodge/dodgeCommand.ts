@@ -28,6 +28,10 @@ import type { DodgePlan } from './DodgeController.js';
  * nearer than a frame's step is a command to stand still. This is the floor
  * under "walk this way", and it is deliberately larger than one frame of the
  * fastest character in the game.
+ *
+ * **A floor and not a target.** A plan's step is where to stop, so the command
+ * is normally exactly that far; this only stops a step measured in millimetres
+ * from being a command the module rounds away to nothing.
  */
 const MIN_TARGET_TILES = 0.3;
 
@@ -48,8 +52,6 @@ export interface WalkRequest {
   readonly intent: Position | undefined;
   /** What the planner is allowed to spend, in tiles per second. */
   readonly speedTilesPerSecond: number;
-  /** And what the character can actually do, for a shove. */
-  readonly fullSpeedTilesPerSecond: number;
   /** Whether their own input is being cancelled rather than added to. */
   readonly cancelIntent: boolean;
   /** How long the offset stands, which is what decides how far it reaches. */
@@ -67,17 +69,13 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   const plan = request.plan;
   if (!plan.steer) return undefined;
 
-  // At the speed the plan asked for, which is not always full: the safe place in
-  // a wall of shots is often inside the ring rather than on it.
-  //
-  // **Except when something is standing on the player**, which is a shove rather
-  // than a sidestep and is worth the margin the ordinary speed keeps in hand —
-  // the whole complaint is that monsters get close anyway. The margin exists
-  // because a command past the server's own limit is what makes it pull the
-  // character back; the *limit* is what this spends, and no more.
-  const urgency = plan.crowded ? request.fullSpeedTilesPerSecond : request.speedTilesPerSecond;
-  let wantX = plan.dirX * urgency * plan.speedScale;
-  let wantY = plan.dirY * urgency * plan.speedScale;
+  // At full speed, always: a course that is worth walking is worth arriving at,
+  // and how far to go is the plan's own answer rather than something to spend
+  // speed on. Crossing a lane of fire slowly is the one way of crossing it that
+  // does not work.
+  const speed = request.speedTilesPerSecond;
+  let wantX = plan.dirX * speed;
+  let wantY = plan.dirY * speed;
 
   const intent = request.intent;
   if (request.cancelIntent && intent !== undefined) {
@@ -101,10 +99,17 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   // that, and a command past the character's own speed is what makes the server
   // pull them back — so the correction is allowed to be partial and is never
   // allowed to be a snap-back.
-  const commanded = Math.min(magnitude, urgency);
-  // Far enough that the module's per-frame step is never the thing that
-  // truncates the walk. It is a direction, expressed as a distance.
-  const distance = Math.max(MIN_TARGET_TILES, (commanded * request.holdMs) / 1000);
+  const commanded = Math.min(magnitude, speed);
+  // **The plan's own step, and no further.** The module walks towards an offset
+  // and stops on arrival, so this is what makes "into the gap and stand" carry
+  // itself out if no further plan ever arrives — where a fixed reach past it
+  // would keep walking out the other side. Never longer than the hold can cover
+  // either, because everything past the next plan is a decision already
+  // withdrawn.
+  const distance = Math.max(
+    MIN_TARGET_TILES,
+    Math.min(plan.stepTiles, (commanded * request.holdMs) / 1000),
+  );
   return {
     offsetX: (wantX / magnitude) * distance,
     offsetY: (wantY / magnitude) * distance,

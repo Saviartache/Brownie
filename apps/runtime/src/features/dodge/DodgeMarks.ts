@@ -3,19 +3,17 @@
  *
  * **A shot path answers "is the prediction right"; nothing answered "is the
  * *decision* right".** Every complaint this feature has ever had was about a
- * distance — it dodges shots that were never near, it lets monsters stand on
- * top of me, it walks out of range, it ignored that bomb — and every one of
- * those distances is a number in a settings panel that nobody can check against
- * a moving fight. Drawn on the ground they check themselves: either the ring
- * the planner reacts inside is where the shots are being answered or it is not,
- * and either the circle it refuses to enter is around the monster or it is
- * around a pillar.
+ * distance — it dodges shots that were never near, it walks out of range, it
+ * ignored that bomb — and every one of those distances is a number in a
+ * settings panel that nobody can check against a moving fight. Drawn on the
+ * ground they check themselves: either the ring the planner reacts inside is
+ * where the shots are being answered or it is not, and either the thing it is
+ * staying in reach of is the monster or it is a pillar.
  *
  * **Circles, because every one of them genuinely is one.** The engagement ring,
- * the near edge of the spacing band, the weapon's reach and a blast's footprint
- * are all radii — see `EnemyBodies` for why the band is round while the shot
- * hitboxes are square. Squares would be a second shape to draw and a second
- * thing to get wrong.
+ * the weapon's reach and a blast's footprint are all radii — see `EnemyBodies`
+ * for why the reach is round while the shot hitboxes are square. Squares would
+ * be a second shape to draw and a second thing to get wrong.
  *
  * **Built here rather than in the plugin** for the same reason `ShotPaths` is:
  * it is arithmetic over what the planner already holds, it is worth testing
@@ -24,7 +22,7 @@
  */
 
 import type { BlastView } from './Blasts.js';
-import { nearEdgeOf, type EnemyBodies, type StandoffBand } from './EnemyBodies.js';
+import type { EnemyBodies } from './EnemyBodies.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /** What one circle means. The drawing colours and shapes by it. */
@@ -35,12 +33,10 @@ export const DodgeMarkKind = {
   Engage: 1,
   /** One monster's own body, at the size the catalog gives it. */
   Body: 2,
-  /** And the distance around it the planner refuses to be inside. */
-  KeepAway: 3,
   /** How far the weapon reaches, which is what it tries not to drift past. */
-  InRange: 4,
+  InRange: 3,
   /** An area effect on its way down, drawn where and as wide as it will land. */
-  Blast: 5,
+  Blast: 4,
 } as const;
 
 export type DodgeMarkKind = (typeof DodgeMarkKind)[keyof typeof DodgeMarkKind];
@@ -105,8 +101,7 @@ const NOT_WAITING = 1000;
  *
  * A screen with more than this on it is unreadable whatever is drawn, and the
  * cap is what stops a debug view being the most expensive thing in a fight —
- * every one of these crosses a pipe fifty times a second. Bodies come in pairs,
- * so the bound is on the pairs as much as on the total.
+ * every one of these crosses a pipe fifty times a second.
  */
 export const MAX_DRAWN_MARKS = 64;
 
@@ -118,8 +113,8 @@ export interface PictureScene {
   readonly gameTimeMs: number;
   /** The ring, or nought while shots are not being minded at all. */
   readonly engageTiles: number;
-  /** The distances to fight between, or `undefined` while they are not minded. */
-  readonly band: StandoffBand | undefined;
+  /** How far the weapon reaches, or `undefined` while monsters are unminded. */
+  readonly rangeTiles: number | undefined;
   /** The bodies the planner collected, in the order it collected them. */
   readonly bodies: EnemyBodies;
   /** The area effects still on their way down. */
@@ -144,9 +139,9 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   // the one mark that says nothing about danger: it is the edge the planner
   // tries not to drift past, and seeing it is how "I do no damage" gets an
   // answer.
-  const band = scene.band;
-  if (band !== undefined && Number.isFinite(band.stayWithinTiles)) {
-    marks.push(onPlayer(DodgeMarkKind.InRange, scene.selfX, scene.selfY, band.stayWithinTiles));
+  const rangeTiles = scene.rangeTiles;
+  if (rangeTiles !== undefined && Number.isFinite(rangeTiles)) {
+    marks.push(onPlayer(DodgeMarkKind.InRange, scene.selfX, scene.selfY, rangeTiles));
   }
 
   for (const blast of scene.blasts) {
@@ -160,21 +155,22 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
     marks.push(atPlace(DodgeMarkKind.Blast, blast.x, blast.y, blast.radiusTiles, waiting(armsIn)));
   }
 
-  if (band === undefined) return marks;
+  if (rangeTiles === undefined) return marks;
   for (let i = 0; i < scene.bodies.count; i += 1) {
-    // Two apiece, so a body that fits only half a pair is not drawn at all —
-    // a keep-away circle with nothing in the middle of it reads as a mistake.
-    if (marks.length + 2 > MAX_DRAWN_MARKS) return marks;
-    const x = scene.bodies.xOf(i);
-    const y = scene.bodies.yOf(i);
-    const half = scene.bodies.halfOf(i);
+    if (marks.length >= MAX_DRAWN_MARKS) return marks;
     // Tiles per second, because that is the unit everything outside this
     // feature counts speed in; the bodies hold it per millisecond because that
     // is what a sweep multiplies by.
-    const velocityX = scene.bodies.velocityXOf(i) * A_SECOND_MS;
-    const velocityY = scene.bodies.velocityYOf(i) * A_SECOND_MS;
-    marks.push(onBody(DodgeMarkKind.Body, x, y, half, velocityX, velocityY));
-    marks.push(onBody(DodgeMarkKind.KeepAway, x, y, nearEdgeOf(half, band), velocityX, velocityY));
+    marks.push(
+      onBody(
+        DodgeMarkKind.Body,
+        scene.bodies.xOf(i),
+        scene.bodies.yOf(i),
+        scene.bodies.halfOf(i),
+        scene.bodies.velocityXOf(i) * A_SECOND_MS,
+        scene.bodies.velocityYOf(i) * A_SECOND_MS,
+      ),
+    );
   }
 
   return marks;

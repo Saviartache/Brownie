@@ -3,16 +3,16 @@
  *
  * **The controller is arithmetic over positions and knows nothing about
  * sessions.** What it needs of the world is three questions — can a body stand
- * here, is this ground hurting, how far out of position is this place — and a
- * list of monsters to answer the third with. Building those from a session is a
- * job of its own: it involves the object catalog, the equipped weapon, two
+ * here, is this ground hurting, how far out of weapon range is this place — and
+ * a list of monsters to answer the third with. Building those from a session is
+ * a job of its own: it involves the object catalog, the equipped weapon, two
  * clearance margins that are dropped when the player is already inside them, and
  * a motion tracker that turns five sightings a second into a velocity.
  *
- * **Everything here is allocated once.** The adapter, the band and the record a
- * body is read back through are all rewritten in place: a plan happens fifty
- * times a second, and a fresh closure per question was the single largest thing
- * this feature allocated.
+ * **Everything here is allocated once.** The adapter and the record a body is
+ * read back through are rewritten in place: a plan happens fifty times a
+ * second, and a fresh closure per question was the single largest thing this
+ * feature allocated.
  */
 
 import type { BlastView, EntityView, SessionView, WorldView } from '@brownie/plugin-api';
@@ -32,7 +32,6 @@ import {
   EnemyBodies,
   OUT_OF_RANGE_CAP_TILES,
   type BodySighting,
-  type StandoffBand,
 } from './EnemyBodies.js';
 
 /** How far past the player's own reach to look for bodies worth avoiding. */
@@ -44,39 +43,25 @@ export class DodgeScene {
   /**
    * How fast the monsters near the player are moving.
    *
-   * **What tells a monster the player walked up to from one that walked up to
-   * the player**, and the two want opposite answers: the first is where they
-   * meant to be, the second is the thing the near edge of the band exists to
-   * keep off them. Nothing on the wire says it, so it is derived from
-   * consecutive sightings — the same tracker, and the same reason, as auto-aim's
-   * lead.
+   * **What tells a monster walking out of reach from one walking into it.**
+   * Nothing on the wire says it, so it is derived from consecutive sightings —
+   * the same tracker, and the same reason, as auto-aim's lead.
    */
   readonly #motion = new MotionTracker();
   /**
-   * The distances to fight between, rewritten in place each plan.
-   *
-   * One object for the life of the plugin rather than one per plan: it is read a
-   * hundred times a plan and fifty plans a second, and the two numbers in it
-   * change only when the player swaps a weapon or drags a slider.
-   */
-  readonly #band = { keepAwayTiles: 0, stayWithinTiles: Infinity };
-  /**
-   * What counts as a monster worth keeping away from.
+   * What counts as a monster worth staying in reach of.
    *
    * **The same question auto-aim asks, and the same answer**, because the two
    * lists are the same list: a thing not worth shooting at is a thing not worth
-   * walking around. A wall in this game is an object with hit points and the
-   * enemy flag; a brazier, a torch and a spawn anchor are `<Enemy/>` with no
-   * health bar at all. Ranking those as monsters put a three-tile no-go circle
-   * around every decoration in the room, and the live report was the plain one:
-   * "I cannot get through there."
+   * standing in range of. A wall in this game is an object with hit points and
+   * the enemy flag; a brazier, a torch and a spawn anchor are `<Enemy/>` with no
+   * health bar at all, and with those counted the reach was satisfied by a
+   * decoration while the monster stood well outside it.
    *
-   * **Except where the two questions come apart, which is both ways.** A boss in
-   * an invulnerable phase cannot be shot and can still walk over somebody, so
-   * `skipUntouchable` is off here where auto-aim offers it as a setting: what
-   * the band is about is contact and room, not damage. And a lever is the mirror
-   * of it — worth every shot and worth no distance at all — which is why the
-   * scenery is dropped outside these rules rather than inside them.
+   * **Except for the invulnerable ones**, which is why `skipUntouchable` is off
+   * here where auto-aim offers it as a setting: a boss between phases is still
+   * the fight, and drifting out of range of one because it cannot be hurt this
+   * second is the same "I do no damage" the reach exists to answer.
    */
   readonly #shootable: ShootableRules;
   /**
@@ -101,6 +86,8 @@ export class DodgeScene {
   #hazardClearance = 0;
   #damagingMatters = true;
   #minding = false;
+  /** How far the weapon reaches, or `Infinity` while range is not being kept. */
+  #stayWithinTiles = Infinity;
   #onDamagingGround = false;
   /** The moment the plan is being made for, on the tracker's own clock. */
   #planAtMs = 0;
@@ -127,7 +114,8 @@ export class DodgeScene {
         this.#damagingMatters &&
         this.#map !== undefined &&
         overDamagingGround(this.#map, x, y, this.#hazardClearance),
-      standoffAt: (x, y, aheadMs) => this.#bodies.standoffAt(x, y, this.#band, aheadMs),
+      outOfRangeAt: (x, y, aheadMs) =>
+        this.#bodies.outOfRangeAt(x, y, this.#stayWithinTiles, aheadMs),
     };
   }
 
@@ -136,9 +124,9 @@ export class DodgeScene {
     return this.#bodies;
   }
 
-  /** The distances the last plan fought between, or nothing while unminded. */
-  get band(): StandoffBand | undefined {
-    return this.#minding ? this.#band : undefined;
+  /** How far the last plan tried to stay within, or nothing while unminded. */
+  get rangeTiles(): number | undefined {
+    return this.#minding ? this.#stayWithinTiles : undefined;
   }
 
   /**
@@ -212,17 +200,15 @@ export class DodgeScene {
       return;
     }
 
-    this.#updateBand(session, controls);
-    // Far enough to see the edge of the band as well as the edge of the walk: a
-    // monster just outside weapon range is the one thing this is meant to
+    this.#updateRange(session, controls);
+    // Far enough to see past the weapon's reach as well as past the edge of the
+    // walk: a monster just outside range is the one thing this is meant to
     // notice, and one culled for being far away is one the planner reads as
     // "nobody here" and drifts away from.
     const reach = (planning.leadMs + planning.horizonMs) / 1000;
     const searchTiles = Math.max(
       walkSpeedOf(session, controls) * reach,
-      this.#band.stayWithinTiles === Infinity
-        ? 0
-        : this.#band.stayWithinTiles + OUT_OF_RANGE_CAP_TILES,
+      this.#stayWithinTiles === Infinity ? 0 : this.#stayWithinTiles + OUT_OF_RANGE_CAP_TILES,
     );
     this.#planAtMs = map.gameTimeMs;
     this.#bodies.collect(
@@ -271,9 +257,9 @@ export class DodgeScene {
     // **Where it is now, not where the last tick put it.** Sightings arrive five
     // times a second and a plan is made fifty, so the raw sample is a body
     // frozen up to a whole tick behind whatever is actually walking at the
-    // player — which is the near edge of the band measuring the wrong place, and
-    // the drawn circle sitting a tile behind the monster it belongs to. The same
-    // reading, and the same reason, as auto-aim's lead.
+    // player — which is the reach measuring the wrong place, and the drawn
+    // circle sitting a tile behind the monster it belongs to. The same reading,
+    // and the same reason, as auto-aim's lead.
     const seen = this.#motion.motionAt(enemy.objectId, this.#planAtMs);
     // Seen only once, which every monster is on the plan it comes into reach. A
     // body that is not known to be moving is treated as still, where it is.
@@ -281,7 +267,7 @@ export class DodgeScene {
     this.#sighting.y = seen?.y ?? enemy.y;
     this.#sighting.velocityX = seen?.velocityX ?? 0;
     this.#sighting.velocityY = seen?.velocityY ?? 0;
-    // Halved, because the catalog states a width and the band works in
+    // Halved, because the catalog states a width and the picture is drawn in
     // half-extents. The ordinary body for anything it cannot describe.
     const width = this.#catalog.bodyTiles(enemy.objectType);
     this.#sighting.halfTiles = width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2;
@@ -289,19 +275,14 @@ export class DodgeScene {
   };
 
   /**
-   * The distances this character should be fighting between.
+   * How far this character should be fighting from, at most.
    *
-   * The near edge is a setting; the far edge is the weapon's own reach, cut to
-   * leave a little in hand. Where the two cross — a melee weapon against
-   * something enormous — the near edge wins, but that is settled where the
-   * bodies are known rather than here: how near is too near depends on how big
-   * the thing is, and this end of it knows only the weapon. See
-   * `EnemyBodies.standoffAt`.
+   * The weapon's own reach, cut to leave a little in hand — see the setting for
+   * why nine tenths rather than all of it.
    */
-  #updateBand(session: SessionView, controls: DodgeControls): void {
-    this.#band.keepAwayTiles = Math.max(0, controls.tuning.keepAwayTiles.get());
+  #updateRange(session: SessionView, controls: DodgeControls): void {
     if (!controls.spacing.stayInRange.get()) {
-      this.#band.stayWithinTiles = Infinity;
+      this.#stayWithinTiles = Infinity;
       return;
     }
     const reach = this.#catalog.weaponRange(session.self.weaponType);
@@ -309,6 +290,6 @@ export class DodgeScene {
       MAX_RANGE_TILES,
       Math.max(MIN_RANGE_TILES, reach ?? controls.spacing.fallbackRangeTiles.get()),
     );
-    this.#band.stayWithinTiles = (usable * controls.spacing.rangePercent.get()) / 100;
+    this.#stayWithinTiles = (usable * controls.spacing.rangePercent.get()) / 100;
   }
 }

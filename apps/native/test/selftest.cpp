@@ -534,7 +534,7 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     Check(std::fabs(trail.life - 1.0F) < 0.001F, "and its life as a fraction");
 
     const brownie::overlay::DodgeMark& mark = picture.marks()[0];
-    Check(mark.kind == brownie::overlay::MarkKind::KeepAway, "and the circle knows what it is");
+    Check(mark.kind == brownie::overlay::MarkKind::InRange, "and the circle knows what it is");
     Check(std::fabs(mark.centre.x - 10.0F) < 0.001F, "where it is, in tiles");
     Check(std::fabs(mark.radius_tiles - 2.5F) < 0.001F, "and how wide");
     Check(std::fabs(mark.ahead - 1.0F) < 0.001F, "with nothing to wait for");

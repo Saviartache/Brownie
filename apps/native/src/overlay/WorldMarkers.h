@@ -95,9 +95,8 @@ enum class RingRole : int {
     Player = 0,
     Engage = 1,
     Body = 2,
-    KeepAway = 3,
-    InRange = 4,
-    Blast = 5,
+    InRange = 3,
+    Blast = 4,
 };
 
 /// One circle on the ground, already projected.

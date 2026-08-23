@@ -5,7 +5,7 @@
  * genuinely turns on all twenty-odd of its numbers and every one of them has a
  * reason, but a feature that asks twenty questions before it will switch on is a
  * feature nobody switches on. A preset answers the one question a person
- * actually has — how hard should it try — by writing the eleven numbers that
+ * actually has — how hard should it try — by writing the ten numbers that
  * trade caution against interference; the rest belong to the machine and the
  * connection and are left alone. Moving one by hand is what turns the label into
  * Custom, so it never claims a preset the numbers are not.
@@ -40,7 +40,7 @@ import {
 export const MIN_RANGE_TILES = 1;
 export const MAX_RANGE_TILES = 16;
 
-/** The eleven a preset owns, as handles. See {@link DodgeTuning}. */
+/** The ten a preset owns, as handles. See {@link DodgeTuning}. */
 export type DodgeTuningHandles = {
   readonly [K in keyof DodgeTuning]: SettingHandle<number>;
 };
@@ -132,7 +132,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 
   // ── What the preset writes ──────────────────────────────────────────────
   //
-  // The eleven below are a preset's whole assignment: how soon and how near
+  // The ten below are a preset's whole assignment: how soon and how near
   // trouble has to be, how much margin to leave around it, and how hard to
   // think about the answer. Moving any of them by hand is what turns the label
   // above into Custom — see `applyPreset` and `onTuningChanged`.
@@ -269,29 +269,6 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 0.5,
     step: 0.01,
   });
-  // **Room to dodge in, and the reason it is a distance rather than a hit
-  // test.** A monster pressed against the player has already taken the space
-  // every escape needs, so by the time contact damage says so there is nowhere
-  // left to go. Raised on its own to the distance at which the bodies touch, so
-  // nought here still means "not inside it".
-  //
-  // Stated from the middle of an ordinary, one-tile monster; what actually holds
-  // is the gap it works out to, so a boss four tiles across is kept four times
-  // as far off its centre and exactly as far off its edge. See
-  // `EnemyBodies.standoffAt`.
-  //
-  // Owned by the preset, unlike the rest of the spacing group: how much room to
-  // insist on is exactly the trade the preset is about.
-  const keepAwayTiles = settings.range('keepAwayTiles', {
-    label: 'Keep monsters at least (tiles)',
-    group: 'Spacing',
-    advanced: true,
-    default: 2.5,
-    min: 0,
-    max: 6,
-    step: 0.25,
-  });
-
   // ── What is yours whatever the preset says ──────────────────────────────
   //
   // Latency, the character's own speed, how far off a wall to plan, and every
@@ -366,9 +343,9 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     default: true,
   });
   // **The master switch for the planner knowing where the monsters are.** Off,
-  // it is a pure bullet-dodger: it will thread a perfect gap and finish standing
-  // inside a boss, and it will back out of weapon range answering a wave it had
-  // room to cross. Everything in this group is off with it.
+  // it is a pure bullet-dodger: it will back out of weapon range answering a
+  // wave it had room to cross, and have nothing left to shoot at. Everything in
+  // this group is off with it.
   const mindMonsters = settings.boolean('avoidEnemyBodies', {
     label: 'Mind where the monsters are',
     group: 'Spacing',
@@ -461,7 +438,6 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     padTiles,
     driftTilesPerSecond,
     safeClearanceTiles,
-    keepAwayTiles,
   };
 
   bindPreset(context, preset, tuning);
@@ -481,9 +457,9 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 /**
  * Keeps the label and the numbers telling the same story.
  *
- * Choosing a preset writes its eleven; moving any of the eleven by hand makes
- * the label Custom. The guard is what stops the first of the eleven writes
- * flipping the label and the remaining ten landing on a preset nobody chose.
+ * Choosing a preset writes its ten; moving any of the ten by hand makes the
+ * label Custom. The guard is what stops the first of the ten writes flipping
+ * the label and the remaining nine landing on a preset nobody chose.
  */
 function bindPreset(
   context: PluginContext,
@@ -501,7 +477,6 @@ function bindPreset(
     padTiles: tuning.padTiles.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
-    keepAwayTiles: tuning.keepAwayTiles.get(),
   });
 
   let applying = false;

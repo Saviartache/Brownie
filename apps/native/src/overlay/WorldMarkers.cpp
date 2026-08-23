@@ -206,9 +206,6 @@ void DrawDodgeRings(const RingMark* marks, int count) {
                 list->AddCircleFilled(centre, ring.radius, Faded(mark, kBodyFill));
                 list->AddCircle(centre, ring.radius, mark, 0, kRingStroke);
                 break;
-            case RingRole::KeepAway:
-                list->AddCircle(centre, ring.radius, mark, 0, kStroke);
-                break;
             case RingRole::InRange:
                 list->AddCircle(centre, ring.radius, pick, 0, kRingStroke);
                 break;
