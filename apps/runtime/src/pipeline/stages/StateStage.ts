@@ -1,9 +1,5 @@
 import type { MutablePacket } from '@brownie/plugin-api';
-import {
-  DEFAULT_EFFECT_SECONDS,
-  isBlastEffect,
-  THROW_EFFECT,
-} from '../../state/blasts/BlastStore.js';
+import { DEFAULT_EFFECT_SECONDS, isBlastEffect } from '../../state/blasts/BlastStore.js';
 import type { WorldState } from '../../state/WorldState.js';
 import { readStats } from '../../state/stats.js';
 import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketPipeline.js';
@@ -358,19 +354,26 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
           return;
         }
 
-        // A throw lands where it is aimed; everything else goes off where it
-        // was announced. The reference implementation drew the same line — see
-        // its `AoeTracking.cpp`, which reads `pos1` as the source of a throw and
-        // `pos2` as its landing spot, and `pos1` as the centre of everything
-        // else.
+        // **The first position is where it goes off, whichever kind it is.** A
+        // throw travels from the *object* the effect hangs on to this point —
+        // that is how the client builds the arc, and it is why the thrower
+        // travels as an id rather than as a position. A nova, a ground circle
+        // and an area effect are centred on it too.
         //
-        // **A throw with no stated landing spot is not one this can place**, and
-        // falling back to where it was *thrown from* would pencil a bomb in on
-        // top of the monster that threw it and have the planner refuse the
-        // ground under it. Better to miss the telegraph than to invent one.
-        const source = pointOf(packet.number('positionX'), packet.number('positionY'));
-        const target = pointOf(packet.number('targetPositionX'), packet.number('targetPositionY'));
-        const at = effectType === THROW_EFFECT ? target : source;
+        // The second position was read here instead, on the strength of a
+        // comment in the reference implementation that had it the other way
+        // round — which was written against the *managed object's* fields, the
+        // same reading that turned out not to describe the wire at all. Live
+        // report, one build later: enemy throws stopped being seen except for
+        // the occasional one, and that one was drawn under the monster that
+        // threw it. Both follow: the second position is usually not sent, so
+        // every throw was refused for having no landing spot, and the one that
+        // carried it carried the thrower's own feet.
+        //
+        // Half a position is not a place — each axis is gated on its own bit —
+        // and a telegraph with no position at all is one this cannot put
+        // anywhere. Better to miss it than to invent one.
+        const at = pointOf(packet.number('positionX'), packet.number('positionY'));
         if (at === undefined) return;
 
         // The field is a float and the game is inconsistent about its unit, so

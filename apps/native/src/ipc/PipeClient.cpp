@@ -93,6 +93,10 @@ Status PipeClient::Send(const std::byte* data, std::size_t size) {
             const DWORD signalled = ::WaitForMultipleObjects(2, waits.data(), FALSE, INFINITE);
             if (signalled != WAIT_OBJECT_0) {
                 ::CancelIoEx(pipe_.get(), &overlapped);
+                // Drained before returning, for the reason the read gives: this
+                // `OVERLAPPED` is on the stack, and a write the kernel has not
+                // finished with is a write into a frame that is about to go away.
+                ::GetOverlappedResult(pipe_.get(), &overlapped, &moved, TRUE);
                 return Error{ErrorCode::kNotReady, "the write was cancelled"};
             }
             if (::GetOverlappedResult(pipe_.get(), &overlapped, &moved, FALSE) == FALSE) {
@@ -128,12 +132,26 @@ Result<std::size_t> PipeClient::Receive(std::byte* out, std::size_t capacity, DW
     const std::array<HANDLE, 2> waits{read_done_.get(), cancel_.get()};
     const DWORD signalled = ::WaitForMultipleObjects(2, waits.data(), FALSE, timeout_ms);
     if (signalled != WAIT_OBJECT_0) {
-        // A timeout, or cancellation. Either way the read is abandoned rather
-        // than left outstanding against a buffer the caller may reuse — an
-        // overlapped read still writing into a dead stack frame is precisely
-        // the corruption this class exists to make impossible.
+        // A timeout, or cancellation. Either way the read is not left
+        // outstanding against a buffer the caller may reuse — an overlapped read
+        // still writing into a dead stack frame is precisely the corruption this
+        // class exists to make impossible.
         ::CancelIoEx(pipe_.get(), &overlapped);
-        ::WaitForSingleObject(read_done_.get(), INFINITE);
+        // **A cancelled read may already have finished, and its bytes are not
+        // ours to throw away.** `CancelIoEx` asks; it does not promise, and the
+        // window it races with is the one where the data arrived a moment after
+        // the timeout expired. Discarding what it moved takes a few hundred
+        // bytes out of the *middle* of a frame stream, so the next header is
+        // read from the middle of a payload — a protocol error, a disconnect,
+        // and a reconnect a millisecond later with nothing in the log to say
+        // why. Live report: "the connection randomly closes and comes back."
+        //
+        // Waiting here rather than in a separate call because that is what
+        // `GetOverlappedResult` with `TRUE` is: the completion is drained either
+        // way, and this way its answer is not discarded.
+        if (::GetOverlappedResult(pipe_.get(), &overlapped, &moved, TRUE) != FALSE && moved > 0) {
+            return static_cast<std::size_t>(moved);
+        }
         return Error{ErrorCode::kNotReady,
                      signalled == WAIT_TIMEOUT ? "no data yet" : "the read was cancelled"};
     }

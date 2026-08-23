@@ -786,6 +786,13 @@ describe('blasts on their way down', () => {
   const HAS_DURATION = 32;
   const HAS_TARGET_ID = 64;
 
+  /**
+   * One telegraph, thrown `from` somewhere `to` somewhere.
+   *
+   * **The first position is where it goes off and the second is where it came
+   * from**, which is the opposite way round to how this read at first — see the
+   * note in `StateStage`. A nova and a ground circle use the first alone.
+   */
   function showEffect(
     effectType: number,
     from: { x: number; y: number },
@@ -805,10 +812,10 @@ describe('blasts on their way down', () => {
         HAS_COLOR |
         HAS_DURATION,
       targetObjectId: thrower,
-      positionX: from.x,
-      positionY: from.y,
-      targetPositionX: to.x,
-      targetPositionY: to.y,
+      positionX: to.x,
+      positionY: to.y,
+      targetPositionX: from.x,
+      targetPositionY: from.y,
       color,
       duration,
     });
@@ -866,13 +873,20 @@ describe('blasts on their way down', () => {
     );
   });
 
-  // **A throw is the one kind that goes off somewhere else**, so without the
-  // second position there is nothing to place. Falling back to the first would
-  // pencil a bomb in on top of the monster that threw it and have the planner
-  // refuse the ground under it — worse than missing the telegraph.
-  it('refuses to place a throw that never said where it lands', () => {
+  // **Each axis is gated on its own bit, so half a position is a shape the
+  // packet can genuinely carry** — and half a position is not a place. One with
+  // no position at all is a telegraph this cannot put anywhere; inventing a spot
+  // for it would have the planner refusing ground nothing is landing on.
+  it('refuses to place a telegraph that never said where', () => {
     const { world, feed } = thrown();
-    feed(shortEffect(THROW_EFFECT, { x: 3, y: 3 }));
+    feed(
+      packetOf('SHOWEFFECT', {
+        effectType: THROW_EFFECT,
+        presentFields: HAS_TARGET_ID | HAS_POSITION_X,
+        targetObjectId: BOMBER_ID,
+        positionX: 3,
+      }),
+    );
 
     expect(world.blastStore.size).toBe(0);
   });
@@ -892,9 +906,26 @@ describe('blasts on their way down', () => {
 
   // A nova or a ground circle goes off where it is announced; only a throw has
   // somewhere else to be.
+  // **The shape nearly every throw actually has**, and the one that went
+  // missing: the second position is usually not sent at all, so reading the
+  // landing spot out of it dropped every throw but the occasional one — and that
+  // one was drawn under the monster that threw it. Live report: "enemy ones
+  // appear only once, and the first did not show where it was thrown to."
+  it('places a throw that carries only where it lands', () => {
+    const { world, feed } = thrown();
+    feed(shortEffect(THROW_EFFECT, { x: 12, y: 9 }));
+
+    const blasts = [...world.blasts()];
+    expect(blasts).toHaveLength(1);
+    expect(blasts[0]?.x).toBeCloseTo(12, 5);
+    expect(blasts[0]?.y).toBeCloseTo(9, 5);
+  });
+
   it('records a nova where it was announced', () => {
     const { world, feed } = thrown();
-    feed(showEffect(NOVA_EFFECT, { x: 7, y: 7 }, { x: 0, y: 0 }, 0.5));
+    // A nova has nowhere else to be: it goes off where the packet places it,
+    // which is the same first position a throw lands at.
+    feed(showEffect(NOVA_EFFECT, { x: 0, y: 0 }, { x: 7, y: 7 }, 0.5));
 
     expect([...world.blasts()][0]?.x).toBeCloseTo(7, 5);
   });

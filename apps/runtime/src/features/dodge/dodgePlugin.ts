@@ -77,7 +77,6 @@ import {
 } from './EnemyBodies.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
-import { isBlastEffect } from '../../state/blasts/BlastStore.js';
 import { registerHitRedirect } from './hitRedirect.js';
 import { shotPaths, type ShotPath } from './ShotPaths.js';
 import { dodgeMarks, type DodgeMark } from './DodgeMarks.js';
@@ -103,15 +102,6 @@ const PLAN_INTERVAL_MS = 20;
  * interval, so an announced shot is still acted on almost immediately.
  */
 const MIN_PLAN_GAP_MS = 6;
-
-/**
- * How long the walk-to-cursor chord has to have been up before holding it again
- * is worth another line.
- *
- * Comfortably longer than the gap between two plans, so one press is one line
- * however long it is held, and two presses are two.
- */
-const CHORD_IDLE_MS = 400;
 
 /**
  * How far ahead the module is pointed at, at least.
@@ -157,11 +147,6 @@ const SHOW_INTERVAL_MS = 50;
  * cap is what stops a debug view being the most expensive thing in a fight.
  */
 const MAX_DRAWN_SHOTS = 48;
-
-/** A time the plan may report as "never", for the log. */
-function describe(ms: number): string {
-  return ms === Infinity ? 'never' : `${ms.toFixed(0)}ms`;
-}
 
 /** A session with the feature switched off, allocated once. */
 const NO_BLASTS: readonly BlastView[] = [];
@@ -722,7 +707,6 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         } finally {
           applyingPreset = false;
         }
-        context.log.info(`dodge preset "${choice}" applied`);
       };
 
       /** Every setting the preset owns runs this. */
@@ -854,9 +838,6 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       let lastShownAtMs = 0;
       /** Whether anything is currently drawn, so it can be cleared exactly once. */
       let showing = false;
-      let saidTargetAtMs = 0;
-      /** Whether the last line said the planner had the wheel. */
-      let saidDriving = false;
       /**
        * Whether the module is currently being told where to walk.
        *
@@ -946,23 +927,6 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         if (!cursorWalkOn.get()) return false;
         const target = inputs.cursorWalk.target();
         if (target === undefined) return false;
-
-        // **The two numbers in this feature that nobody can see.** Where the
-        // cursor points exists only inside the game, and it reaches this line
-        // through a camera, two processes and a unit conversion — so a walk that
-        // goes the wrong way has several possible causes and no way to tell them
-        // apart from outside. Said once when the chord goes down rather than
-        // five times a second while it is held: the question it answers is
-        // "which way did that send me", and the first line answers it.
-        const now = Date.now();
-        if (now - saidTargetAtMs >= CHORD_IDLE_MS) {
-          const self = session.self;
-          context.log.debug(
-            `cursor walk: ${self.x.toFixed(2)},${self.y.toFixed(2)}` +
-              ` towards ${target.x.toFixed(2)},${target.y.toFixed(2)}`,
-          );
-        }
-        saidTargetAtMs = now;
 
         controller.reset();
         commanding = true;
@@ -1083,24 +1047,14 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           avoidBlasts.get() ? liveBlasts(map) : NO_BLASTS,
         );
 
-        // **Only when the wheel changes hands.** This used to speak on every
-        // change of verdict, and a verdict changes several times a second in a
-        // fight — guide to evade and back is the planner refining an answer, not
-        // news, and a hundred lines of it a minute buries everything else in the
-        // log. What is worth a line is the thing a person can see happening:
-        // the dodge taking over, and giving back.
-        if (plan.steer !== saidDriving) {
-          saidDriving = plan.steer;
-          context.log.debug(
-            plan.steer
-              ? `dodge took over (${plan.verdict}): ${String(plan.trackedShots)} shots,` +
-                  ` ${String(plan.trackedBlasts)} blasts,` +
-                  ` room ${plan.clearanceTiles.toFixed(2)}t,` +
-                  ` clear for ${describe(plan.unsafeAtMs)},` +
-                  ` hit in ${describe(plan.impactMs)}`
-              : `dodge gave the wheel back (${plan.verdict})`,
-          );
-        }
+        // **Nothing is logged here, and that is deliberate.** The wheel changes
+        // hands several times a second in a fight, so even one line per change
+        // was a hundred a minute that buried everything else and answered
+        // nothing — a verdict and four numbers describe a moment that has
+        // already passed. What answers the questions people actually ask is the
+        // picture over the map, where the same numbers are circles on the ground
+        // and the shots are beside them: see `DodgeMarks`. Live report: "delete
+        // all the dodge logs, there are a lot of them and they give me nothing."
 
         // Standing still is a real answer, and the common one — as is "carry on
         // doing what you were doing". Either way the wheel goes back, and it
@@ -1234,39 +1188,13 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         planNow(session);
       });
 
-      /**
-       * Effect types this session has already said a word about.
-       *
-       * **The one question this feature cannot answer from inside itself.**
-       * Which `SHOWEFFECT` types are a bomb on its way down and which are a
-       * flash was taken from somebody else's reading of somebody else's
-       * capture, and a type we reject is indistinguishable from a type that
-       * never occurs — both are silence. One line per type, the first time it
-       * is seen, turns a session's log into the answer: a type that appears
-       * while thrown attacks are coming in and is not on the list is the next
-       * thing to look at. See item 2 of `docs/migration/newfeatures.md`.
-       *
-       * Bounded by the number of effect types the game has, and every entry
-       * costs one line once.
-       */
-      const seenEffects = new Set<number>();
-
-      context.packets.on('SHOWEFFECT', (packet) => {
-        if (packet.opaque) return;
-        const effectType = packet.number('effectType');
-        if (effectType === undefined || seenEffects.has(effectType)) return;
-        seenEffects.add(effectType);
-        // Whether the body carried a landing spot as well as a source is half
-        // of what tells a telegraph from decoration — and whether it named a
-        // thrower is what decides whose it is, so a type that never does is a
-        // type this feature can only ever refuse.
-        const aimed = packet.number('targetPositionX') !== undefined;
-        const owned = packet.number('targetObjectId') !== undefined;
-        const verdict = isBlastEffect(effectType) ? 'dodged' : 'ignored';
-        const body = aimed ? 'carries a landing spot' : 'position only';
-        const owner = owned ? 'names a thrower' : 'anchored to nothing';
-        context.log.info(`showeffect type ${String(effectType)}: ${verdict}, ${body}, ${owner}`);
-      });
+      // **Which `SHOWEFFECT` types are a telegraph was a question for a log**,
+      // and it is not one any more: the packet's body is described now — a mask
+      // byte and nine conditional fields, see `docs/protocol.md` — so a type
+      // that carries a position, a thrower and a duration is one this can place
+      // on the map and watch the `AOE` land on. The World tab counts
+      // confirmations and unmatched detonations, which answers the same question
+      // continuously instead of one line per type per session.
     },
   });
 }

@@ -255,6 +255,14 @@ why the reader refuses one. An absent duration is one second, which is the
 client's own default; an absent `targetObjectId` is an effect anchored to
 nothing.
 
+**The first position is where it goes off, whichever kind it is.** A throw
+travels from the *object* the effect hangs on to `position` — that is how the
+client builds the arc, and it is why the thrower travels as an id rather than as
+a coordinate. `targetPosition` is where it came from, it is usually not sent at
+all, and reading the landing spot out of it dropped every throw but the
+occasional one — which was then drawn under the monster that threw it. A nova, a
+ground circle and an area effect are centred on `position` too.
+
 **A schema feature exists for this and for nothing else so far.** A field may
 declare `presentWhen: { field, bit }`, naming an earlier integer field and a
 single bit of it; the loader checks the reference, the type and the bit at load
