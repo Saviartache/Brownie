@@ -51,14 +51,32 @@ struct MoveCommand {
     /// runtime says nothing when it decides to stand still, so a target has to
     /// stop meaning anything on its own.
     std::int32_t hold_ms = 0;
+    /// Whether the two numbers above are an offset from the player rather than
+    /// a place on the map.
+    ///
+    /// **Because only this side knows where the character actually is.** The
+    /// runtime learns that from `MOVE` and `NEWTICK`, five times a second,
+    /// while the character walks at the frame rate — so a heading the planner
+    /// chose, added to the runtime's idea of the position, names somewhere the
+    /// player may already have walked past. Resolving it here, on the frame
+    /// that acts, is what makes a dodge a step instead of a tug of war.
+    ///
+    /// The chord that walks to the cursor is the other kind and stays absolute:
+    /// a cursor is measured against the game's own camera, so it already names
+    /// a point on the map.
+    bool from_player = false;
 };
 
-/// Parses `move|x|y|speed|holdMs`, in hundredths of a tile and milliseconds.
+/// Parses `move|x|y|speed|holdMs[|fromPlayer]`, in hundredths of a tile and
+/// milliseconds.
 ///
 /// The runtime decides *where* — it holds the world model and the planner —
 /// and the module only carries the answer to the one thread that may act on
 /// it. Integers for the same reason the world record uses them: no decoder,
 /// and nothing to get wrong between two languages.
+///
+/// The last field was appended later and its absence is not a malformed
+/// record: an older runtime only ever means a place on the map.
 [[nodiscard]] bool ParseMoveRecord(std::string_view record, MoveCommand& out) noexcept;
 
 /// Where the player's shots should go, and how long that stands.

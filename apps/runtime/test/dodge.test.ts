@@ -28,6 +28,7 @@ import {
 } from '../src/features/dodge/EnemyBodies.js';
 import { Blasts, type BlastView } from '../src/features/dodge/Blasts.js';
 import {
+  DodgeMarkAnchor,
   DodgeMarkKind,
   dodgeMarks,
   MAX_DRAWN_MARKS,
@@ -100,7 +101,9 @@ function emptySweep(): Sweep {
 }
 
 /** Every entity counts, none is going anywhere, and all are ordinary sized. */
-const ANY_BODY = (): BodySighting => ({
+const ANY_BODY = (enemy: EntityView): BodySighting => ({
+  x: enemy.x,
+  y: enemy.y,
   velocityX: 0,
   velocityY: 0,
   halfTiles: ENEMY_CONTACT_HALF_TILES,
@@ -108,12 +111,12 @@ const ANY_BODY = (): BodySighting => ({
 
 /** The same, for a body walking at `tilesPerSecond` in a direction. */
 function chasing(x: number, y: number): (enemy: EntityView) => BodySighting {
-  return () => ({ ...ANY_BODY(), velocityX: x / 1000, velocityY: y / 1000 });
+  return (enemy) => ({ ...ANY_BODY(enemy), velocityX: x / 1000, velocityY: y / 1000 });
 }
 
 /** The same, for a body of a stated width in tiles. */
 function sized(tiles: number): (enemy: EntityView) => BodySighting {
-  return () => ({ ...ANY_BODY(), halfTiles: tiles / 2 });
+  return (enemy) => ({ ...ANY_BODY(enemy), halfTiles: tiles / 2 });
 }
 
 /** Nothing in the way, nothing that hurts, nobody to bump into. */
@@ -1423,7 +1426,7 @@ describe('the distance to fight from', () => {
     const monster = { objectId: 2, objectType: 20, x: 5, y: 0 } as EntityView;
 
     bodies.collect([pillar, monster], 0, 0, 12, (enemy) =>
-      enemy.objectType === 10 ? undefined : ANY_BODY(),
+      enemy.objectType === 10 ? undefined : ANY_BODY(enemy),
     );
 
     expect(bodies.count).toBe(1);
@@ -1779,6 +1782,40 @@ describe('the picture of what it is thinking', () => {
     expect(of(marks, DodgeMarkKind.InRange)).toHaveLength(0);
   });
 
+  // **The picture is drawn far more often than it is published, and where the
+  // player is arrives here five times a second.** A ring stated in tiles sat
+  // still for a whole server tick and then jumped, under a character that had
+  // not. Saying which circles belong to the player lets the module — which
+  // reads the position every frame — put them where the character is.
+  it('says which circles belong to the character', () => {
+    const marks = dodgeMarks(scene());
+
+    for (const kind of [DodgeMarkKind.Player, DodgeMarkKind.Engage, DodgeMarkKind.InRange]) {
+      expect(of(marks, kind)[0]?.anchor).toBe(DodgeMarkAnchor.Player);
+    }
+  });
+
+  // And the other half of the same problem: a monster's circle is published
+  // twenty times a second, so it needs to be able to move between publishes.
+  it('carries what a monster is doing, and nothing for a blast', () => {
+    const bodies = new EnemyBodies();
+    // Two tiles a second east, a tile a second south — as the tracker states
+    // it, which is per millisecond.
+    bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, chasing(2, -1));
+    const blast: BlastView = { x: 4, y: 4, radiusTiles: 3, armsAtMs: 2000 };
+
+    const marks = dodgeMarks(scene({ bodies, blasts: [blast] }));
+
+    const body = of(marks, DodgeMarkKind.Body)[0];
+    expect(body?.anchor).toBe(DodgeMarkAnchor.Place);
+    expect(body?.velocityX).toBeCloseTo(2, 6);
+    expect(body?.velocityY).toBeCloseTo(-1, 6);
+    // The room around it moves with it, or the pair comes apart on the screen.
+    expect(of(marks, DodgeMarkKind.KeepAway)[0]?.velocityX).toBeCloseTo(2, 6);
+    // A blast is ground that will be dangerous at a moment. It goes nowhere.
+    expect(of(marks, DodgeMarkKind.Blast)[0]?.velocityX).toBe(0);
+  });
+
   it('draws each monster and the room it is being given', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, sized(4));
@@ -1919,6 +1956,8 @@ describe('how fast the character walks', () => {
 // Driven through the real host, so the enable gate and the settings run as they
 // do in production — and so does the clock the plugin plans on.
 describe('when the plugin decides', () => {
+  const registry = createBundledRegistry();
+
   const NATIVE: NativeApi = {
     connected: false,
     setFeature: () => undefined,
@@ -1938,7 +1977,10 @@ describe('when the plugin decides', () => {
 
   interface Harness {
     host: PluginHost;
+    /** A place on the map, which only the chord names. */
     moveTo: ReturnType<typeof vi.fn>;
+    /** An offset from wherever the player is, which is what the planner says. */
+    moveBy: ReturnType<typeof vi.fn>;
     plan: () => void;
     /** Where the module says the chord is pointing, driven by hand. */
     cursor: { target: Position | undefined };
@@ -1947,6 +1989,16 @@ describe('when the plugin decides', () => {
     /** Whether the module says it is drawing the shot paths. */
     view: { on: boolean };
     showPicture: ReturnType<typeof vi.fn>;
+    /**
+     * The world's own clock, which the test moves by hand.
+     *
+     * Separate from the planning interval on purpose: a plan happens far more
+     * often than a server tick, and what the tracker is *for* is the gap
+     * between two of them.
+     */
+    clock: { ms: number };
+    /** A server tick arriving, which is when a sighting is taken. */
+    tick: () => void;
   }
 
   /**
@@ -1968,6 +2020,7 @@ describe('when the plugin decides', () => {
     } = {},
   ): Harness {
     const moveTo = vi.fn();
+    const moveBy = vi.fn();
     const showPicture = vi.fn();
     const cursor: { target: Position | undefined } = { target: undefined };
     const steer: { direction: Position | undefined } = { direction: undefined };
@@ -1976,11 +2029,14 @@ describe('when the plugin decides', () => {
     // second, so it reaches them a little over a second later.
     const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
 
+    const clock = { ms: gameTimeMs };
     const session = {
       id: 's1',
       self: { objectId: 1, x: 10, y: 10, alive: true, walkSpeedTilesPerSecond: 6 },
       world: {
-        gameTimeMs,
+        get gameTimeMs(): number {
+          return clock.ms;
+        },
         projectiles: () => [shot],
         blasts: () => [],
         enemies: () => map.enemies ?? [],
@@ -2007,7 +2063,7 @@ describe('when the plugin decides', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveTo, showPicture },
+        output: { moveTo, moveBy, showPicture },
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
         view: { wanted: () => view.on },
@@ -2024,12 +2080,24 @@ describe('when the plugin decides', () => {
     return {
       host,
       moveTo,
+      moveBy,
       showPicture,
       cursor,
       steer,
       view,
+      clock,
       plan: () => {
         vi.advanceTimersByTime(A_PLAN_MS);
+      },
+      // The packet carries nothing the plugin reads — a sighting is taken of
+      // whatever the world says is standing about — so a bare one is a tick.
+      tick: () => {
+        const packet = createPacket(registry, 'NEWTICK');
+        packet.fields = { tickId: 1, tickTime: 200, statuses: [] };
+        host.dispatchPacket(
+          new MutablePacket(decodeFrame(registry, encodePacket(registry, packet))),
+          session,
+        );
       },
     };
   }
@@ -2038,57 +2106,57 @@ describe('when the plugin decides', () => {
     // 900 ms in, the shot is two and a half tiles out — a third of a second from
     // landing. On the server's tick that would have been noticed up to 200 ms
     // later, which is most of the warning spent waiting.
-    const { moveTo, plan } = underFire(900);
+    const { moveBy, plan } = underFire(900);
     plan();
-    expect(moveTo).toHaveBeenCalled();
+    expect(moveBy).toHaveBeenCalled();
   });
 
   it('leaves a shot that is still far off alone', () => {
-    const { moveTo, plan } = underFire(0);
+    const { moveBy, plan } = underFire(0);
     plan();
-    expect(moveTo).not.toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
   });
 
   it('does nothing at all while switched off', () => {
-    const { host, moveTo, plan } = underFire(900);
+    const { host, moveBy, plan } = underFire(900);
     host.setEnabled('auto-dodge', false);
     plan();
-    expect(moveTo).not.toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
   });
 
   // The whole of "does not get in your way": a player already walking somewhere
   // safe is told nothing, so their own movement is untouched.
   it('says nothing while the player is walking somewhere safe', () => {
-    const { moveTo, plan, steer } = underFire(900);
+    const { moveBy, plan, steer } = underFire(900);
     // North, out of the shot's line.
     steer.direction = { x: 0, y: -1 };
 
     plan();
 
-    expect(moveTo).not.toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
   });
 
   it('takes over when the player is walking into it', () => {
-    const { moveTo, plan, steer } = underFire(900);
+    const { moveBy, plan, steer } = underFire(900);
     steer.direction = { x: -1, y: 0 };
 
     plan();
 
-    expect(moveTo).toHaveBeenCalled();
+    expect(moveBy).toHaveBeenCalled();
   });
 
   // Taking the wheel means cancelling their input rather than adding to it: the
   // command has to *oppose* what they are holding, or the two sum to neither.
   it('cancels the input it is overriding', () => {
-    const { moveTo, plan, steer } = underFire(900);
+    const { moveBy, plan, steer } = underFire(900);
     const intent = { x: -1, y: 0 };
     steer.direction = intent;
 
     plan();
 
-    expect(moveTo).toHaveBeenCalled();
-    const [x, y] = moveTo.mock.calls[0] as [number, number, number, number];
-    expect((x - 10) * intent.x + (y - 10) * intent.y).toBeLessThan(0);
+    expect(moveBy).toHaveBeenCalled();
+    const [offsetX, offsetY] = moveBy.mock.calls[0] as [number, number, number, number];
+    expect(offsetX * intent.x + offsetY * intent.y).toBeLessThan(0);
   });
 
   it('walks to the cursor when the module names a place, planner or no planner', () => {
@@ -2118,18 +2186,19 @@ describe('when the plugin decides', () => {
   // a planner that merely stops speaking leaves the player walking somewhere it
   // has already stopped choosing — against whatever they are pressing.
   it('hands the wheel back the moment it no longer needs it', () => {
-    const { moveTo, plan, cursor } = underFire(0);
+    const { moveTo, moveBy, plan, cursor } = underFire(0);
     cursor.target = { x: 13, y: 7 };
     plan();
     cursor.target = undefined;
 
     plan();
 
-    expect(moveTo).toHaveBeenCalledTimes(2);
-    const [x, y, , hold] = moveTo.mock.calls[1] as [number, number, number, number];
-    // Their own feet, which the module has by definition already arrived at.
-    expect(x).toBe(10);
-    expect(y).toBe(10);
+    expect(moveTo).toHaveBeenCalledTimes(1);
+    expect(moveBy).toHaveBeenCalledTimes(1);
+    const [x, y, , hold] = moveBy.mock.calls[0] as [number, number, number, number];
+    // No distance at all, which the module has by definition already covered.
+    expect(x).toBe(0);
+    expect(y).toBe(0);
     expect(hold).toBe(1);
   });
 
@@ -2151,6 +2220,36 @@ describe('when the plugin decides', () => {
     // answer that shot. The engagement ring at least, with nobody else about.
     const marks = showPicture.mock.calls[0]?.[1] as { kind: number; radiusTiles: number }[];
     expect(marks.some((mark) => mark.kind === DodgeMarkKind.Engage)).toBe(true);
+  });
+
+  // **Sampling is packet work, and doing it on the planning interval is what
+  // made every monster look like it was standing still.** A position is only
+  // news when the server sends one, so two readings twenty milliseconds apart
+  // are two readings of the same tick — a velocity of nought, blended into the
+  // estimate ten times before the next tick arrives.
+  it('learns which way a monster is going, and draws it where it is', () => {
+    // Walked by hand between ticks, which is the whole subject of the test.
+    const monster = { objectId: 9, objectType: 500, x: 16, y: 10, hp: 4000, maxHp: 4000 };
+    const { plan, tick, clock, showPicture, view } = underFire(0, {
+      enemies: [monster as EntityView],
+    });
+    view.on = true;
+
+    tick();
+    // A tile west over one server tick, which is five tiles a second closing.
+    monster.x = 15;
+    clock.ms = 200;
+    tick();
+    // And a moment later, before the next tick has anything to say.
+    clock.ms = 260;
+    plan();
+
+    const marks = showPicture.mock.lastCall?.[1] as DodgeMark[];
+    const body = marks.find((mark) => mark.kind === DodgeMarkKind.Body);
+    expect(body?.velocityX).toBeCloseTo(-5, 1);
+    // Ahead of the packet, because the packet is already a moment old.
+    expect(body?.x).toBeLessThan(15);
+    expect(body?.x).toBeGreaterThan(14);
   });
 
   it('clears what is drawn once, when the switch goes up', () => {
@@ -2182,11 +2281,11 @@ describe('when the plugin decides', () => {
     // is the spacing band. Standing right next to a torch is not a mistake.
     const past = underFire(0, { enemies: [decoration] });
     past.plan();
-    expect(past.moveTo).not.toHaveBeenCalled();
+    expect(past.moveBy).not.toHaveBeenCalled();
 
     const crowded = underFire(0, { enemies: [monster] });
     crowded.plan();
-    expect(crowded.moveTo).toHaveBeenCalled();
+    expect(crowded.moveBy).toHaveBeenCalled();
   });
 
   // **The live report: a Shatters lever.** It is `<Enemy/>` and it carries five
@@ -2200,22 +2299,23 @@ describe('when the plugin decides', () => {
 
     const beside = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
     beside.plan();
-    expect(beside.moveTo).not.toHaveBeenCalled();
+    expect(beside.moveBy).not.toHaveBeenCalled();
 
     // The same entity with the same health, and the only difference is what the
     // catalog calls it.
     const crowded = underFire(0, { enemies: [lever] });
     crowded.plan();
-    expect(crowded.moveTo).toHaveBeenCalled();
+    expect(crowded.moveBy).toHaveBeenCalled();
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
-    const { moveTo, plan } = underFire(0);
+    const { moveTo, moveBy, plan } = underFire(0);
 
     plan();
     plan();
 
     expect(moveTo).not.toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
   });
 
   it('plans with room to spare around walls', () => {
@@ -2236,11 +2336,11 @@ describe('when the plugin decides', () => {
     // every step out of it and pin them there.
     const canStandAt = (_x: number, _y: number, clearanceTiles?: number): boolean =>
       clearanceTiles === 0;
-    const { moveTo, plan } = underFire(900, { canStandAt });
+    const { moveBy, plan } = underFire(900, { canStandAt });
 
     plan();
 
-    expect(moveTo).toHaveBeenCalled();
+    expect(moveBy).toHaveBeenCalled();
   });
 
   // **Standing beside a pool is not standing in one.** The margin keeps
@@ -2250,33 +2350,33 @@ describe('when the plugin decides', () => {
   it('does not haul the player off the tile next to the lava', () => {
     // Damaging everywhere east of the player's own tile, so their body is
     // inside the margin and their feet are not.
-    const { moveTo, plan } = underFire(0, { damagingAt: (x) => x >= 11 });
+    const { moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 11 });
 
     plan();
 
-    expect(moveTo).not.toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
   });
 
   // The complaint, end to end: a shot forces a sidestep and one of the two
   // sides is a lava pool the planner used to be happy to stop at the edge of.
   it('takes the sidestep that is not into the lava', () => {
-    const { moveTo, plan } = underFire(900, { damagingAt: (_x, y) => y >= 11 });
+    const { moveBy, plan } = underFire(900, { damagingAt: (_x, y) => y >= 11 });
 
     plan();
 
-    const [, y] = moveTo.mock.calls[0] as [number, number];
-    expect(moveTo).toHaveBeenCalled();
-    expect(y).toBeLessThan(10);
+    expect(moveBy).toHaveBeenCalled();
+    const [, offsetY] = moveBy.mock.calls[0] as [number, number];
+    expect(offsetY).toBeLessThan(0);
   });
 
   it('still walks them out of it once they are actually in it', () => {
-    const { moveTo, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
+    const { moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
 
     plan();
 
-    const [x] = moveTo.mock.calls[0] as [number, number];
-    expect(moveTo).toHaveBeenCalled();
-    expect(x).toBeLessThan(10);
+    expect(moveBy).toHaveBeenCalled();
+    const [offsetX] = moveBy.mock.calls[0] as [number, number];
+    expect(offsetX).toBeLessThan(0);
   });
 
   // **Twenty-odd numbers is homework, not a feature.** They all earn their
@@ -2352,12 +2452,12 @@ describe('when the plugin decides', () => {
       // Three hundred milliseconds of window and four and a half tiles of
       // reach: at 700 ms the shot is still 4.4 tiles out and most of a second
       // from landing, which is nobody's problem yet.
-      expect(relaxed.moveTo).not.toHaveBeenCalled();
+      expect(relaxed.moveBy).not.toHaveBeenCalled();
 
       const cautious = underFire(700);
       cautious.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Cautious);
       cautious.plan();
-      expect(cautious.moveTo).toHaveBeenCalled();
+      expect(cautious.moveBy).toHaveBeenCalled();
     });
   });
 });
@@ -2451,7 +2551,11 @@ describe('the hit redirect', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveTo: () => undefined, showPicture: () => undefined },
+        output: {
+          moveTo: () => undefined,
+          moveBy: () => undefined,
+          showPicture: () => undefined,
+        },
         cursorWalk: { target: () => undefined },
         steer: { direction: () => undefined },
         view: { wanted: () => false },

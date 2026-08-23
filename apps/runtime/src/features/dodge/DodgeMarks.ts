@@ -45,12 +45,44 @@ export const DodgeMarkKind = {
 
 export type DodgeMarkKind = (typeof DodgeMarkKind)[keyof typeof DodgeMarkKind];
 
+/**
+ * What a circle's centre is measured against.
+ *
+ * **Because the picture is drawn far more often than it is published.** A set
+ * goes out twenty times a second and the game draws a hundred and more, so a
+ * circle pinned to the place it was published at steps across the screen — and
+ * the three centred on the character step worst of all, because where the player
+ * is arrives here five times a second while they walk continuously. The module
+ * knows exactly where the character is on the frame it draws; saying which
+ * circles belong to it is all it needs to put them there.
+ */
+export const DodgeMarkAnchor = {
+  /** Where the mark says, carried by its own velocity and nothing else. */
+  Place: 0,
+  /** The character, wherever the module can see it is right now. */
+  Player: 1,
+} as const;
+
+export type DodgeMarkAnchor = (typeof DodgeMarkAnchor)[keyof typeof DodgeMarkAnchor];
+
 /** One circle on the ground. */
 export interface DodgeMark {
   readonly kind: DodgeMarkKind;
+  readonly anchor: DodgeMarkAnchor;
   readonly x: number;
   readonly y: number;
   readonly radiusTiles: number;
+  /**
+   * How fast the thing this describes is moving, in tiles per second.
+   *
+   * Nought for anything that is not going anywhere, and for everything anchored
+   * to the player — which the module tracks exactly rather than predicting.
+   * Carried so that a circle drawn between two publishes is drawn where the
+   * monster is rather than where it was, using the same velocity the planner
+   * scored the place with.
+   */
+  readonly velocityX: number;
+  readonly velocityY: number;
   /**
    * How much of this one's wait is still ahead, from a thousand to nought.
    *
@@ -79,7 +111,7 @@ const NOT_WAITING = 1000;
 export const MAX_DRAWN_MARKS = 64;
 
 /** What the picture is of. Every field is what the planner used this plan. */
-export interface DodgeScene {
+export interface PictureScene {
   readonly selfX: number;
   readonly selfY: number;
   /** The clock the blasts' arming times are on. */
@@ -101,12 +133,12 @@ export interface DodgeScene {
  * what is landing, then the monsters. A cap reached in a crowd therefore drops
  * the least interesting rather than whatever happened to be last.
  */
-export function dodgeMarks(scene: DodgeScene): DodgeMark[] {
+export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   const marks: DodgeMark[] = [];
 
-  marks.push(circle(DodgeMarkKind.Player, scene.selfX, scene.selfY, PLAYER_HALF_TILES));
+  marks.push(onPlayer(DodgeMarkKind.Player, scene.selfX, scene.selfY, PLAYER_HALF_TILES));
   if (scene.engageTiles > 0) {
-    marks.push(circle(DodgeMarkKind.Engage, scene.selfX, scene.selfY, scene.engageTiles));
+    marks.push(onPlayer(DodgeMarkKind.Engage, scene.selfX, scene.selfY, scene.engageTiles));
   }
   // Round, and centred on the player, because weapon range is a radius. It is
   // the one mark that says nothing about danger: it is the edge the planner
@@ -114,7 +146,7 @@ export function dodgeMarks(scene: DodgeScene): DodgeMark[] {
   // answer.
   const band = scene.band;
   if (band !== undefined && Number.isFinite(band.stayWithinTiles)) {
-    marks.push(circle(DodgeMarkKind.InRange, scene.selfX, scene.selfY, band.stayWithinTiles));
+    marks.push(onPlayer(DodgeMarkKind.InRange, scene.selfX, scene.selfY, band.stayWithinTiles));
   }
 
   for (const blast of scene.blasts) {
@@ -123,7 +155,9 @@ export function dodgeMarks(scene: DodgeScene): DodgeMark[] {
     // One already down is history, and the ground it took is now the safest on
     // the screen. Drawing it would be drawing a crater.
     if (!(armsIn >= 0)) continue;
-    marks.push(circle(DodgeMarkKind.Blast, blast.x, blast.y, blast.radiusTiles, waiting(armsIn)));
+    // A place, and it stays there: what a blast is, is ground that will be
+    // dangerous at a moment. Nothing about it moves.
+    marks.push(atPlace(DodgeMarkKind.Blast, blast.x, blast.y, blast.radiusTiles, waiting(armsIn)));
   }
 
   if (band === undefined) return marks;
@@ -134,21 +168,71 @@ export function dodgeMarks(scene: DodgeScene): DodgeMark[] {
     const x = scene.bodies.xOf(i);
     const y = scene.bodies.yOf(i);
     const half = scene.bodies.halfOf(i);
-    marks.push(circle(DodgeMarkKind.Body, x, y, half));
-    marks.push(circle(DodgeMarkKind.KeepAway, x, y, nearEdgeOf(half, band)));
+    // Tiles per second, because that is the unit everything outside this
+    // feature counts speed in; the bodies hold it per millisecond because that
+    // is what a sweep multiplies by.
+    const velocityX = scene.bodies.velocityXOf(i) * A_SECOND_MS;
+    const velocityY = scene.bodies.velocityYOf(i) * A_SECOND_MS;
+    marks.push(onBody(DodgeMarkKind.Body, x, y, half, velocityX, velocityY));
+    marks.push(onBody(DodgeMarkKind.KeepAway, x, y, nearEdgeOf(half, band), velocityX, velocityY));
   }
 
   return marks;
 }
 
-function circle(
+/** Milliseconds in the second the wire counts velocities in. */
+const A_SECOND_MS = 1000;
+
+function onPlayer(kind: DodgeMarkKind, x: number, y: number, radiusTiles: number): DodgeMark {
+  return {
+    kind,
+    anchor: DodgeMarkAnchor.Player,
+    x,
+    y,
+    radiusTiles,
+    velocityX: 0,
+    velocityY: 0,
+    permille: NOT_WAITING,
+  };
+}
+
+function atPlace(
   kind: DodgeMarkKind,
   x: number,
   y: number,
   radiusTiles: number,
   permille = NOT_WAITING,
 ): DodgeMark {
-  return { kind, x, y, radiusTiles, permille };
+  return {
+    kind,
+    anchor: DodgeMarkAnchor.Place,
+    x,
+    y,
+    radiusTiles,
+    velocityX: 0,
+    velocityY: 0,
+    permille,
+  };
+}
+
+function onBody(
+  kind: DodgeMarkKind,
+  x: number,
+  y: number,
+  radiusTiles: number,
+  velocityX: number,
+  velocityY: number,
+): DodgeMark {
+  return {
+    kind,
+    anchor: DodgeMarkAnchor.Place,
+    x,
+    y,
+    radiusTiles,
+    velocityX,
+    velocityY,
+    permille: NOT_WAITING,
+  };
 }
 
 /** A wait, as the fraction of it that is left. */

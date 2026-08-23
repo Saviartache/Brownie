@@ -117,6 +117,16 @@ export interface StandoffBand {
 /** What the caller knows about one body. See {@link EnemyBodies.collect}. */
 export interface BodySighting extends Motion {
   /**
+   * Where it is *now*, which is not where the last packet put it.
+   *
+   * Sightings arrive five times a second and a plan is made fifty, so the raw
+   * sample is a body frozen up to a whole server tick behind whatever is
+   * actually walking at the player. The caller carries it forward with the
+   * velocity below; see `MotionTracker.motionAt`.
+   */
+  readonly x: number;
+  readonly y: number;
+  /**
    * Half the width of this one, in tiles.
    *
    * {@link ENEMY_CONTACT_HALF_TILES} for anything the catalog cannot describe,
@@ -175,6 +185,23 @@ export class EnemyBodies {
   }
 
   /**
+   * What one of them is doing, in tiles per millisecond.
+   *
+   * For drawing, as {@link xOf} is. A circle published twenty times a second and
+   * drawn at the frame rate steps visibly across the monster it belongs to
+   * unless whoever draws it can carry it between publishes, and this is what
+   * lets them — the same velocity the planner scored the place with, so the
+   * picture cannot claim a motion the decision did not use.
+   */
+  velocityXOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#vx[index] ?? 0) : 0;
+  }
+
+  velocityYOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#vy[index] ?? 0) : 0;
+  }
+
+  /**
    * Takes everything within `withinTiles` of a point, and forgets the rest.
    *
    * @param read What this one is doing, or `undefined` for something that is
@@ -209,8 +236,12 @@ export class EnemyBodies {
       const sighting = read(enemy);
       if (sighting === undefined) continue;
       if (this.#count >= this.#x.length) this.#grow();
-      this.#x[this.#count] = enemy.x;
-      this.#y[this.#count] = enemy.y;
+      // The caller's reading rather than the packet's: the cull above is about
+      // which monsters are near enough to matter, and a prediction cannot move
+      // one far enough to change that answer, but where it *is* decides both the
+      // near edge of the band and where its circle gets drawn.
+      this.#x[this.#count] = sighting.x;
+      this.#y[this.#count] = sighting.y;
       this.#vx[this.#count] = sighting.velocityX;
       this.#vy[this.#count] = sighting.velocityY;
       this.#half[this.#count] = sighting.halfTiles;

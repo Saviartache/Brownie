@@ -44,6 +44,9 @@ struct MoveTarget {
     float speed = 0.0F;
     /// A tick count, stamped where it arrived.
     std::uint64_t expires_at_ms = 0;
+    /// Whether {@link x} and {@link y} are an offset from the player rather
+    /// than a place on the map. See `overlay::MoveCommand::from_player`.
+    bool from_player = false;
 };
 
 /// Where the runtime wants the player's shots to go, and for how long.
@@ -148,18 +151,20 @@ class PlayerControl {
     void MoveTo(const MoveTarget& target) { move_target_.Publish(target); }
     void AimAt(const AimTarget& target);
 
-    /// Where this frame is walking to, if it is walking anywhere.
+    /// Where this frame walked to, if it walked anywhere.
     ///
-    /// **The frame's own copy**, so it says what the character is actually
-    /// being sent towards rather than what the runtime last published — the two
-    /// differ for a frame, and something drawing the difference would be
-    /// drawing a lie. Valid once `Apply` has run this frame. **Game thread.**
-    [[nodiscard]] bool WalkTarget(std::uint64_t now_ms, float& x, float& y) const noexcept {
-        if (!frame_target_.wanted || now_ms >= frame_target_.expires_at_ms) {
+    /// **The place `Apply` actually stepped towards**, so it says what the
+    /// character is being sent at rather than what the runtime last published —
+    /// the two differ for a frame, and something drawing the difference would be
+    /// drawing a lie. A heading is only a place once the player has been found,
+    /// which is the other reason this is the resolved answer and not the record.
+    /// Valid once `Apply` has run this frame. **Game thread.**
+    [[nodiscard]] bool WalkTarget(float& x, float& y) const noexcept {
+        if (!frame_walking_) {
             return false;
         }
-        x = frame_target_.x;
-        y = frame_target_.y;
+        x = frame_walk_x_;
+        y = frame_walk_y_;
         return true;
     }
 
@@ -222,6 +227,11 @@ class PlayerControl {
     /// only, so they need no protection of their own.
     MoveTarget frame_target_;
     std::uint64_t frame_target_version_ = 0;
+    /// Where this frame actually stepped towards, once the offset — if it was
+    /// one — has been measured from the player. See {@link WalkTarget}.
+    bool frame_walking_ = false;
+    float frame_walk_x_ = 0.0F;
+    float frame_walk_y_ = 0.0F;
     AimTarget frame_aim_;
     std::uint64_t frame_aim_version_ = 0;
     /// When the last frame ran, for sizing this one's step. Zero until the

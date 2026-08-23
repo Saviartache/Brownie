@@ -28,6 +28,10 @@ constexpr std::size_t kMaxPoints = 64;
 constexpr std::size_t kMaxMarks = 256;
 constexpr std::size_t kMaxTrails = 256;
 
+/// The anchor value that means "wherever the player is". Anything else is the
+/// place the record states, which is what an older runtime only ever sent.
+constexpr int kAnchorPlayer = 1;
+
 /// Larger than any circle worth drawing, in tiles.
 ///
 /// A radius arrives as a number somebody else computed, and a nonsense one is a
@@ -60,6 +64,19 @@ constexpr float kMaxRadiusTiles = 64.0F;
 
 [[nodiscard]] std::string_view TakeNumber(std::string_view& rest) noexcept {
     return Take(rest, ',');
+}
+
+/// Faster than anything in this game moves, in tiles a second.
+///
+/// A velocity arrives as a number somebody else derived, and a nonsense one
+/// carries a circle off the map. Treated as standing still rather than dropping
+/// the circle: one drawn where it was stated says more than none at all.
+constexpr float kMaxMarkSpeedTiles = 64.0F;
+
+[[nodiscard]] float Believable(float tiles_per_second) noexcept {
+    return tiles_per_second > kMaxMarkSpeedTiles || tiles_per_second < -kMaxMarkSpeedTiles
+               ? 0.0F
+               : tiles_per_second;
 }
 
 /// A whole number, or nothing. Anything the runtime did not mean to send fails
@@ -145,6 +162,16 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
             if (radius_tiles > kMaxRadiusTiles) {
                 continue;
             }
+            // Appended after the five this record has always carried, and read
+            // the way every appended field here is: an older runtime stops
+            // before them and means a circle that sits still where it said,
+            // which is what it only ever sent.
+            int anchor = 0;
+            int velocity_x = 0;
+            int velocity_y = 0;
+            (void)ParseInt(TakeNumber(field), anchor);
+            (void)ParseInt(TakeNumber(field), velocity_x);
+            (void)ParseInt(TakeNumber(field), velocity_y);
             DodgeMark mark;
             mark.kind = static_cast<MarkKind>(mark_kind);
             mark.centre =
@@ -152,6 +179,9 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
             mark.radius_tiles = radius_tiles;
             const float fraction = static_cast<float>(ahead) / kPermille;
             mark.ahead = fraction < 0.0F ? 0.0F : (fraction > 1.0F ? 1.0F : fraction);
+            mark.follows_player = anchor == kAnchorPlayer;
+            mark.velocity_x = Believable(static_cast<float>(velocity_x) / kHundredths);
+            mark.velocity_y = Believable(static_cast<float>(velocity_y) / kHundredths);
             staged_marks_.push_back(mark);
         }
         return true;

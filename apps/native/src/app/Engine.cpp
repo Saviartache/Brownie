@@ -10,6 +10,7 @@
 #include <Windows.h>
 
 #include "app/Inspection.h"
+#include "core/Clock.h"
 #include "game/FloatingText.h"
 #include "game/MapFields.h"
 #include "game/PlayerFields.h"
@@ -281,11 +282,11 @@ void Engine::AcceptRecord(std::string_view record) {
     // Stored, not acted on. Acting means calling into the game, and this is not
     // the thread that may — see `PlayerControl::Apply`.
     if (overlay::MoveCommand move; overlay::ParseMoveRecord(record, move)) {
-        control_.MoveTo(MoveTargetFrom(move, ::GetTickCount64()));
+        control_.MoveTo(MoveTargetFrom(move, NowMs()));
         return;
     }
     if (overlay::AimCommand aim; overlay::ParseAimRecord(record, aim)) {
-        control_.AimAt(AimTargetFrom(aim, ::GetTickCount64()));
+        control_.AimAt(AimTargetFrom(aim, NowMs()));
         // The detours go in on the setup pass, and the first aim is what asks
         // for them — so waiting out the rest of that pass's interval is half a
         // second of the player's shots going their own way, once per run. This
@@ -306,7 +307,7 @@ void Engine::AcceptRecord(std::string_view record) {
     // Before the plugin mirror, and only because it is cheaper to ask: a set of
     // paths arrives fifty records at a time while the switch is on, and the
     // mirror would look at every one of them.
-    if (picture_.Apply(record, ::GetTickCount64())) {
+    if (picture_.Apply(record, NowMs())) {
         return;
     }
     if (controls_.Apply(record)) {
@@ -329,7 +330,7 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     // claim, and only when it has changed, so a value refused for arriving
     // first would leave the claim acting on the number before it.
     const bool on = value == kFeatureOn;
-    const std::uint64_t now = ::GetTickCount64();
+    const std::uint64_t now = NowMs();
 
     if (key == kPlayerNoclipFeature) {
         walk_noclip_until_ms_.store(on ? now + kWalkNoclipLeaseMs : 0, std::memory_order_relaxed);
@@ -406,7 +407,7 @@ void Engine::Run() {
 }
 
 void Engine::Turn() {
-    const std::uint64_t now = ::GetTickCount64();
+    const std::uint64_t now = NowMs();
 
     // Before anything that touches the game. Once the game has asked to quit,
     // its runtime is being taken apart, and reading a static field through it
@@ -472,7 +473,7 @@ void Engine::Turn() {
     // round rather than for the timeout as well.
     HandlePendingActions();
 
-    const auto polled = session_.Poll(PollBudgetMs(::GetTickCount64()));
+    const auto polled = session_.Poll(PollBudgetMs(NowMs()));
     if (!polled.ok() && polled.error().code() != ErrorCode::kNotReady) {
         // The link is gone. The loop reconnects on its next turn; the runtime
         // replays every feature key when it does, so there is nothing here to
@@ -560,7 +561,7 @@ void Engine::AdvanceSetup() {
     // manager exists as soon as the game builds a realm, so these resolve early
     // and the retry is for the case of switching the feature on at the login
     // screen.
-    if (WalkNoclipWanted(::GetTickCount64()) && !walk_noclip_.installed()) {
+    if (WalkNoclipWanted(NowMs()) && !walk_noclip_.installed()) {
         InstallPlayerNoclip();
     }
 }
@@ -807,7 +808,7 @@ void Engine::SendCursorPoint(std::uint64_t now_ms,
     actions_.Push(overlay::BuildAction(kCursorPointAction, {x, y}));
 }
 
-void Engine::DrawMovement(std::uint64_t now_ms, const std::optional<FrameScreen>& screen,
+void Engine::DrawMovement(const std::optional<FrameScreen>& screen,
                           const std::optional<game::WorldPoint>& pointed) const {
     if (!screen.has_value()) {
         return;
@@ -823,7 +824,7 @@ void Engine::DrawMovement(std::uint64_t now_ms, const std::optional<FrameScreen>
     // arrive through the same target, and that is the point of drawing it.
     float target_x = 0.0F;
     float target_y = 0.0F;
-    if (control_.WalkTarget(now_ms, target_x, target_y)) {
+    if (control_.WalkTarget(target_x, target_y)) {
         markers.has_target = true;
         game::ToScreen(screen->basis, game::WorldPoint{target_x, target_y}, markers.target.x,
                        markers.target.y);
@@ -872,11 +873,31 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
     const float south = std::hypot(basis.south_x, basis.south_y);
     const float pixels_per_tile = (east + south) * 0.5F;
 
+    // **What the picture was published at, and how long ago that was.** A set
+    // arrives twenty times a second against a frame that draws several times
+    // faster, so a circle pinned to the tile it was stated at steps visibly
+    // across whatever it belongs to. Carried forward by its own velocity
+    // instead — bounded, because a runtime that has gone quiet must not send
+    // circles flying off the map while the set is still counted as fresh.
+    const std::uint64_t stated_ms = picture_.committed_at_ms();
+    const std::uint64_t since_ms = now_ms > stated_ms ? now_ms - stated_ms : 0;
+    const float carried_seconds =
+        static_cast<float>(since_ms > overlay::kMaxMarkCarryMs ? overlay::kMaxMarkCarryMs
+                                                              : since_ms) /
+        1000.0F;
+
     for (const overlay::DodgeMark& mark : picture_.marks()) {
         overlay::RingMark ring;
         ring.role = static_cast<overlay::RingRole>(mark.kind);
-        game::ToScreen(basis, game::WorldPoint{mark.centre.x, mark.centre.y}, ring.centre.x,
-                       ring.centre.y);
+        // The player's own three are drawn where the character actually is:
+        // this side reads that every frame, and the runtime hears about it five
+        // times a second. See `DodgeMark::follows_player`.
+        const game::WorldPoint centre =
+            mark.follows_player
+                ? game::WorldPoint{screen->player.x, screen->player.y}
+                : game::WorldPoint{mark.centre.x + mark.velocity_x * carried_seconds,
+                                   mark.centre.y + mark.velocity_y * carried_seconds};
+        game::ToScreen(basis, centre, ring.centre.x, ring.centre.y);
         ring.radius = mark.radius_tiles * pixels_per_tile;
         ring.ahead = mark.ahead;
         ring_marks_.push_back(ring);
@@ -1129,7 +1150,7 @@ void Engine::DrawFrame() {
     // are not things the user is looking at, and they must happen whether or
     // not a window is open. This is the game's own thread, which is the only
     // one that may call into it.
-    const std::uint64_t now = ::GetTickCount64();
+    const std::uint64_t now = NowMs();
     control_.Apply(now);
 
     // The same argument once more, for the chord that walks to the cursor: it
@@ -1233,7 +1254,7 @@ void Engine::DrawFrame() {
     // which is also what the panel's line reads.
     frame_model_.trails_drawn = frame_ui_.dodge_markers ? DrawDodgePicture(now, screen) : 0;
     if (frame_ui_.movement_markers) {
-        DrawMovement(now, screen, pointed);
+        DrawMovement(screen, pointed);
     }
     if (frame_ui_.aim_markers) {
         DrawAim(now, screen);

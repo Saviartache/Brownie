@@ -340,12 +340,12 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | ------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
-| `move`  | x·100, y·100, speed·100, holdMs                   | walk towards here, no faster than this, for this long unless replaced                                 |
+| `move`  | x·100, y·100, speed·100, holdMs, fromPlayer       | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map |
 | `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
-| `marks` | one field per circle: `kind,x·100,y·100,radius·100,ahead‰` | every circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, the weapon's reach, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has |
+| `marks` | one field per circle: `kind,x·100,y·100,radius·100,ahead‰,anchor,vx·100,vy·100` | every circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, the weapon's reach, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has. `anchor` is `1` for a circle centred on the character, which the module draws wherever it can see the character is; `vx`/`vy` are tiles a second, and are what lets a monster's circle be drawn between two publishes where the monster is rather than where it was. Both are `0` (or absent) for a circle that sits still where it was stated |
 
 `weapon` carries one field of text — the item's own id — so unlike its
 neighbours it is percent-encoded and the module reads it with the same splitter
@@ -396,6 +396,21 @@ implementation states what the alternative costs: "never command farther than
 the player can actually travel this frame — commanding past reach is what the
 server snaps back." A distant point does not make the player walk there; it
 makes them appear there, and then be put back.
+
+**And it can be measured from the character rather than from the map**, which is
+what `fromPlayer` says. The runtime learns where the player is from `MOVE` and
+`NEWTICK` — five times a second — while the character walks at the frame rate,
+so its idea of the position is up to a whole server tick and a tile and a half
+behind. A planner that decides a *heading* and adds it to that names a place the
+player may already have walked past: the module measured the distance from where
+they actually were, found it pointing backwards, and hauled them back — then
+jumped forwards again the moment the next packet landed. Five times a second,
+which is exactly what it looked like. Sending the offset instead puts the
+resolution on the side that reads the position every frame.
+
+The chord that walks to the cursor stays a place, and should: a cursor is
+measured against the game's own camera, so it already names a point on the map
+that owes nothing to the runtime's world model.
 
 `holdMs` is how a target stops mattering. The runtime says *nothing* when it
 decides to stand still or hold fire, so silence has to mean stop on its own —
@@ -482,7 +497,7 @@ player who is already walking somewhere safe entirely alone, and when it does
 have to take the wheel it subtracts what they are contributing rather than adding
 to it — the module's step lands on top of the game's own movement, so commanding
 a direction while the player pulls another way produces the sum of the two. See
-`apps/runtime/src/features/dodge/dodgePlugin.ts`.
+`apps/runtime/src/features/dodge/dodgeCommand.ts`.
 
 A key going down or coming up is reported on the frame it happens; under that it
 is restated about ten times a second, because the camera can turn while a key is

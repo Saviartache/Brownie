@@ -11,6 +11,7 @@ MoveTarget MoveTargetFrom(const overlay::MoveCommand& move, std::uint64_t now_ms
     target.y = static_cast<float>(move.y_hundredths) / 100.0F;
     target.speed = static_cast<float>(move.speed_hundredths) / 100.0F;
     target.expires_at_ms = now_ms + static_cast<std::uint64_t>(move.hold_ms);
+    target.from_player = move.from_player;
     return target;
 }
 
@@ -74,6 +75,10 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     move_target_.Refresh(frame_target_, frame_target_version_);
     aim_target_.Refresh(frame_aim_, frame_aim_version_);
 
+    // Nothing is being walked at until this frame says so. Cleared first so
+    // every path out of here leaves an honest answer behind it.
+    frame_walking_ = false;
+
     const std::uint64_t previous = last_frame_at_ms_;
     last_frame_at_ms_ = now_ms;
 
@@ -113,7 +118,14 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     }
 
     if (walking) {
-        (void)mover_.StepTowards(player, frame_target_.x, frame_target_.y,
+        // **An offset is resolved here and nowhere else.** The runtime cannot
+        // do it: where the player is reaches it on the server's tick, five
+        // times a second, while this runs every frame — so a heading it turned
+        // into a place would be a place the character had already walked past.
+        frame_walk_x_ = frame_target_.from_player ? player.x + frame_target_.x : frame_target_.x;
+        frame_walk_y_ = frame_target_.from_player ? player.y + frame_target_.y : frame_target_.y;
+        frame_walking_ = true;
+        (void)mover_.StepTowards(player, frame_walk_x_, frame_walk_y_,
                                  StepBudget(now_ms - previous, frame_target_.speed));
     }
 

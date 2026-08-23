@@ -210,8 +210,9 @@ class Engine {
     /// believable. **Render thread.**
     [[nodiscard]] std::optional<game::WorldPoint> CursorTarget(const FrameScreen& screen) const;
 
-    /// Draws where the module is walking, over the map. **Render thread.**
-    void DrawMovement(std::uint64_t now_ms, const std::optional<FrameScreen>& screen,
+    /// Draws where the module is walking, over the map. **Render thread**, and
+    /// after `PlayerControl::Apply`, which is what settles the place drawn.
+    void DrawMovement(const std::optional<FrameScreen>& screen,
                       const std::optional<game::WorldPoint>& pointed) const;
 
     /// Draws where the module is pointing the player's shots, with the numbers

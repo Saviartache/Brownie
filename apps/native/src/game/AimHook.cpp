@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include "core/Clock.h"
+
 namespace brownie::game {
 namespace {
 
@@ -172,7 +174,7 @@ bool AimHook::AngleFor(const void* self, float& out) noexcept {
     // Checked here as well as in the frame that publishes it, because a render
     // thread that stalls must not leave the player firing at where something
     // used to be.
-    if (::GetTickCount64() >= expires_at_ms_.load(std::memory_order_relaxed)) {
+    if (NowMs() >= expires_at_ms_.load(std::memory_order_relaxed)) {
         return false;
     }
 

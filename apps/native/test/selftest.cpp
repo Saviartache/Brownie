@@ -20,6 +20,7 @@
 
 #include "app/Inspection.h"
 #include "app/PlayerControl.h"
+#include "core/Clock.h"
 #include "core/ModuleImage.h"
 #include "core/Result.h"
 #include "game/AimHook.h"
@@ -430,6 +431,18 @@ void MoveRecordsAreReadStrictly() {
     Check(move.x_hundredths == 10723 && move.y_hundredths == -16456,
           "in hundredths of a tile, sign and all");
     Check(move.speed_hundredths == 600 && move.hold_ms == 400, "with a speed and a lifetime");
+    Check(!move.from_player, "and a runtime that says nothing means a place on the map");
+
+    // The planner's own commands, which are a heading rather than a place: the
+    // runtime hears where the player is five times a second and cannot turn one
+    // into the other without naming somewhere already walked past.
+    Check(brownie::overlay::ParseMoveRecord("move|-45|80|600|120|1", move),
+          "a move measured from the player parses");
+    Check(move.from_player, "and says so");
+    Check(move.x_hundredths == -45 && move.y_hundredths == 80, "with the offset it carries");
+    Check(brownie::overlay::ParseMoveRecord("move|1|2|600|400|0", move),
+          "and nought is the map, said out loud");
+    Check(!move.from_player, "which is the same as not saying it");
 
     // Half a destination is a destination somewhere else, so a short or
     // malformed record leaves the last one alone rather than steering by it.
@@ -525,9 +538,36 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     Check(std::fabs(mark.centre.x - 10.0F) < 0.001F, "where it is, in tiles");
     Check(std::fabs(mark.radius_tiles - 2.5F) < 0.001F, "and how wide");
     Check(std::fabs(mark.ahead - 1.0F) < 0.001F, "with nothing to wait for");
+    // What an older runtime sends, and what it has to mean: a circle that sits
+    // where it was stated, belonging to nothing that moves.
+    Check(!mark.follows_player, "a circle says nothing about the player by default");
+    Check(mark.velocity_x == 0.0F && mark.velocity_y == 0.0F, "and nothing about moving");
+    Check(picture.committed_at_ms() == 1000, "and the set remembers when it was stated");
 
     // The rule every reading on this link follows: silence means stop.
     Check(!picture.fresh(1000 + brownie::overlay::kPictureFreshMs + 1), "an old set goes stale");
+
+    // **What keeps the picture continuous between two publishes.** The circles
+    // round the character are drawn wherever the character is, and a monster's
+    // is carried by the velocity the planner scored the place with.
+    Check(picture.Apply("dodge-begin", 1500), "a set with motion in it opens");
+    Check(picture.Apply("marks|1,0,0,300,1000,1,0,0|2,500,600,50,1000,0,-250,125", 1500),
+          "circles carrying an anchor and a velocity are taken");
+    Check(picture.Apply("dodge-end", 1500), "and it closes");
+    Check(picture.marks().size() == 2, "with both of them");
+    Check(picture.marks()[0].follows_player, "the ring round the character says so");
+    Check(!picture.marks()[1].follows_player, "and a monster's does not");
+    Check(std::fabs(picture.marks()[1].velocity_x + 2.5F) < 0.001F,
+          "which moves in tiles a second, sign and all");
+    Check(std::fabs(picture.marks()[1].velocity_y - 1.25F) < 0.001F, "on both axes");
+
+    // A velocity nobody meant would carry a circle off the map. Held still
+    // instead of dropped: one drawn where it was stated says more than none.
+    Check(picture.Apply("dodge-begin", 1600), "a set with a nonsense velocity opens");
+    Check(picture.Apply("marks|2,0,0,100,1000,0,999999,0", 1600), "and the circle is taken");
+    Check(picture.Apply("dodge-end", 1600), "and it closes");
+    Check(picture.marks().size() == 1, "with the circle in it");
+    Check(picture.marks()[0].velocity_x == 0.0F, "standing still");
 
     // A path with one end is not a path, and a record outside a set is not one
     // either — both are dropped rather than drawn. A circle whose kind this
@@ -605,7 +645,7 @@ void AimRedirectsOnlyWhatItWasGiven() {
     Check(!hook.installed(), "a fresh aim hook is not installed");
     Check(!hook.AngleFor(&player, angle), "and redirects nothing");
 
-    hook.Aim(&player, 1.25F, ::GetTickCount64() + 1000);
+    hook.Aim(&player, 1.25F, brownie::NowMs() + 1000);
     Check(hook.AngleFor(&player, angle), "an aimed player is redirected");
     Check(angle == 1.25F, "to the angle it was given");
     Check(!hook.AngleFor(&somebody_else, angle), "and nothing else is");
@@ -616,11 +656,11 @@ void AimRedirectsOnlyWhatItWasGiven() {
 
     // An aim that has run out is the player's own again, whatever the frame
     // that published it is doing.
-    hook.Aim(&player, 1.25F, ::GetTickCount64());
+    hook.Aim(&player, 1.25F, brownie::NowMs());
     Check(!hook.AngleFor(&player, angle), "an expired aim redirects nothing");
 
     // Aiming at nothing is not aiming at the origin.
-    hook.Aim(nullptr, 0.5F, ::GetTickCount64() + 1000);
+    hook.Aim(nullptr, 0.5F, brownie::NowMs() + 1000);
     Check(!hook.AngleFor(nullptr, angle), "a null player is not a target");
 }
 

@@ -92,6 +92,28 @@ export interface ApplicationOptions {
   readonly blastRadiiPath?: string;
 }
 
+/** What a `move` record's two numbers are measured from. See `docs/ipc.md`. */
+const FROM_MAP = 0;
+const FROM_PLAYER = 1;
+
+/** One walk command, in the hundredths of a tile everything on this link uses. */
+function moveRecord(
+  x: number,
+  y: number,
+  speedTilesPerSecond: number,
+  holdMs: number,
+  measuredFrom: typeof FROM_MAP | typeof FROM_PLAYER,
+): string {
+  return [
+    'move',
+    Math.round(x * 100),
+    Math.round(y * 100),
+    Math.round(speedTilesPerSecond * 100),
+    Math.round(holdMs),
+    measuredFrom,
+  ].join('|');
+}
+
 /**
  * The composition root.
  *
@@ -454,14 +476,17 @@ export class Application {
       createDodgePlugin({
         output: {
           moveTo: (x, y, speedTilesPerSecond, holdMs) => {
+            this.#native.publishRecord(moveRecord(x, y, speedTilesPerSecond, holdMs, FROM_MAP));
+          },
+          // **The same record, measured from the character instead.** Where the
+          // player is arrives here in `MOVE` and `NEWTICK`, five times a second,
+          // while the character walks at the frame rate — so a heading turned
+          // into a place on this side names somewhere they may already have
+          // walked past. The module resolves the offset against the position
+          // only it can see, on the frame it acts.
+          moveBy: (offsetX, offsetY, speedTilesPerSecond, holdMs) => {
             this.#native.publishRecord(
-              [
-                'move',
-                Math.round(x * 100),
-                Math.round(y * 100),
-                Math.round(speedTilesPerSecond * 100),
-                Math.round(holdMs),
-              ].join('|'),
+              moveRecord(offsetX, offsetY, speedTilesPerSecond, holdMs, FROM_PLAYER),
             );
           },
           // Bracketed, so a set half-received is never drawn: the module stages
@@ -500,6 +525,13 @@ export class Application {
                     Math.round(mark.y * 100),
                     Math.round(mark.radiusTiles * 100),
                     mark.permille,
+                    // Appended after the five this record has always carried, so
+                    // an older module reads the circle and ignores what it
+                    // cannot use. Both are about drawing it *between* publishes
+                    // — see `DodgeMarkAnchor`.
+                    mark.anchor,
+                    Math.round(mark.velocityX * 100),
+                    Math.round(mark.velocityY * 100),
                   ].join(','),
                 );
               }

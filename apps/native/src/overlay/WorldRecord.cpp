@@ -155,11 +155,18 @@ bool ParseMoveRecord(std::string_view record, MoveCommand& out) noexcept {
         return false;
     }
 
+    // Appended after the four this record has always carried, and read the way
+    // the header describes: an older runtime stops before it and means a place
+    // on the map, which is what it only ever sent.
+    int from_player = 0;
+    (void)ParseInt(TakeField(rest), from_player);
+
     // All or none. Half a destination is a destination somewhere else.
     out.x_hundredths = x;
     out.y_hundredths = y;
     out.speed_hundredths = speed;
     out.hold_ms = hold;
+    out.from_player = from_player != 0;
     return true;
 }
 
