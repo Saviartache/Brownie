@@ -53,6 +53,22 @@ export interface ObjectCatalog {
    */
   occupies(objectType: number): boolean;
   /**
+   * Whether one of these is part of the room rather than something that fights.
+   *
+   * **A lever is `<Enemy />` with a health bar.** So is a pot, a gravestone, a
+   * treasure chest and a destructible wall — they are shot on purpose, so
+   * nothing that decides what is worth *shooting* may skip them, and they never
+   * chase anybody and never fire, so anything deciding where it is safe to
+   * *stand* has no business measuring itself against one. The live report is a
+   * Shatters lever: five thousand hit points, no attack, and a no-go circle
+   * drawn round it the whole way across the village.
+   *
+   * `<KillStat stat="StructureKills"/>` in `objects.xml` is the game's own
+   * answer, narrowed to the ones that declare no shots — a Pentaract tower is a
+   * structure kill too, and it is a fight.
+   */
+  isScenery(objectType: number): boolean;
+  /**
    * How wide one of these is, in tiles.
    *
    * **A monster's body is not one tile, and treating every one as though it
@@ -106,6 +122,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isPet: () => false,
   isInvincible: () => false,
   occupies: () => false,
+  isScenery: () => false,
   bodyTiles: () => undefined,
   displayName: () => undefined,
   projectile: () => undefined,

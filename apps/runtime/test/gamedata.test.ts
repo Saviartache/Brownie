@@ -209,6 +209,30 @@ describe('object catalog', () => {
     expect(catalog.bodyTiles(0xffff)).toBeUndefined();
   });
 
+  // What a lever is, and the game's own answer for it: a health bar, no attack,
+  // and a death that goes on the structure counter rather than a monster one.
+  it('tells the scenery from the monsters, and a dangerous structure from both', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x1" id="lever"><Enemy /><MaxHitPoints>5000</MaxHitPoints><KillStat stat="StructureKills" /></Object>
+          <Object type="0x2" id="tower"><Enemy /><KillStat stat="StructureKills" /><Projectile id="0"><Speed>100</Speed></Projectile></Object>
+          <Object type="0x3" id="monster"><Enemy /><KillStat stat="UndeadKills" /></Object>
+          <Object type="0x4" id="uncounted"><Enemy /></Object>
+        </Objects>`),
+      ),
+    );
+
+    expect(catalog.isScenery(0x1)).toBe(true);
+    // A structure is allowed to be a fight: a tower that shoots is one.
+    expect(catalog.isScenery(0x2)).toBe(false);
+    expect(catalog.isScenery(0x3)).toBe(false);
+    // Most of the file counts no kill at all, and saying nothing is not a claim
+    // to be scenery — the marker has to be there.
+    expect(catalog.isScenery(0x4)).toBe(false);
+    expect(catalog.isScenery(0xffff)).toBe(false);
+  });
+
   it('skips a malformed entry instead of losing the catalog over it', async () => {
     const document = `<Objects>
       <Object id="no type"><Class>Player</Class></Object>

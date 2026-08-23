@@ -326,6 +326,7 @@ export class Application {
           isPet: (type) => this.#objects.isPet(type),
           isInvincible: (type) => this.#objects.isInvincible(type),
           occupies: (type) => this.#objects.occupies(type),
+          isScenery: (type) => this.#objects.isScenery(type),
           bodyTiles: (type) => this.#objects.bodyTiles(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
@@ -543,6 +544,10 @@ export class Application {
         // room rather than the fight.
         isObstacle: (objectType) => this.#objects.occupies(objectType),
         isInvincible: (objectType) => this.#objects.isInvincible(objectType),
+        // And the one neither of those catches, because it is neither a wall nor
+        // unkillable: a lever carries a health bar, is meant to be shot, and
+        // never hurts anybody.
+        isScenery: (objectType) => this.#objects.isScenery(objectType),
         // And the third thing the band cannot work without: how big the monster
         // actually is. The distance that keeps an ordinary one at arm's length
         // leaves the player standing well inside a boss four times the width.

@@ -4,7 +4,14 @@ import type { TileCatalog } from '../state/TileMap.js';
 import { readContainerFacts, readItemFacts, type ContainerFacts, type ItemFacts } from './items.js';
 import { readPermanentStatMaxima, type PermanentStatMaxima } from './playerClasses.js';
 import { readProjectiles, type ProjectileDefinition } from './projectiles.js';
-import { attribute, childText, hasChild, parseGameNumber, scanElements } from './xml.js';
+import {
+  attribute,
+  childText,
+  hasChild,
+  parseGameNumber,
+  scanElements,
+  scanElementsIn,
+} from './xml.js';
 
 /** What the runtime keeps about one object type. */
 export interface ObjectDefinition {
@@ -17,6 +24,8 @@ export interface ObjectDefinition {
   readonly isInvincible: boolean;
   /** Whether one of these blocks the square it stands on — a wall, a rock. */
   readonly occupies: boolean;
+  /** Whether one of these is part of the room rather than something that fights. */
+  readonly isScenery: boolean;
   /** How wide one of these is, in tiles. See {@link ObjectCatalog.bodyTiles}. */
   readonly bodyTiles: number;
   /** Indexed by `bulletType`, which is the index the game shoots them by. */
@@ -87,6 +96,10 @@ export class GameObjectCatalog implements ObjectCatalog {
 
   occupies(objectType: number): boolean {
     return this.#byType.get(objectType)?.occupies ?? false;
+  }
+
+  isScenery(objectType: number): boolean {
+    return this.#byType.get(objectType)?.isScenery ?? false;
   }
 
   bodyTiles(objectType: number): number | undefined {
@@ -176,6 +189,27 @@ function readBodyTiles(element: string): number {
   return Math.min(MAX_BODY_TILES, Math.max(MIN_BODY_TILES, stated / STANDARD_SIZE_PERCENT));
 }
 
+/** What the file's kill counter is called for the things that are not monsters. */
+const STRUCTURE_KILL_STAT = 'StructureKills';
+
+/**
+ * Whether the game counts breaking one of these as breaking part of the room.
+ *
+ * **`<Enemy />` is not the game's own idea of a monster, and this is.** A lever,
+ * a pot, a gravestone and a destructible wall are all `<Enemy />` with health,
+ * and the only thing in the file that separates them from the thing shooting at
+ * you is which counter their death goes on — `StructureKills` rather than
+ * `HumanoidKills`, `BeastKills` or nothing at all.
+ *
+ * Paired everywhere it is used with "and it declares no shots", because a
+ * structure is allowed to be dangerous: a Pentaract tower, an Oryx tower and a
+ * trap are all structure kills, and every one of them is a fight.
+ */
+function killsAsStructure(element: string): boolean {
+  const [killStat] = scanElementsIn(element, 'KillStat');
+  return killStat !== undefined && attribute(killStat, 'stat') === STRUCTURE_KILL_STAT;
+}
+
 /**
  * Reads `objects.xml`.
  *
@@ -195,6 +229,9 @@ export async function readObjectDefinitions(
     // Read once and passed on: three of the facts below are decided by it, and
     // it is a regular expression over a whole element either way.
     const objectClass = childText(element, 'Class');
+    // Read once for the same reason, and read *before* the record because
+    // whether this thing has an attack of its own is half of `isScenery`.
+    const projectiles = readProjectiles(element);
 
     definitions.push({
       type,
@@ -216,8 +253,11 @@ export async function readObjectDefinitions(
       // Either marks a square as blocked. `FullOccupy` also stops sight, which
       // nothing here needs — for walking they mean the same thing.
       occupies: hasChild(element, 'OccupySquare') || hasChild(element, 'FullOccupy'),
+      // The game's own word for a thing that is part of the room, and the
+      // absence of any shot to go with it. See {@link killsAsStructure}.
+      isScenery: killsAsStructure(element) && projectiles.length === 0,
       bodyTiles: readBodyTiles(element),
-      projectiles: new Map(readProjectiles(element).map((p) => [p.bulletType, p])),
+      projectiles: new Map(projectiles.map((p) => [p.bulletType, p])),
       item: readItemFacts(element),
       container: readContainerFacts(element, objectClass),
       statMaxima: readPermanentStatMaxima(element, objectClass),

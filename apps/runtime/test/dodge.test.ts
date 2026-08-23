@@ -1963,6 +1963,8 @@ describe('when the plugin decides', () => {
       damagingAt?: (x: number, y: number) => boolean;
       /** What the world says is standing about, for the spacing band. */
       enemies?: readonly EntityView[];
+      /** Which types the catalog calls scenery — a lever, a pot, a monument. */
+      scenery?: (objectType: number) => boolean;
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -2012,6 +2014,7 @@ describe('when the plugin decides', () => {
         weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
+        isScenery: map.scenery ?? ((): boolean => false),
         bodyTiles: () => undefined,
         aimTarget: () => undefined,
       }),
@@ -2182,6 +2185,26 @@ describe('when the plugin decides', () => {
     expect(past.moveTo).not.toHaveBeenCalled();
 
     const crowded = underFire(0, { enemies: [monster] });
+    crowded.plan();
+    expect(crowded.moveTo).toHaveBeenCalled();
+  });
+
+  // **The live report: a Shatters lever.** It is `<Enemy/>` and it carries five
+  // thousand hit points until somebody pulls it, so it is neither a wall nor
+  // invincible and every cull the band had let it through — and the planner
+  // spent the village walking round a thing that cannot move and cannot fire.
+  // The rule auto-aim uses cannot answer this one, because a lever is shot on
+  // purpose; the catalog's own word for it is what does.
+  it('keeps no distance from a lever it is meant to shoot', () => {
+    const lever = { objectId: 9, objectType: 600, x: 11, y: 10, maxHp: 5000 } as EntityView;
+
+    const beside = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
+    beside.plan();
+    expect(beside.moveTo).not.toHaveBeenCalled();
+
+    // The same entity with the same health, and the only difference is what the
+    // catalog calls it.
+    const crowded = underFire(0, { enemies: [lever] });
     crowded.plan();
     expect(crowded.moveTo).toHaveBeenCalled();
   });
@@ -2435,6 +2458,7 @@ describe('the hit redirect', () => {
         weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
+        isScenery: () => false,
         bodyTiles: () => undefined,
         aimTarget: () => undefined,
       }),

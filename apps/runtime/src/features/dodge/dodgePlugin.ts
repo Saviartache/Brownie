@@ -272,6 +272,20 @@ export interface DodgeInputs {
    */
   readonly isInvincible: (objectType: number) => boolean;
   /**
+   * Whether one of these is part of the room rather than something that fights.
+   *
+   * **The live report is a Shatters lever.** It is `<Enemy/>`, it carries five
+   * thousand hit points until somebody pulls it, and it is neither a wall nor
+   * invincible — so it passed every cull the band had and got a no-go circle
+   * drawn round it. It also never moves and never fires, which is the whole of
+   * why it does not belong in a list of things to keep away from.
+   *
+   * Deliberately *not* part of {@link ShootableRules}: a lever is shot on
+   * purpose, so auto-aim must go on seeing it. The two lists are the same list
+   * right up to the things that are only ever targets.
+   */
+  readonly isScenery: (objectType: number) => boolean;
+  /**
    * How wide one of these is, in tiles.
    *
    * **The distance that keeps a minion at arm's length puts you inside a boss**,
@@ -753,10 +767,13 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        * three-tile no-go circle around every decoration in the room, and the
        * live report was the plain one: "I cannot get through there."
        *
-       * **Except for the one rule that does not carry over.** A boss in an
-       * invulnerable phase cannot be shot and can still walk over somebody, so
-       * `skipUntouchable` is off here where auto-aim offers it as a setting:
-       * what the band is about is contact and room, not damage.
+       * **Except where the two questions come apart, which is both ways.** A
+       * boss in an invulnerable phase cannot be shot and can still walk over
+       * somebody, so `skipUntouchable` is off here where auto-aim offers it as
+       * a setting: what the band is about is contact and room, not damage. And
+       * a lever is the mirror of it — worth every shot and worth no distance at
+       * all — which is why the scenery is dropped outside these rules rather
+       * than inside them. See {@link DodgeInputs.isScenery}.
        */
       const shootable: ShootableRules = {
         skipUntouchable: false,
@@ -793,6 +810,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        * changes, and the collection loop asks it of every enemy in reach.
        */
       const bodySighting = (enemy: EntityView): BodySighting | undefined => {
+        if (inputs.isScenery(enemy.objectType)) return undefined;
         if (!isShootable(enemy, shootable)) return undefined;
         motion.observe(enemy.objectId, enemy.x, enemy.y, sightedAtMs);
         // Seen only once, which every monster is on the plan it comes into
