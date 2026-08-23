@@ -44,6 +44,15 @@
  * *read* from auto-aim: one plugin cannot read another, and asking the same
  * question of the same code needs no channel between the two.
  *
+ * **Which includes the choice, and not only the code that makes it.** This used
+ * to take the closest enemy and nothing else, so a player aiming at the monster
+ * under their cursor watched the ability go to whatever had wandered nearest.
+ * The same four choices auto-aim offers are offered here, in auto-aim's own
+ * words and under its own keys, with the cursor read from the same place —
+ * plus the one an ability wants that a shot does not: whether a boss is worth
+ * more than whatever is standing closer. A shot costs nothing and can be spent
+ * on a bat; 180 mana is a heal the boss room needed.
+ *
  * **It reads the character, not the party.** A priest's tome heals everyone
  * standing in it, and a group in trouble around a healthy priest is not
  * something the runtime can see — the server states other players' health, but
@@ -80,7 +89,12 @@ import { AbilityUse, type AbilityFacts } from '../../gamedata/abilities.js';
 // this game is an object with hit points, and a quarter of what the file marks
 // as an enemy can never lose one. Casting into either is the same waste as
 // shooting at it. See `autoaim/shootable.ts`.
-import { TargetPriority, selectTarget } from '../autoaim/selectTarget.js';
+import {
+  BossRule,
+  TargetPriority,
+  selectTarget,
+  type BossPreference,
+} from '../autoaim/selectTarget.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { castReason, percentOf, type CastPreferences } from './worthCasting.js';
 
@@ -98,6 +112,20 @@ export interface AutoAbilityInputs {
   readonly isObstacle: (objectType: number) => boolean;
   /** Whether an object type can never be hurt. Same source and reason. */
   readonly isInvincible: (objectType: number) => boolean;
+  /**
+   * Whether an object type is a boss. Same source and reason — it is
+   * `<Quest />` in `objects.xml`. See `ObjectCatalog.isQuest`.
+   */
+  readonly isBoss: (objectType: number) => boolean;
+  /**
+   * Where the player is pointing, in tiles, or nothing when nobody knows.
+   *
+   * Handed over for the same reason as the rest: it arrives from the native
+   * module and a plugin is not given the link. **Asking for it is what keeps it
+   * coming** — the module measures the cursor only while the runtime says it
+   * wants it, and the claim rides this call. See `native/CursorTracker.ts`.
+   */
+  readonly cursorPoint: () => Position | undefined;
 }
 
 /**
@@ -155,6 +183,15 @@ interface Tuning extends CastPreferences {
   readonly aimAttacks: boolean;
   readonly support: boolean;
   readonly rangeTiles: number;
+  /** Which enemy out of the ones in range, in auto-aim's own terms. */
+  readonly priority: TargetPriority;
+  readonly cursorRadiusTiles: number;
+  /**
+   * Built here rather than per search, because both halves of it are settled
+   * the moment a setting moves: the rule is the setting, and the test behind it
+   * is the catalog, which does not change.
+   */
+  readonly bosses: BossPreference;
   /** The share of the mana bar to leave standing, as a fraction of it. */
   readonly manaReserve: number;
   readonly minIntervalMs: number;
@@ -195,6 +232,47 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       const castSupport = context.settings.boolean('castSelf', {
         label: 'Use support abilities — heals, buffs, auras, cleanses',
         default: true,
+      });
+      // **Auto-aim's own question, asked in auto-aim's own words**, because the
+      // complaint that produced it was that the two disagreed: a player aiming
+      // at the enemy under their cursor had the ability go to whatever stood
+      // closest instead. The options and the keys are the same as that
+      // plugin's, so the two read alike wherever they are shown together — and
+      // they stay two settings, because pointing a 180-mana heal is not the
+      // same decision as pointing a shot that costs nothing.
+      const priority = context.settings.select<TargetPriority>('priority', {
+        label: 'Aim at',
+        default: TargetPriority.Closest,
+        options: [
+          [TargetPriority.Closest, 'The closest enemy'],
+          [TargetPriority.LowestHp, 'The weakest enemy'],
+          [TargetPriority.HighestHp, 'The toughest enemy'],
+          [TargetPriority.ClosestToCursor, 'The enemy nearest your cursor'],
+        ],
+      });
+      const cursorRadius = context.settings.range('cursorRadiusTiles', {
+        label: 'Cursor radius (tiles)',
+        default: 4,
+        min: 0.5,
+        max: 15,
+        step: 0.5,
+        visibleWhen: { key: 'priority', equals: [TargetPriority.ClosestToCursor] },
+      });
+      // **A tier over the priority above, not another entry in it.** The two
+      // answer different questions — which class of enemy is worth the mana,
+      // and which one out of that class — and the rule holds for everything
+      // this plugin looks for an enemy for: where the ability the player fires
+      // lands, and whether a combat aura is worth putting up at all. Somebody
+      // who set "only bosses" and then watched their seal go up for two bats is
+      // owed the reading of the words.
+      const bosses = context.settings.select<BossRule>('bosses', {
+        label: 'Bosses',
+        default: BossRule.Any,
+        options: [
+          [BossRule.Any, 'Treat like any other enemy'],
+          [BossRule.Prefer, 'Prefer bosses'],
+          [BossRule.Only, 'Only bosses'],
+        ],
       });
       const rangeTiles = context.settings.range('rangeTiles', {
         label: 'Look for enemies within (tiles)',
@@ -243,37 +321,35 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         step: 50,
       });
 
-      let tuning: Tuning = {
-        aimAttacks: true,
-        support: true,
-        rangeTiles: 8,
-        manaReserve: 0,
-        minIntervalMs: 700,
-        hpPercent: 80,
-        mpPercent: 50,
-        utilityOutOfCombat: false,
-      };
+      const isBoss = (enemy: EntityView): boolean => inputs.isBoss(enemy.objectType);
 
+      const readTuning = (): Tuning => ({
+        aimAttacks: aimAttacks.get(),
+        support: castSupport.get(),
+        rangeTiles: rangeTiles.get(),
+        priority: priority.get(),
+        cursorRadiusTiles: cursorRadius.get(),
+        bosses: { rule: bosses.get(), isBoss },
+        // Kept as a fraction rather than the percentage the control shows, so
+        // the per-tick arithmetic is one multiply.
+        manaReserve: mpReservePercent.get() / 100,
+        minIntervalMs: minIntervalMs.get(),
+        hpPercent: healthPercent.get(),
+        mpPercent: manaPercent.get(),
+        utilityOutOfCombat: utilityOutOfCombat.get(),
+      });
+
+      let tuning = readTuning();
       const refresh = (): void => {
-        tuning = {
-          aimAttacks: aimAttacks.get(),
-          support: castSupport.get(),
-          rangeTiles: rangeTiles.get(),
-          // Kept as a fraction rather than the percentage the control shows, so
-          // the per-tick arithmetic is one multiply.
-          manaReserve: mpReservePercent.get() / 100,
-          minIntervalMs: minIntervalMs.get(),
-          hpPercent: healthPercent.get(),
-          mpPercent: manaPercent.get(),
-          utilityOutOfCombat: utilityOutOfCombat.get(),
-        };
+        tuning = readTuning();
       };
-
-      refresh();
       for (const handle of [
         aimAttacks,
         castSupport,
         rangeTiles,
+        priority,
+        cursorRadius,
+        bosses,
         healthPercent,
         manaPercent,
         utilityOutOfCombat,
@@ -329,19 +405,56 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       // `setup` and a fresh closure per tick is a fresh closure per tick.
       const worthCastingAt = (enemy: EntityView): boolean => isShootable(enemy, rules);
 
-      const nearestEnemy = (session: SessionView): EntityView | undefined =>
+      /**
+       * The best enemy in range under a given ordering.
+       *
+       * The cursor is read here rather than passed in because a search can
+       * happen between two ticks — the player's own key press is one — and a
+       * cursor that has moved since the last tick has moved.
+       */
+      const search = (session: SessionView, priority: TargetPriority): EntityView | undefined =>
         selectTarget(session.world.enemies(), {
           shooterX: session.self.x,
           shooterY: session.self.y,
           maxRangeTiles: tuning.rangeTiles,
-          priority: TargetPriority.Closest,
+          priority,
+          cursorPoint:
+            priority === TargetPriority.ClosestToCursor ? inputs.cursorPoint() : undefined,
+          cursorRadiusTiles: tuning.cursorRadiusTiles,
+          bosses: tuning.bosses,
           accept: worthCastingAt,
         });
 
+      /** Where an ability that is pointed should land: the player's own choice. */
+      const targetEnemy = (session: SessionView): EntityView | undefined =>
+        search(session, tuning.priority);
+
+      /**
+       * Whether there is anything here to put a combat aura up for.
+       *
+       * **The pointing preference is deliberately not asked.** Which enemy to
+       * point at is a preference about aiming; whether a berserk aura is worth
+       * 90 mana is a question about the room, and a paladin surrounded by
+       * monsters with the cursor resting on empty floor is in a fight. Only the
+       * boss rule crosses over, because that one *is* about what the mana is
+       * worth spending on.
+       */
+      const enemyToFight = (session: SessionView): EntityView | undefined =>
+        search(session, TargetPriority.Closest);
+
       // Cheapest test first, and each one is a test the next would have been
       // wasted work without. Nothing on this path allocates until a cast is
-      // actually going out.
+      // actually going out, bar the reading below under the one priority that
+      // asks for it.
       context.packets.on('NEWTICK', (_packet, session) => {
+        // **Asked for and thrown away, ahead of every reason to stop below.**
+        // The module measures the cursor only while somebody keeps asking, and
+        // the search that wants it runs elsewhere: the player's key press lands
+        // between ticks, and an attack ability never reaches the cast path here
+        // at all. Waiting to ask until a search needs one would mean the first
+        // search after a quiet spell — which is the key press — got no reading.
+        if (tuning.priority === TargetPriority.ClosestToCursor) inputs.cursorPoint();
+
         const self = session.self;
         if (!self.alive) return;
 
@@ -377,16 +490,20 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // every visible enemy is by far the most expensive thing here, and a
         // priest at full health is turned down before anything needs to know
         // whether the room is empty.
+        //
+        // **Something to fight is whatever the boss rule allows**, so a player
+        // who asked for bosses only gets a combat aura for a boss and not for
+        // the two bats that walked in — which is the sentence the setting is
+        // written in.
         let enemy: EntityView | undefined;
         let searched = false;
-        const nearest = (): EntityView | undefined => {
+        const hasEnemy = (): boolean => {
           if (!searched) {
             searched = true;
-            enemy = nearestEnemy(session);
+            enemy = enemyToFight(session);
           }
-          return enemy;
+          return enemy !== undefined;
         };
-        const hasEnemy = (): boolean => nearest() !== undefined;
 
         // **What the ability gives decides whether to cast; being aimed decides
         // only where.** Several support abilities carry an attack as a rider —
@@ -408,9 +525,16 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // An aimed ability is pointed at the enemy so its attack lands, and at
         // the character when there is nobody to point it at — which happens
         // exactly when a support ability with an attack rider is being cast for
-        // the support. A buff ignores the point either way: the game centres it
-        // on the character whatever the client sent.
-        const at: Position = aimed ? (nearest() ?? self) : self;
+        // the support, or when the player is pointing away from the room. A
+        // buff ignores the point either way: the game centres it on the
+        // character whatever the client sent.
+        //
+        // Its own search, and asked once because this is the only line that
+        // wants it: what is worth casting for above and what is worth pointing
+        // at here are two orderings of the same room, and only a support
+        // ability that both needed the room *and* carries an attack pays for
+        // both — `pD Tome` and its handful of neighbours.
+        const at: Position = aimed ? (targetEnemy(session) ?? self) : self;
 
         session.sendToServer('USEITEM', {
           // **The client's clock, not the one this plugin schedules against.**
@@ -454,7 +578,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         const ability = inputs.ability(objectType);
         if (ability?.use !== AbilityUse.Aimed) return;
 
-        const target = nearestEnemy(session);
+        const target = targetEnemy(session);
         if (target === undefined) return;
         packet.set('itemUsePos', { x: target.x, y: target.y });
       });

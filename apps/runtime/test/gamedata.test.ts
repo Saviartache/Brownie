@@ -54,6 +54,7 @@ const OBJECTS = `<?xml version="1.0" encoding="utf-8"?>
   <Object type="0x0d59" id="Oryx the Mad God 3">
     <Class>Character</Class>
     <Enemy />
+    <Quest />
     <MaxHitPoints>200000</MaxHitPoints>
   </Object>
   <Object type="0xc0ee" id="KSW Drone Spawner">
@@ -171,6 +172,17 @@ describe('object catalog', () => {
     expect(catalog.isEnemy(0xc0ee)).toBe(true);
     expect(catalog.isInvincible(0xc0ee)).toBe(true);
     expect(catalog.isInvincible(0x0d59)).toBe(false);
+  });
+
+  it('marks the bosses from the arrow the game draws over them', async () => {
+    const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
+
+    // `<Quest />` and nothing else: the spawner beside him carries more of the
+    // markers a boss has than health does — Oryx and a Shatters lever both have
+    // a health bar, and only one of them is a fight.
+    expect(catalog.isQuest(0x0d59)).toBe(true);
+    expect(catalog.isQuest(0xc0ee)).toBe(false);
+    expect(catalog.isQuest(0xffff)).toBe(false);
   });
 
   // A breakable wall is an enemy with hit points *and* a wall, and the game

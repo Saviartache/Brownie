@@ -1,5 +1,5 @@
 import { parseRecord } from '@brownie/ipc';
-import type { Plugin, SessionView } from '@brownie/plugin-api';
+import type { Plugin, Position, SessionView } from '@brownie/plugin-api';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import type { PacketRegistry } from '@brownie/protocol';
 import { checkStaleness, findGameInstall, readManifest } from '@brownie/gamedata-tool';
@@ -96,6 +96,19 @@ export interface ApplicationOptions {
 const FROM_MAP = 0;
 const FROM_PLAYER = 1;
 
+/** The module's switch for measuring where the player is pointing. */
+const CURSOR_TRACK_FEATURE = 'cursor.track';
+
+/**
+ * How often that claim is restated while somebody is reading it.
+ *
+ * The module's lease is three seconds, and this is comfortably inside it: often
+ * enough that a busy frame does not drop the reading mid-fight, rare enough
+ * that it is one message a second rather than one per read — and aim alone asks
+ * forty times a second.
+ */
+const CURSOR_CLAIM_INTERVAL_MS = 1000;
+
 /** One walk command, in the hundredths of a tile everything on this link uses. */
 function moveRecord(
   x: number,
@@ -164,10 +177,14 @@ export class Application {
   /// Chunks of a class-name dump, held until the module says it has finished.
   readonly #dump: string[] = [];
 
-  /// Where the module last said the player is pointing. Read by two features
-  /// and owned by neither: cursor aim ranks enemies against it, and the
-  /// walk-to-cursor chord walks to it.
+  /// Where the module last said the player is pointing. Read by three features
+  /// and owned by none of them: cursor aim ranks enemies against it, the
+  /// ability points at the same one, and the walk-to-cursor chord walks to it.
   readonly #cursor = new CursorTracker();
+
+  /// When the claim behind that reading was last restated. See
+  /// {@link Application.#cursorPoint}.
+  #cursorClaimedAtMs = 0;
 
   /// Whether the module says that chord is held down.
   ///
@@ -339,6 +356,7 @@ export class Application {
           isEnemy: (type) => this.#objects.isEnemy(type),
           isPet: (type) => this.#objects.isPet(type),
           isInvincible: (type) => this.#objects.isInvincible(type),
+          isQuest: (type) => this.#objects.isQuest(type),
           occupies: (type) => this.#objects.occupies(type),
           isScenery: (type) => this.#objects.isScenery(type),
           bodyTiles: (type) => this.#objects.bodyTiles(type),
@@ -436,6 +454,31 @@ export class Application {
 
   get targets(): AllowlistTargets {
     return this.#targets;
+  }
+
+  /**
+   * Where the player is pointing, and the claim that keeps the answer coming.
+   *
+   * **Asking is the claim.** The module measures the cursor against the game's
+   * own camera only while the runtime says it wants it — three calls a frame,
+   * which is why it is off by default — and two plugins want it now: aim ranks
+   * enemies by it, and the ability is pointed at the one it picks. A claim per
+   * plugin over one switch is the second plugin switching off the first's
+   * reading, so the claim lives with the reading instead, here, where the
+   * tracker already does.
+   *
+   * **And letting go is not asking.** There is no release: the module's claim
+   * is a three-second lease, so a priority the player moved off, a plugin that
+   * was disabled and a runtime that died all end it the same way, without
+   * anything having to notice which happened.
+   */
+  #cursorPoint(): Position | undefined {
+    const now = Date.now();
+    if (now - this.#cursorClaimedAtMs >= CURSOR_CLAIM_INTERVAL_MS) {
+      this.#cursorClaimedAtMs = now;
+      this.#native.setFeature(CURSOR_TRACK_FEATURE, true);
+    }
+    return this.#cursor.point();
   }
 
   /**
@@ -611,8 +654,9 @@ export class Application {
         isInvincible: (objectType) => this.#objects.isInvincible(objectType),
         // The one input auto-aim has that comes from the module rather than
         // from the wire: where the player is pointing, which is a question only
-        // the game's own camera can answer.
-        cursorPoint: () => this.#cursor.point(),
+        // the game's own camera can answer — and asking is what has it asked at
+        // all. See {@link Application.#cursorPoint}.
+        cursorPoint: () => this.#cursorPoint(),
       }),
     );
 
@@ -626,6 +670,13 @@ export class Application {
         ability: (objectType) => this.#objects.item(objectType)?.ability,
         isObstacle: (objectType) => this.#objects.occupies(objectType),
         isInvincible: (objectType) => this.#objects.isInvincible(objectType),
+        // The same catalog again, and the one thing on it that separates a
+        // dungeon's boss from the trash in front of it: `<Quest />` is what the
+        // game draws the arrow from, and nothing on the wire carries it.
+        isBoss: (objectType) => this.#objects.isQuest(objectType),
+        // And the same reading auto-aim ranks by, out of the same place, so the
+        // ability lands on the enemy the shots are already going to.
+        cursorPoint: () => this.#cursorPoint(),
       }),
     );
 

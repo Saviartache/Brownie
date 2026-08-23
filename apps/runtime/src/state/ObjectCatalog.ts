@@ -42,6 +42,19 @@ export interface ObjectCatalog {
    */
   isInvincible(objectType: number): boolean;
   /**
+   * Whether one of these is a boss.
+   *
+   * `<Quest />` in `objects.xml` is the game's own answer — it is what puts the
+   * arrow over a monster's head — and it covers 494 of them: the realm gods,
+   * the dungeon bosses, and the named minibosses on the way. Nothing on the
+   * wire says so, and the health bar does not settle it either: a Shatters
+   * lever has five thousand hit points and is a switch.
+   *
+   * The reference implementation kept thirty-five object ids in a header, which
+   * is the same list with every dungeon added since missing from it.
+   */
+  isQuest(objectType: number): boolean;
+  /**
    * Whether one of these stands in the way.
    *
    * **In this game a wall is an object, not a tile.** It stands on ordinary
@@ -121,6 +134,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isEnemy: () => false,
   isPet: () => false,
   isInvincible: () => false,
+  isQuest: () => false,
   occupies: () => false,
   isScenery: () => false,
   bodyTiles: () => undefined,

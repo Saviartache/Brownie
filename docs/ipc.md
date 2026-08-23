@@ -270,6 +270,16 @@ over its own. The last two are leases anyway, because a claim that outlives its
 claimant is a claim nobody can revoke — and because the collider's expiry is
 what actually undoes the write.
 
+**`cursor.track` is the one nothing ever ends early**, and it is claimed by the
+runtime rather than by a plugin. Two features read the point now — aim ranks
+enemies by it, the ability is pointed at the one aim picked — and one switch
+carries it, so a claim per plugin would be the second plugin switching off the
+first's reading. It is restated by the *reading* instead: asking
+`Application.#cursorPoint` for the point restates the claim, nobody says stop,
+and a priority the player moved off, a plugin that was disabled and a runtime
+that died all end it the same way three seconds later. What that costs while it
+lapses is the camera being read for a feature that has stopped looking.
+
 `player.colliderMultiplier` is the exception on this table: not a claim but the
 number one of the claims applies. It goes out **ahead of the claim and only when
 it has moved** — the module applies whatever it was last told, so a claim heard
@@ -472,7 +482,8 @@ of that vintage ignores the new record instead of reading a coordinate as a
 bearing.
 
 It is sent twenty times a second while anything is watching — the chord is down,
-or a plugin holds `cursor.track` — and not at all otherwise: measuring costs
+or something is reading the point and `cursor.track` is held for it — and not at
+all otherwise: measuring costs
 three calls into the camera per frame, and a record per fiftieth of a second for
 a feature nobody switched on is traffic with no reader. **The repetition is the
 safety.** A module that is killed, unloaded or restarted mid-aim says nothing

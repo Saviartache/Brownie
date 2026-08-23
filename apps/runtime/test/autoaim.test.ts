@@ -14,7 +14,7 @@ import { ConditionEffect, conditionBitLow } from '../src/constants/ConditionEffe
 import { solveIntercept } from '../src/features/autoaim/intercept.js';
 import { MotionTracker } from '../src/state/MotionTracker.js';
 import { CURSOR_FRESH_MS, CursorTracker } from '../src/native/CursorTracker.js';
-import { TargetPriority, selectTarget } from '../src/features/autoaim/selectTarget.js';
+import { BossRule, TargetPriority, selectTarget } from '../src/features/autoaim/selectTarget.js';
 import {
   createAutoAimPlugin,
   type WeaponProjectile,
@@ -294,6 +294,78 @@ describe('selectTarget', () => {
         cursorPoint: { x: 5, y: 0 },
       });
       expect(chosen?.objectId).toBe(2);
+    });
+  });
+
+  describe('with a boss in the room', () => {
+    /** The one at the far end of it, with the minion standing on the player. */
+    const room = [enemy(1, 2, 0), enemy(2, 9, 0)];
+    const isBoss = (candidate: EntityView): boolean => candidate.objectId === 2;
+
+    it('ranks a boss with everything else unless asked otherwise', () => {
+      expect(selectTarget(room, at)?.objectId).toBe(1);
+      expect(selectTarget(room, { ...at, bosses: { rule: BossRule.Any, isBoss } })?.objectId).toBe(
+        1,
+      );
+    });
+
+    it('takes the boss over whatever is standing closer', () => {
+      const chosen = selectTarget(room, { ...at, bosses: { rule: BossRule.Prefer, isBoss } });
+      expect(chosen?.objectId).toBe(2);
+    });
+
+    it('falls back to the rest of the room when no boss is in range', () => {
+      // The whole difference between the two rules: preferring is a tier, not a
+      // filter, so a realm with nothing marked in it still gets an answer.
+      const chosen = selectTarget([enemy(1, 2, 0)], {
+        ...at,
+        bosses: { rule: BossRule.Prefer, isBoss },
+      });
+      expect(chosen?.objectId).toBe(1);
+    });
+
+    it('picks nothing at all with nothing but minions, when asked for bosses only', () => {
+      const chosen = selectTarget([enemy(1, 2, 0), enemy(3, 4, 0)], {
+        ...at,
+        bosses: { rule: BossRule.Only, isBoss },
+      });
+      expect(chosen).toBeUndefined();
+    });
+
+    it('ranks bosses against each other by the priority underneath', () => {
+      // Two of them, which is a phase change and half of Oryx's Sanctuary. The
+      // rule says which class of enemy; the priority still says which one.
+      const bosses = { rule: BossRule.Prefer, isBoss: () => true };
+      expect(selectTarget(room, { ...at, bosses })?.objectId).toBe(1);
+      expect(
+        selectTarget([enemy(1, 2, 0, 90), enemy(2, 9, 0, 10)], {
+          ...at,
+          priority: TargetPriority.LowestHp,
+          bosses,
+        })?.objectId,
+      ).toBe(2);
+    });
+
+    it('moves on to the next boss when the first cannot be hit', () => {
+      // The tier is not a commitment: an invulnerable boss phase leaves the
+      // second one, and dropping to a minion would be the mode giving up.
+      const chosen = selectTarget([enemy(1, 2, 0), enemy(2, 4, 0), enemy(3, 6, 0)], {
+        ...at,
+        bosses: { rule: BossRule.Prefer, isBoss: (candidate) => candidate.objectId !== 1 },
+        accept: (candidate) => candidate.objectId !== 2,
+      });
+      expect(chosen?.objectId).toBe(3);
+    });
+
+    it('is not asked whether a minion can be hit once a boss is standing', () => {
+      // The expensive test, kept off everything the tier has already ruled out.
+      const accept = vi.fn(() => true);
+      selectTarget([enemy(2, 9, 0), enemy(1, 2, 0)], {
+        ...at,
+        bosses: { rule: BossRule.Prefer, isBoss },
+        accept,
+      });
+      expect(accept).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -55,15 +55,6 @@ import { isShootable } from './shootable.js';
 const PLAN_INTERVAL_MS = 25;
 
 /**
- * The module's switch for measuring the cursor.
- *
- * Off by default and claimed only by the one priority that reads it: measuring
- * costs three calls into the game's camera every frame, and a session aiming at
- * the closest enemy has no use for the answer.
- */
-const CURSOR_FEATURE_KEY = 'cursor.track';
-
-/**
  * The module's switch for letting shots through walls.
  *
  * A pair of detours over the client's own projectile collision check — see
@@ -141,7 +132,12 @@ export interface AutoAimOptions {
    * said recently.
    *
    * Supplied by the composition root for the same reason the two above are: it
-   * arrives from the native module and a plugin is not given the link. See
+   * arrives from the native module and a plugin is not given the link.
+   *
+   * **Asking for it is what keeps it coming.** The module measures the cursor
+   * only while the runtime claims it, and the claim rides this call rather than
+   * being made here: two plugins want the reading now, one switch carries it,
+   * and a claim per plugin is one plugin turning the other's reading off. See
    * `native/CursorTracker.ts` for where the point comes from and why it
    * expires.
    */
@@ -218,31 +214,26 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
       const tracker = new MotionTracker();
 
-      // **The module does each of these only while somebody is asking**, so
-      // whatever reads one has to ask — and keep asking. The claim expires on
-      // the far side, which is what stops a plugin that was disabled or
-      // unloaded from leaving the camera queried for nobody, or the projectile
-      // detours live under a player who switched them off. Restated an order of
-      // magnitude more often than the lease is long.
-      const claimer = (key: string): ((wanted: boolean, now: number) => void) => {
-        let claimedAtMs = 0;
-        let claiming = false;
-        return (wanted: boolean, now: number): void => {
-          if (!wanted && !claiming) return;
-          if (wanted && claiming && now - claimedAtMs < CLAIM_INTERVAL_MS) return;
-          claiming = wanted;
-          claimedAtMs = now;
-          context.native.setFeature(key, wanted);
-        };
+      // **The module keeps the detours in only while somebody is asking**, so
+      // this has to ask — and keep asking. The claim expires on the far side,
+      // which is what stops a plugin that was disabled or unloaded from leaving
+      // them live under a player who switched them off. Restated an order of
+      // magnitude more often than the lease is long, and dropped outright the
+      // moment the switch goes off: waiting out a lease to walk through walls
+      // again is a setting that did not take.
+      let claimedAtMs = 0;
+      let claiming = false;
+      const claimPassWalls = (wanted: boolean, now: number): void => {
+        if (!wanted && !claiming) return;
+        if (wanted && claiming && now - claimedAtMs < CLAIM_INTERVAL_MS) return;
+        claiming = wanted;
+        claimedAtMs = now;
+        context.native.setFeature(SHOT_NOCLIP_FEATURE_KEY, wanted);
       };
-      const claimCursor = claimer(CURSOR_FEATURE_KEY);
-      const claimPassWalls = claimer(SHOT_NOCLIP_FEATURE_KEY);
 
       context.onDispose(() => {
         tracker.clear();
-        const now = Date.now();
-        claimCursor(false, now);
-        claimPassWalls(false, now);
+        claimPassWalls(false, Date.now());
       });
 
       // Object ids are unique within a map and re-used across one, so a
@@ -271,12 +262,6 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
       /** Points the shots at whatever is worth shooting, or at nothing. */
       const aim = (session: SessionView): void => {
-        // Before every early return below it: whether the module should be
-        // measuring the cursor depends on the setting and on nothing else, and
-        // a claim that lapsed because the player put a weapon away would come
-        // back a second late with the weapon.
-        claimCursor(priority.get() === TargetPriority.ClosestToCursor, Date.now());
-
         const self = session.self;
         if (!self.alive) return;
 
@@ -338,11 +323,12 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         // which was hittable — unshot. Being worth shooting at is the same kind
         // of question and belongs in the same place, which is why both are
         // asked here rather than filtered before or checked after.
-        // Asked for only by the one priority that reads it, so a session aiming
-        // at the closest enemy never touches the clock. A reading it does not
-        // get is a target it does not pick — and the player's own shot then
-        // goes exactly where they pointed, which is the right answer to "we do
-        // not know where you are pointing".
+        // Asked for only by the one priority that reads it, and asking is what
+        // has the module measure at all — so a session aiming at the closest
+        // enemy leaves the game's camera alone. A reading it does not get is a
+        // target it does not pick, and the player's own shot then goes exactly
+        // where they pointed, which is the right answer to "we do not know
+        // where you are pointing".
         const chosen = priority.get();
         const cursor =
           chosen === TargetPriority.ClosestToCursor ? options.cursorPoint() : undefined;

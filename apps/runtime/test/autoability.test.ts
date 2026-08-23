@@ -5,6 +5,7 @@ import {
   type ItemSlotView,
   type NativeApi,
   type PermanentStats,
+  type Position,
   type SessionApi,
   type SessionView,
 } from '@brownie/plugin-api';
@@ -361,6 +362,8 @@ describe('the auto-ability plugin', () => {
 
   const ENEMY_TYPE = 100;
   const WALL_TYPE = 200;
+  /** What `objects.xml` marks `<Quest />`, which is the arrow over a boss. */
+  const BOSS_TYPE = 300;
 
   const NO_STATS: PermanentStats = {
     attack: 0,
@@ -423,10 +426,14 @@ describe('the auto-ability plugin', () => {
     casts: Cast[];
     packets: SentPacket[];
     session: SessionView;
+    /** Where the module says the player is pointing, or nothing when nobody knows. */
+    cursor: { point: Position | undefined };
     /** Advances the clock and offers one server tick. */
     tick: (atMs: number) => void;
     /** How many times the enemy list has been walked. */
     scans: () => number;
+    /** How many times the cursor has been asked for, which is the claim on it. */
+    cursorAsks: () => number;
   }
 
   function enemyOf(objectId: number, x: number, objectType = ENEMY_TYPE): EntityView {
@@ -545,11 +552,20 @@ describe('the auto-ability plugin', () => {
       sessions: SESSIONS,
       onChanged: () => undefined,
     });
+    // Nothing until a test points somewhere, which is the module saying nothing
+    // — the state a session spends most of its life in.
+    const cursor: { point: Position | undefined } = { point: undefined };
+    let cursorAsks = 0;
     host.load(
       createAutoAbilityPlugin({
         ability: (objectType) => abilities.get(objectType),
         isObstacle: (objectType) => objectType === WALL_TYPE,
         isInvincible: () => false,
+        isBoss: (objectType) => objectType === BOSS_TYPE,
+        cursorPoint: () => {
+          cursorAsks += 1;
+          return cursor.point;
+        },
       }),
     );
     host.setEnabled('auto-ability', true);
@@ -571,8 +587,10 @@ describe('the auto-ability plugin', () => {
       casts,
       packets,
       session,
+      cursor,
       tick,
       scans: () => scans,
+      cursorAsks: () => cursorAsks,
     };
   }
 
@@ -1011,5 +1029,124 @@ describe('the auto-ability plugin', () => {
     h.host.dispatchPacket(packet, h.session);
 
     expect(packet.modified).toBe(false);
+  });
+
+  describe('choosing which enemy', () => {
+    /** A boss at the far end of the room, with a minion on top of the player. */
+    function room(h: Harness): void {
+      h.enemies.push(enemyOf(1, 2), enemyOf(2, 7, BOSS_TYPE));
+    }
+
+    /** Where a quiver the player fired ended up. */
+    function fired(h: Harness): { x: number; y: number } {
+      const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
+      h.host.dispatchPacket(packet, h.session);
+      return usePosOf(packet);
+    }
+
+    it('takes the closest enemy until it is told otherwise', () => {
+      const h = harness();
+      room(h);
+      expect(fired(h)).toEqual({ x: 2, y: 0 });
+    });
+
+    it('takes the boss over whatever is standing closer, when asked to', () => {
+      const h = harness();
+      room(h);
+      // Same health on both, so nothing but the marker separates them: this is
+      // the tier doing the work rather than `The toughest enemy` happening to
+      // agree with it, which is how bosses were picked before there was one.
+      h.settings.apply('bosses', 'prefer');
+      expect(fired(h)).toEqual({ x: 7, y: 0 });
+
+      h.settings.apply('bosses', 'any');
+      expect(fired(h)).toEqual({ x: 2, y: 0 });
+    });
+
+    it('points nothing at all at a minion when the player asked for bosses only', () => {
+      const h = harness();
+      h.enemies.push(enemyOf(1, 2));
+      h.settings.apply('bosses', 'only');
+
+      // Left where they pointed it, which is the honest answer to "there is
+      // nothing here you said you wanted this spent on".
+      expect(fired(h)).toEqual(MOUSE);
+
+      h.enemies.push(enemyOf(2, 7, BOSS_TYPE));
+      expect(fired(h)).toEqual({ x: 7, y: 0 });
+    });
+
+    it('holds a combat aura for a boss under that rule, not for the minions', () => {
+      // The other half of "only bosses", and the half somebody would be annoyed
+      // to find missing: a seal is 90 mana, and spending it on two bats is what
+      // the setting says not to do.
+      const h = harness();
+      h.settings.apply('bosses', 'only');
+      h.enemies.push(enemyOf(1, 2));
+
+      h.tick(0);
+      expect(h.casts).toHaveLength(0);
+
+      h.enemies.push(enemyOf(2, 7, BOSS_TYPE));
+      h.tick(1000);
+      expect(h.casts).toEqual([{ x: 0, y: 0, slotId: ABILITY_SLOT, objectType: SEAL_TYPE }]);
+    });
+
+    it('still puts a combat aura up while the cursor points at nothing', () => {
+      // Which enemy to *point at* is a preference about aiming; whether a
+      // 90-mana aura is worth putting up is a question about the room, and a
+      // paladin surrounded by monsters with the mouse resting on empty floor
+      // is in a fight. Only the boss rule crosses between the two.
+      const h = harness();
+      h.settings.apply('priority', 'closestToCursor');
+      h.enemies.push(enemyOf(1, 2));
+
+      h.tick(0);
+      expect(h.casts).toHaveLength(1);
+    });
+
+    it('takes the enemy under the cursor, which is where auto-aim is pointing', () => {
+      // The complaint that produced this: aiming at the enemy under the cursor
+      // and watching the ability go to whatever had wandered closest.
+      const h = harness();
+      room(h);
+      h.settings.apply('priority', 'closestToCursor');
+      h.cursor.point = { x: 7, y: 1 };
+
+      expect(fired(h)).toEqual({ x: 7, y: 0 });
+    });
+
+    it('points nowhere new while nobody knows where the cursor is', () => {
+      // A module that was killed, unloaded or has not started measuring yet
+      // says nothing, and the player's own aim is the right answer to that.
+      const h = harness();
+      room(h);
+      h.settings.apply('priority', 'closestToCursor');
+
+      expect(fired(h)).toEqual(MOUSE);
+    });
+
+    it('keeps the cursor asked for even while it has no reason to cast', () => {
+      // Asking is the claim, and the module measures nothing without one — so
+      // an archer holding a quiver, whose ability is never cast from here, has
+      // to keep the reading alive for the moment they press the key.
+      const h = harness();
+      h.slot.objectType = QUIVER_TYPE;
+      h.settings.apply('priority', 'closestToCursor');
+
+      h.tick(0);
+      h.tick(500);
+      expect(h.cursorAsks()).toBe(2);
+    });
+
+    it('leaves the cursor alone under every other priority', () => {
+      // Three calls a frame into the game's camera, for an answer nothing on
+      // this path reads.
+      const h = harness();
+      room(h);
+      for (let at = 0; at <= 3000; at += 500) h.tick(at);
+      fired(h);
+      expect(h.cursorAsks()).toBe(0);
+    });
   });
 });

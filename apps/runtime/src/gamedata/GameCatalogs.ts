@@ -22,6 +22,8 @@ export interface ObjectDefinition {
   readonly isPet: boolean;
   /** Whether one of these takes no damage ever — a spawner, an emitter, a prop. */
   readonly isInvincible: boolean;
+  /** Whether one of these is a boss. See {@link ObjectCatalog.isQuest}. */
+  readonly isQuest: boolean;
   /** Whether one of these blocks the square it stands on — a wall, a rock. */
   readonly occupies: boolean;
   /** Whether one of these is part of the room rather than something that fights. */
@@ -92,6 +94,10 @@ export class GameObjectCatalog implements ObjectCatalog {
 
   isInvincible(objectType: number): boolean {
     return this.#byType.get(objectType)?.isInvincible ?? false;
+  }
+
+  isQuest(objectType: number): boolean {
+    return this.#byType.get(objectType)?.isQuest ?? false;
   }
 
   occupies(objectType: number): boolean {
@@ -250,6 +256,11 @@ export async function readObjectDefinitions(
       // reason a health-based guess at this would nearly work and then quietly
       // fail on the eight that do.
       isInvincible: hasChild(element, 'Invincible'),
+      // `<Quest />` is what puts the arrow over a monster, and the game puts it
+      // over 494 of them — 459 more than the reference implementation listed by
+      // id in a header, which is every dungeon added since that list was
+      // written.
+      isQuest: hasChild(element, 'Quest'),
       // All three mark a square as blocked. `FullOccupy` also stops sight,
       // which nothing here needs — for walking they mean the same thing.
       //
