@@ -20,8 +20,13 @@
  * damage nova. Letting that rider decide is how a 180-mana heal ends up going
  * off every 700 ms for as long as anything is on screen, which is exactly what
  * it did. Being aimed says *where* the cast is pointed; what the ability gives
- * says *whether* to cast at all, and an ability that gives nothing nameable is
- * the only one whose answer is "when there is something in range".
+ * says *whether* to cast at all.
+ *
+ * **An ability that gives nothing nameable has no answer here, and that is the
+ * right answer.** A quiver, a spell, a trap and a scepter are worth firing when
+ * the player says so and not when a monster walks into range, so nothing
+ * decides that for them — see `autoAbilityPlugin.ts`, which points those where
+ * the shots are going and leaves the key press to the player.
  *
  * Pure, and separate from the plugin, because this is the part that is either
  * right or wrong: everything around it is packets and settings.
@@ -32,20 +37,6 @@ import {
   NEGATIVE_CONDITIONS,
   type AbilityBenefit,
 } from '../../gamedata/abilityEffects.js';
-
-/** The reason a pure attack ability fires: there is something to fire at. */
-export const TARGET_IN_RANGE = 'target-in-range';
-
-/**
- * Why a cast went out — the benefit that justified it, or
- * {@link TARGET_IN_RANGE} for an ability that gives nothing this build can name.
- *
- * Named rather than reduced to a boolean because the rules here overlap: a tome
- * that heals and cleanses passes for two different reasons, and a test that can
- * only see "yes" cannot tell a heal that fired for the cleanse rule from one
- * that fired for the right one. Costs nothing — the loop already has it in hand.
- */
-export type CastReason = BenefitKind | typeof TARGET_IN_RANGE;
 
 /** The character, as this decision sees it. */
 export interface CastMoment {
@@ -91,23 +82,23 @@ export interface CastPreferences {
 }
 
 /**
- * What makes casting worth it now, or `undefined` for nothing.
+ * Which benefit makes casting worth it now, or `undefined` for nothing.
  *
- * @param benefits What the ability gives. Empty is an ability whose effects
- *   this build cannot name — see below for why that is not simply "no".
+ * Named rather than reduced to a boolean because the rules here overlap: a tome
+ * that heals and cleanses passes for two different reasons, and a test that can
+ * only see "yes" cannot tell a heal that fired for the cleanse rule from one
+ * that fired for the right one. Costs nothing — the loop already has it in hand.
+ *
+ * @param benefits What the ability gives. Empty is an ability whose effects this
+ *   build cannot name — every attack ability in the game, and anything built
+ *   out of an effect this build has not learned — and nothing here is a reason
+ *   to fire one.
  */
 export function castReason(
   benefits: readonly AbilityBenefit[],
   moment: CastMoment,
   preferences: CastPreferences,
-): CastReason | undefined {
-  // Nothing nameable came out of the file — every attack ability in the game
-  // lands here, along with anything built out of an effect this build has not
-  // learned. Firing it while something is nearby is the same guess the
-  // reference made, narrowed to the case where a guess is defensible: an
-  // ability worn into a fight is worn for the fight.
-  if (benefits.length === 0) return moment.enemyNear() ? TARGET_IN_RANGE : undefined;
-
+): BenefitKind | undefined {
   for (const benefit of benefits) {
     // Already on the character. This is exact where a duration is a guess — the
     // server states the bit, and wisdom stretches every duration in the file by

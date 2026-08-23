@@ -1,5 +1,6 @@
 /**
- * Auto-ability: uses the item in the ability slot when using it is worth it.
+ * Auto-ability: casts the support half of the ability slot, and points the
+ * other half at an enemy instead of at the mouse.
  *
  * **What the ability does is read from the ability, not from the class.** The
  * implementation this came from kept two hand-written sets of class ids — the
@@ -28,9 +29,20 @@
  * **Being aimed is not a reason to cast, only a place to cast at.** Support
  * abilities carry attacks as riders — `pD Tome` heals, raises a healing aura
  * and fires a shot — and letting the rider decide is how a 180-mana heal went
- * off every 700 ms for as long as anything was on screen. An ability that gives
- * nothing nameable is the only one fired for having a target, which is every
- * quiver, spell, trap and scepter in the game.
+ * off every 700 ms for as long as anything was on screen.
+ *
+ * **An attack ability is never cast here, only pointed.** A quiver, a spell, a
+ * trap and a scepter give nothing this build can name, so there is no moment
+ * that makes one worth firing — only a player who decided to fire it. Those
+ * wait for the key press, and all this does with it is rewrite the one field
+ * the client fills from the mouse, so the ability lands on the enemy rather
+ * than wherever the cursor happened to be. When to spend the mana stays the
+ * player's decision; the only thing taken off them is the aiming.
+ *
+ * **The target is picked the way auto-aim picks one**, out of the same two
+ * modules rather than out of a second opinion — see the import below. It is not
+ * *read* from auto-aim: one plugin cannot read another, and asking the same
+ * question of the same code needs no channel between the two.
  *
  * **It reads the character, not the party.** A priest's tome heals everyone
  * standing in it, and a group in trouble around a healthy priest is not
@@ -42,8 +54,9 @@
  * **It sends `USEITEM`, exactly as the client does for a key press.** The
  * position it names is where the effect lands — an enemy for an aimed ability,
  * the character for a buff — which is the same field the client fills with the
- * mouse. Injected packets do not re-enter the pipeline, so this plugin never
- * sees its own cast and needs no flag to tell one from a real key press.
+ * mouse, and the same field the redirect above rewrites. Injected packets do
+ * not re-enter the pipeline, so this plugin never sees its own cast and needs
+ * no flag to tell one from a real key press.
  *
  * It does not reconcile with auto-drink: mana potions are that plugin's
  * threshold and this one's reserve, and moving somebody's setting on their
@@ -138,7 +151,8 @@ const SHOOTABLE: Omit<ShootableRules, 'isObstacle' | 'isInvincible'> = {
  * be handed straight to it instead of built into a fresh object per tick.
  */
 interface Tuning extends CastPreferences {
-  readonly attacks: boolean;
+  /** Point an attack ability the player fires, rather than leave it on the mouse. */
+  readonly aimAttacks: boolean;
   readonly support: boolean;
   readonly rangeTiles: number;
   /** The share of the mana bar to leave standing, as a fraction of it. */
@@ -167,15 +181,15 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       id: 'auto-ability',
       name: 'Auto Ability',
       category: PluginCategory.Combat,
-      description: 'Uses the equipped ability when there is something to use it on.',
+      description: 'Casts your support ability when it is worth it, and aims the attacks you fire.',
     },
 
     setup(context) {
-      // Split by what an ability is *for* rather than by where it is pointed. A
-      // priest's tome fires a shot and would otherwise sit under "attacks",
-      // which is not what a player switching attacks off means by it.
-      const castAttacks = context.settings.boolean('castAimed', {
-        label: 'Use attack abilities — quivers, spells, traps, scepters',
+      // The two halves of the feature, and they are not the same offer: one
+      // decides when to spend the mana, the other only decides where what the
+      // player already spent lands.
+      const aimAttacks = context.settings.boolean('aimAttacks', {
+        label: 'Aim the attack abilities you use — quivers, spells, traps, scepters',
         default: true,
       });
       const castSupport = context.settings.boolean('castSelf', {
@@ -230,7 +244,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       });
 
       let tuning: Tuning = {
-        attacks: true,
+        aimAttacks: true,
         support: true,
         rangeTiles: 8,
         manaReserve: 0,
@@ -242,7 +256,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
 
       const refresh = (): void => {
         tuning = {
-          attacks: castAttacks.get(),
+          aimAttacks: aimAttacks.get(),
           support: castSupport.get(),
           rangeTiles: rangeTiles.get(),
           // Kept as a fraction rather than the percentage the control shows, so
@@ -257,7 +271,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
 
       refresh();
       for (const handle of [
-        castAttacks,
+        aimAttacks,
         castSupport,
         rangeTiles,
         healthPercent,
@@ -343,10 +357,13 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         const ability = inputs.ability(slot.objectType);
         if (ability === undefined || ability.use === AbilityUse.Never) return;
 
-        // Two independent facts about the same item: whether it supports the
-        // character, and whether it is pointed at something. A tome is both.
-        const supports = ability.benefits.length > 0;
-        if (!(supports ? tuning.support : tuning.attacks)) return;
+        // **Only what an ability *gives* is ever cast from here.** An attack
+        // ability gives nothing this build can name, and there is no moment
+        // that makes one worth firing — only a player who decided to fire it.
+        // Those are handled on the way past in the `USEITEM` handler below.
+        if (!tuning.support || ability.benefits.length === 0) return;
+
+        // Whether it is also pointed at something, which a tome can be.
         const aimed = ability.use === AbilityUse.Aimed;
 
         // The cost first, then the reserve on top of it: a cast that leaves the
@@ -422,10 +439,24 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       // key press.
       context.packets.on('USEITEM', (packet, session) => {
         if (packet.opaque) return;
-        if (slotIdOf(packet.get('slotObject')) !== ABILITY_SLOT) return;
+        const objectType = abilityInUse(packet.get('slotObject'));
+        if (objectType === undefined) return;
 
         const state = stateFor(session);
         state.nextAtMs = Math.max(state.nextAtMs, session.world.gameTimeMs + MANUAL_PAUSE_MS);
+
+        if (!tuning.aimAttacks) return;
+        // **Only what the game points at a place.** A buff is centred on the
+        // character whatever this field says, so moving it would change
+        // nothing; an ability that also *moves* the character reads it as the
+        // place to move to, and pointing one of those at a monster is a
+        // teleport into the monster. `Aimed` is exactly the set that is neither.
+        const ability = inputs.ability(objectType);
+        if (ability?.use !== AbilityUse.Aimed) return;
+
+        const target = nearestEnemy(session);
+        if (target === undefined) return;
+        packet.set('itemUsePos', { x: target.x, y: target.y });
       });
 
       context.packets.on('MAPINFO', (_packet, session) => {
@@ -444,11 +475,20 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
   });
 }
 
-/** `SlotObject.slotId` out of a decoded `USEITEM`, when it holds one. */
-function slotIdOf(slotObject: unknown): number | undefined {
+/**
+ * The item a `USEITEM` is using out of the ability slot, or `undefined` for a
+ * packet that is using something else — a potion out of the belt, most often.
+ *
+ * Takes `unknown` rather than the decoded shape on purpose: a field is only a
+ * record here because a schema said so, and a definition that has drifted from
+ * the live game is exactly the case worth surviving.
+ */
+function abilityInUse(slotObject: unknown): number | undefined {
   if (typeof slotObject !== 'object' || slotObject === null || Array.isArray(slotObject)) {
     return undefined;
   }
-  const slotId = (slotObject as Record<string, unknown>)['slotId'];
-  return typeof slotId === 'number' ? slotId : undefined;
+  const fields = slotObject as Record<string, unknown>;
+  if (fields['slotId'] !== ABILITY_SLOT) return undefined;
+  const objectType = fields['objectType'];
+  return typeof objectType === 'number' ? objectType : undefined;
 }

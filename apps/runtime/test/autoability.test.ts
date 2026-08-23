@@ -15,7 +15,6 @@ import { describe, expect, it } from 'vitest';
 import { ConditionEffect, conditionBitLow } from '../src/constants/ConditionEffect.js';
 import { createAutoAbilityPlugin } from '../src/features/autoability/autoAbilityPlugin.js';
 import {
-  TARGET_IN_RANGE,
   castReason,
   percentOf,
   type CastMoment,
@@ -304,9 +303,12 @@ describe('whether casting it now would accomplish anything', () => {
     );
   });
 
-  it('falls back to "something is nearby" when it cannot name what it gives', () => {
+  it('gives no reason at all for an ability it cannot name — enemies or not', () => {
+    // Every attack ability in the game lands here, and "something is nearby" is
+    // not a reason to spend the player's mana on one. The plugin points those
+    // when the player fires them instead; see the redirect tests below.
     expect(castReason([], alone(), LIMITS)).toBeUndefined();
-    expect(castReason([], fighting(), LIMITS)).toBe(TARGET_IN_RANGE);
+    expect(castReason([], fighting(), LIMITS)).toBeUndefined();
   });
 
   it('reads an unstated bar as full rather than as empty', () => {
@@ -455,7 +457,10 @@ describe('the auto-ability plugin', () => {
       [PRISM_TYPE, abilityOf(PRISM)],
     ]);
 
-    const slot = { objectType: QUIVER_TYPE };
+    // A support ability, because that is the half this plugin casts on its own.
+    // The attack half is only ever pointed, and the tests that cover it name
+    // the quiver they are pointing.
+    const slot = { objectType: SEAL_TYPE };
     const inventory: InventoryView = {
       carried: () => [],
       backpack: () => [],
@@ -571,17 +576,26 @@ describe('the auto-ability plugin', () => {
     };
   }
 
+  /** Where the player pointed — nowhere near anything the tests below spawn. */
+  const MOUSE = { x: -7, y: 11 };
+
   /** A real `USEITEM`, encoded and decoded, so the nested slot is read as one. */
-  function useItem(slotId: number): MutablePacket {
+  function useItem(slotId: number, objectType = SEAL_TYPE): MutablePacket {
     const packet = createPacket(registry, 'USEITEM');
     Object.assign(packet.fields, {
       time: 0,
-      slotObject: { objectId: 7, slotId, objectType: QUIVER_TYPE },
-      itemUsePos: { x: 0, y: 0 },
+      slotObject: { objectId: 7, slotId, objectType },
+      itemUsePos: MOUSE,
       useType: 1,
       unknownInt: 0,
     });
     return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
+  }
+
+  /** Where a `USEITEM` says the effect should land. */
+  function usePosOf(packet: MutablePacket): { x: number; y: number } {
+    const position = recordAt(packet.fields, 'itemUsePos');
+    return { x: numberAt(position, 'x'), y: numberAt(position, 'y') };
   }
 
   it('walks the enemy list once a tick at most, and not at all when it need not', () => {
@@ -593,13 +607,12 @@ describe('the auto-ability plugin', () => {
     for (let at = 0; at <= 3000; at += 500) h.tick(at);
     expect(h.scans()).toBe(0);
 
-    // And an attack ability, which does need the answer, asks for it once —
-    // both the decision and the aim point come off the same search.
-    const attacker = harness();
-    attacker.enemies.push(enemyOf(1, 2));
-    attacker.tick(0);
-    expect(attacker.casts).toHaveLength(1);
-    expect(attacker.scans()).toBe(1);
+    // And a combat aura, which does need the answer, asks for it once.
+    const seal = harness();
+    seal.enemies.push(enemyOf(1, 2));
+    seal.tick(0);
+    expect(seal.casts).toHaveLength(1);
+    expect(seal.scans()).toBe(1);
   });
 
   it('stops before the ability slot while the cooldown is still running', () => {
@@ -626,25 +639,16 @@ describe('the auto-ability plugin', () => {
     expect(h.packets).toEqual([{ time: 1_800_500, useType: 1, slotId: ABILITY_SLOT, objectId: 7 }]);
   });
 
-  it('casts an aimed ability at the nearest enemy that is worth hitting', () => {
+  it('never fires an attack ability, however long something stands in range', () => {
+    // The whole point of the split: a quiver is the player's key to press. It
+    // is not even worth a look at the room until they press it.
     const h = harness();
-    h.enemies.push(enemyOf(1, 6), enemyOf(2, 3));
-    h.tick(0);
+    h.slot.objectType = QUIVER_TYPE;
+    h.enemies.push(enemyOf(1, 2));
 
-    expect(h.casts).toEqual([{ x: 3, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
-  });
-
-  it('holds an aimed ability while there is nothing in range', () => {
-    const h = harness();
-    // Past the eight-tile default, and then a wall, which is an object with hit
-    // points and would otherwise be the closest enemy there is.
-    h.enemies.push(enemyOf(1, 12));
-    h.tick(0);
+    for (let at = 0; at <= 5000; at += 500) h.tick(at);
     expect(h.casts).toHaveLength(0);
-
-    h.enemies.push(enemyOf(2, 2, WALL_TYPE));
-    h.tick(1000);
-    expect(h.casts).toHaveLength(0);
+    expect(h.scans()).toBe(0);
   });
 
   it('leaves a priest tome alone at full health, enemies or not', () => {
@@ -719,7 +723,7 @@ describe('the auto-ability plugin', () => {
     h.slot.objectType = HYBRID_TOME_TYPE;
     h.self.hp = 300;
 
-    h.settings.apply('castAimed', false);
+    h.settings.apply('aimAttacks', false);
     h.tick(0);
     expect(h.casts).toHaveLength(1);
 
@@ -775,8 +779,12 @@ describe('the auto-ability plugin', () => {
   });
 
   it('waits the minimum interval for an ability that grants nothing timed', () => {
+    // A plain heal states no cooldown and grants nothing with a duration on it,
+    // so the floor is the only thing pacing it.
     const h = harness();
-    h.enemies.push(enemyOf(1, 2));
+    h.slot.objectType = TOME_TYPE;
+    h.self.hp = 300;
+
     h.tick(0);
     h.tick(600);
     expect(h.casts).toHaveLength(1);
@@ -787,11 +795,11 @@ describe('the auto-ability plugin', () => {
   it('will not cast what it cannot pay for', () => {
     const h = harness();
     h.enemies.push(enemyOf(1, 2));
-    h.self.mp = 74;
+    h.self.mp = 89;
     h.tick(0);
     expect(h.casts).toHaveLength(0);
 
-    h.self.mp = 75;
+    h.self.mp = 90;
     h.tick(1000);
     expect(h.casts).toHaveLength(1);
   });
@@ -802,11 +810,12 @@ describe('the auto-ability plugin', () => {
     h.settings.apply('mpReservePercent', 50);
     h.self.maxMp = 200;
 
+    // The 90 it costs, and then the 100 the player asked to still be holding.
     h.self.mp = 150;
     h.tick(0);
     expect(h.casts).toHaveLength(0);
 
-    h.self.mp = 180;
+    h.self.mp = 190;
     h.tick(1000);
     expect(h.casts).toHaveLength(1);
   });
@@ -854,15 +863,14 @@ describe('the auto-ability plugin', () => {
     expect(h.casts).toHaveLength(0);
   });
 
-  it('obeys each of the two switches on its own', () => {
+  it('casts nothing at all with the support switch off', () => {
     const h = harness();
     h.enemies.push(enemyOf(1, 2));
-    h.settings.apply('castAimed', false);
+    h.settings.apply('castSelf', false);
     h.tick(0);
     expect(h.casts).toHaveLength(0);
 
     h.slot.objectType = CLOAK_TYPE;
-    h.settings.apply('castSelf', false);
     h.tick(1000);
     expect(h.casts).toHaveLength(0);
 
@@ -907,7 +915,9 @@ describe('the auto-ability plugin', () => {
 
     h.world.gameTimeMs = 0;
     // A potion out of a carried slot, which auto-drink and the player both send.
-    h.host.dispatchPacket(useItem(5), h.session);
+    const packet = useItem(5);
+    h.host.dispatchPacket(packet, h.session);
+    expect(packet.modified).toBe(false);
     h.tick(0);
     expect(h.casts).toHaveLength(1);
   });
@@ -924,5 +934,82 @@ describe('the auto-ability plugin', () => {
     expect(h.casts).toHaveLength(1);
     h.tick(6000);
     expect(h.casts).toHaveLength(2);
+  });
+
+  it('points the attack the player fired at the nearest enemy worth hitting', () => {
+    const h = harness();
+    h.enemies.push(enemyOf(1, 6), enemyOf(2, 3));
+
+    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(usePosOf(packet)).toEqual({ x: 3, y: 0 });
+    expect(packet.modified).toBe(true);
+  });
+
+  it('points a tome that also shoots, since the shot is what the point is for', () => {
+    const h = harness();
+    h.enemies.push(enemyOf(1, 4));
+
+    const packet = useItem(ABILITY_SLOT, HYBRID_TOME_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(usePosOf(packet)).toEqual({ x: 4, y: 0 });
+  });
+
+  it('leaves the cast where the player pointed it when nothing is worth hitting', () => {
+    const h = harness();
+    // Past the eight-tile default, and then a wall, which is an object with hit
+    // points and would otherwise be the closest enemy there is.
+    h.enemies.push(enemyOf(1, 12), enemyOf(2, 2, WALL_TYPE));
+
+    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(usePosOf(packet)).toEqual(MOUSE);
+    expect(packet.modified).toBe(false);
+  });
+
+  it('never points an ability that would move the character', () => {
+    // A prism reads that field as the place to teleport to, so pointing one at
+    // a monster is a teleport into the monster.
+    const h = harness();
+    h.enemies.push(enemyOf(1, 2));
+
+    const packet = useItem(ABILITY_SLOT, PRISM_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(usePosOf(packet)).toEqual(MOUSE);
+  });
+
+  it('leaves a buff alone, which the game centres on the character anyway', () => {
+    const h = harness();
+    h.enemies.push(enemyOf(1, 2));
+
+    const packet = useItem(ABILITY_SLOT, CLOAK_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(packet.modified).toBe(false);
+  });
+
+  it('leaves the aim on the mouse when the player asked it to', () => {
+    const h = harness();
+    h.enemies.push(enemyOf(1, 3));
+    h.settings.apply('aimAttacks', false);
+
+    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(usePosOf(packet)).toEqual(MOUSE);
+  });
+
+  it('says nothing about an item the catalog cannot describe, here either', () => {
+    const h = harness();
+    h.enemies.push(enemyOf(1, 3));
+
+    const packet = useItem(ABILITY_SLOT, UNCATALOGUED_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+
+    expect(packet.modified).toBe(false);
   });
 });
