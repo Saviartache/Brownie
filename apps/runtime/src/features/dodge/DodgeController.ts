@@ -44,6 +44,18 @@
  * deliberately: in open fire the full-length ring settles it, and the shorter
  * steps are the difference between "no escape" and threading a fan.
  *
+ * **And a course is looked one step past before it is called a dead end.** A
+ * distance describes stepping into a gap and stopping; it cannot describe
+ * stepping into the *next* one, and fire arranged in offset ranks — a
+ * checkerboard, a fan from two sources — has no straight line through it at all,
+ * by construction. Every candidate then reads as hit, which reads as "no way
+ * through", which starts a run away from a pattern a person would have walked
+ * into. So when nothing straight is acceptable, and only then, each course is
+ * asked what step could be taken off the end of it; see `SecondLeg`. That is not
+ * routing — the second leg is never commanded, and the plan twenty milliseconds
+ * from now re-chooses it against shots that have actually arrived — it is what
+ * tells a gap with a way on from a gap with a rank behind it.
+ *
  * **A window is not the same question as a wall, and one number tells them
  * apart.** A bullet is answered by a sidestep, so "is this trouble close enough
  * to act on" is the right question about one. A pattern several tiles deep is
@@ -53,6 +65,16 @@
  * *every* candidate, in every direction, is predicted to be hit inside the
  * horizon — a single shot never manages that — and it is what the `outrun`
  * verdict is for.
+ *
+ * **Retreat is what is left when there is neither, and it is ranked as such.**
+ * Over any finite horizon giving ground always survives at least as long as
+ * standing in the pattern does, because the horizon can see the shot that lands
+ * and cannot see the room that ran out — so a planner ranking on survival alone
+ * backs away from everything, forever, and no amount of lookahead fixes it. The
+ * answer is that above "clean long enough to decide again" the comparison stops
+ * being about survival: courses that can be stepped off again are all safe
+ * enough, and among them crossing the fire, keeping room, and moving as little
+ * as possible are what choose. Running is what happens when nothing qualifies.
  *
  * **A wall is not damage.** Walking into one costs a step, so geometry here
  * *shortens* a course rather than condemning it: the sweep keeps going with the
@@ -85,6 +107,7 @@
  */
 
 import { Blasts, type BlastView } from './Blasts.js';
+import { SecondLeg, type SecondLegOptions } from './SecondLeg.js';
 import { ThreatField, type DodgeShot, type Sweep, type ThreatFieldOptions } from './ThreatField.js';
 import { WalkReach, type Ground, type Reach } from './WalkReach.js';
 
@@ -220,7 +243,17 @@ export interface DodgePlan {
   readonly stepTiles: number;
   /** When the chosen course first has less than a safe margin, or `Infinity`. */
   readonly unsafeAtMs: number;
-  /** When the chosen course is first actually hit, or `Infinity`. */
+  /**
+   * When the chosen course is first actually hit, or `Infinity`.
+   *
+   * **Counting the step that would be taken off the end of it**, where one was
+   * looked for — see `SecondLeg`. A step into a gap with a way on out of it is
+   * not a course that gets hit in a quarter of a second, however a straight line
+   * through it reads, and reporting the straight number would have the log and
+   * the release test disagreeing with every decision the planner made on it.
+   * Equal to the straight answer on the ordinary plans, which is all of them
+   * except the ones where nothing straight was acceptable.
+   */
   readonly impactMs: number;
   /** The least room that course ever has, over the whole horizon. */
   readonly clearanceTiles: number;
@@ -296,8 +329,33 @@ const HOLD = 0;
  * comes to about a tile and a quarter, which is a bullet's width plus the
  * player's plus a margin. Anything less clears nothing, and the middle one is
  * there because a wave is a couple of tiles deep where a bullet is one.
+ *
+ * **A distance is also a commitment in time**, which is what bounds how tight a
+ * pattern these can thread: the shortest is a fifth of a second of walking
+ * before the planner's own model has the character standing again, so ranks
+ * arriving faster than that leave no course that is not walking through one.
+ * What answers the pattern is not a shorter step but seeing past the one being
+ * taken; see `SecondLeg`.
  */
 const STEP_TIERS = [1, 0.4, 0.2] as const;
+
+/**
+ * The most courses a step off the end is looked for from.
+ *
+ * **One per heading wherever the ring is no finer than this**, because the first
+ * leg is the part that gets commanded and its direction is the answer — sampling
+ * it coarsely would offer a gap at forty-five degree granularity, which is half
+ * a tile of aim at the distance a gap is away. The ring is only thinned when
+ * somebody has asked for more directions than the search can afford, and the
+ * thinning is what keeps the cost of a saturated screen flat.
+ *
+ * Sixteen bases and eight turns apiece is about a hundred and fifty extra
+ * sweeps, each over a fraction of the horizon rather than all of it. Measured on
+ * the worst pattern this planner has — six offset ranks, thirty-nine shots, the
+ * search running on every plan — it is two tenths of a millisecond on top of six,
+ * and it is paid on none of the plans where the straight table had an answer.
+ */
+const MAX_TURN_BASES = 16;
 
 /**
  * How soon damaging ground has to be before it is worth seizing the wheel.
@@ -464,6 +522,7 @@ export class DodgeController {
   readonly #field = new ThreatField();
   readonly #blasts = new Blasts();
   readonly #reach = new WalkReach();
+  readonly #secondLeg = new SecondLeg();
 
   /**
    * Candidate courses.
@@ -490,6 +549,24 @@ export class DodgeController {
   #hazardMs = new Float64Array(0);
   #exitMs = new Float64Array(0);
   #impactMs = new Float64Array(0);
+  /**
+   * The same, counting the step that could be taken off the end of the course.
+   *
+   * Never earlier than {@link #impactMs} — standing at the end of a leg is one
+   * of the answers a turn is compared against, and it is the one already
+   * scored — and equal to it for every course no turn was looked for from. See
+   * {@link #lookPastTheStep}.
+   */
+  #futureMs = new Float64Array(0);
+  /**
+   * Whether a course can be stepped off again without being hit.
+   *
+   * **The one thing that separates threading a pattern from being caught in
+   * it.** Nought unless a turn was looked for and found; never inferred from a
+   * course simply not being hit, so a plan that does not run the search behaves
+   * exactly as it did before there was one.
+   */
+  #sustained = new Uint8Array(0);
   #unsafeMs = new Float64Array(0);
   #clearance = new Float64Array(0);
   /** The same, over the reaction window alone. See {@link Sweep.urgentClearanceTiles}. */
@@ -851,10 +928,26 @@ export class DodgeController {
     // the player's description was the accurate one: standing there doing
     // something incomprehensible.
     //
+    // **But "no straight course survives" is not the same statement as "there
+    // is no way through", and reading it as one is what ran from patterns a
+    // person walks into.** Fire in offset ranks has no straight line through it
+    // at all: the hole in one rank sits behind the shots of the next, so every
+    // candidate is hit and the signature above fires on a pattern with a way
+    // through every gap in it. What tells the two apart is one step further —
+    // whether a course can be stepped off again — so that is asked before the
+    // conclusion is drawn, and only on the plans where the straight table had no
+    // answer worth giving. See {@link #lookPastTheStep}.
+    if (scored > firstTier && this.#worthATurn(scored, horizonMs, reactWithinMs)) {
+      this.#lookPastTheStep(situation, settings, world, headings, reachTiles, tilesPerMs);
+    }
+
     // The signature is exact and costs nothing: every candidate, at every step
-    // length in every direction, is predicted to be hit inside the horizon. Only
-    // a pattern with no window in it manages that, and the answer to one is to
-    // start running while there is still most of a second of it left.
+    // length in every direction, is predicted to be hit inside the horizon —
+    // counting the step it could be left on. Only a pattern with no window in it
+    // manages that, and the answer to one is to start running while there is
+    // still most of a second of it left. What being caught no longer means is
+    // that the run is forced: `#choose` lets the courses with a way on past its
+    // band, and running is what happens when there are none.
     this.#caught = this.#nothingStaysClear(scored, horizonMs);
     if (ownIsFine && !this.#caught) {
       // Their course is fine for as long as this decision is about. Nothing to
@@ -868,7 +961,10 @@ export class DodgeController {
         dirY: 0,
         stepTiles: 0,
         unsafeAtMs: ownUnsafeAt,
-        impactMs: ownImpact,
+        // The future rather than `ownImpact`, which is what the gate above was
+        // decided on: a turn may have been looked for since, and the two fields
+        // of a plan should not be answering on different terms.
+        impactMs: this.#futureMs[own] ?? Infinity,
         clearanceTiles: this.#clearance[own] ?? Infinity,
         crowded: this.#crowded,
         trackedShots: tracked,
@@ -906,6 +1002,28 @@ export class DodgeController {
     return this.#longestUnhitWindow(scored) < bar;
   }
 
+  /**
+   * Whether this plan is worth looking a step past the straight courses for.
+   *
+   * Two ways the table can fail to have one, and neither is true of ordinary
+   * fire — which is what keeps the search off the plans that do not need it.
+   * Nothing stays clear for the horizon, so every answer available is a hit; or
+   * nothing is comfortable for as long as the decision is about, which is what a
+   * pattern wide enough to set an escape deadline does to every course at once
+   * and leaves only whatever is running away from it.
+   *
+   * **Both are the planner about to conclude there is no way through**, and that
+   * is exactly the conclusion a straight course is not entitled to draw about a
+   * pattern whose gaps are offset. So it is the moment to look further, and the
+   * only moment worth paying for.
+   */
+  #worthATurn(scored: number, horizonMs: number, reactWithinMs: number): boolean {
+    return (
+      this.#longestUnhitWindow(scored) < horizonMs ||
+      this.#longestSafeWindow(scored) <= reactWithinMs
+    );
+  }
+
   /** How crowded the place they are standing is, on the scale the bars use. */
   #hereCost(): number {
     return inQuanta(this.#hereCrowding, CROWDING_QUANTUM_TILES);
@@ -927,6 +1045,8 @@ export class DodgeController {
     this.#hazardMs = new Float64Array(slots);
     this.#exitMs = new Float64Array(slots);
     this.#impactMs = new Float64Array(slots);
+    this.#futureMs = new Float64Array(slots);
+    this.#sustained = new Uint8Array(slots);
     this.#unsafeMs = new Float64Array(slots);
     this.#clearance = new Float64Array(slots);
     this.#urgentClearance = new Float64Array(slots);
@@ -1086,6 +1206,7 @@ export class DodgeController {
         speed,
         tilesPerMs,
         settings.leadMs,
+        0,
         until,
         travel,
         settings.safeClearanceTiles,
@@ -1101,12 +1222,19 @@ export class DodgeController {
         speed,
         tilesPerMs,
         settings.leadMs,
+        0,
         until,
         travel,
         settings.safeClearanceTiles,
         this.#sweep,
       );
       this.#impactMs[c] = Math.min(this.#sweep.impactMs, hazard);
+      // Where a course's future starts from: what it comes to on its own, with
+      // nothing after it. {@link #lookPastTheStep} only ever raises it, and only
+      // on the plans where it runs — so everything downstream reads one number
+      // whether or not a turn was looked for.
+      this.#futureMs[c] = this.#impactMs[c] ?? Infinity;
+      this.#sustained[c] = 0;
       this.#unsafeMs[c] = Math.min(this.#sweep.unsafeAtMs, hazard);
       this.#clearance[c] = this.#sweep.clearanceTiles;
       this.#urgentClearance[c] = this.#sweep.urgentClearanceTiles;
@@ -1156,6 +1284,124 @@ export class DodgeController {
     return world.crowdingAt(situation.x + dirX * walked, situation.y + dirY * walked, atMs);
   }
 
+  // ── One step further ──────────────────────────────────────────────────────
+
+  /**
+   * Asks every course what could be done off the end of it.
+   *
+   * **Run only when the straight table has no answer worth giving**, which is
+   * the case it exists for and the case that was wrong. In open fire some course
+   * is clear for the whole horizon and there is nothing a turn could add; in a
+   * pattern with offset ranks nothing straight survives at all, and without this
+   * the planner concludes there is no way through and runs from a pattern a
+   * person walks into. Its whole cost lands on the plans that were failing.
+   *
+   * **One base per heading, and the sidestep is the base.** The first leg is the
+   * part that gets commanded, so its direction has to come out of the full ring
+   * rather than a sample of it. Which *distance* it is offered at matters far
+   * less: the shortest arrives soonest, leaves the most horizon to turn in, and
+   * is the least to have committed to if the turn was wrong — and a longer one
+   * is what two of these plans in a row come to anyway. The longer steps keep
+   * their own straight answer and are still free to win on it.
+   */
+  #lookPastTheStep(
+    situation: DodgeSituation,
+    settings: DodgeSettings,
+    world: DodgeWorld,
+    headings: number,
+    reachTiles: number,
+    tilesPerMs: number,
+  ): void {
+    const tiers = STEP_TIERS.length;
+    const options: SecondLegOptions = {
+      headingX: this.#headingX,
+      headingY: this.#headingY,
+      headings,
+      horizonMs: settings.horizonMs,
+      tilesPerMs,
+      stepTiles: reachTiles * (STEP_TIERS[tiers - 1] ?? 1),
+      safeClearanceTiles: settings.safeClearanceTiles,
+      avoidWalls: settings.avoidWalls,
+      avoidDamagingGround: settings.avoidDamagingGround,
+    };
+
+    // **Standing still, which is a course with a future like any other.**
+    // Letting a rank go by and stepping after it is how a person crosses one,
+    // and it is the answer that gives up no ground at all — so it is asked, and
+    // asked about the same beat every other course spends walking.
+    this.#extendFrom(HOLD, situation, settings, world, tilesPerMs, options);
+
+    const stride = this.#stride;
+    const baseStride = Math.max(1, Math.ceil(headings / MAX_TURN_BASES));
+    for (let i = 0; i < headings; i += baseStride) {
+      for (let tier = tiers - 1; tier > 0; tier -= 1) {
+        if (
+          this.#extendFrom(1 + tier * stride + i, situation, settings, world, tilesPerMs, options)
+        ) {
+          break;
+        }
+      }
+    }
+    // And the direction the player is asking for, which is not on the ring —
+    // and is the one course whose future decides whether they keep the wheel.
+    for (let tier = tiers - 1; tier > 0; tier -= 1) {
+      const own = 1 + tier * stride + headings;
+      if (this.#extendFrom(own, situation, settings, world, tilesPerMs, options)) break;
+    }
+  }
+
+  /**
+   * Looks one step past a single course, raising what it is worth.
+   *
+   * @returns whether the course was a base a turn could be made from at all —
+   *   not whether one was found. A heading the ground gives no distance to, or
+   *   one already hit before the turn, is not somewhere to turn from and the
+   *   caller tries the same heading at the next step length up. A base that was
+   *   asked and answered "nowhere" has been answered.
+   */
+  #extendFrom(
+    candidate: number,
+    situation: DodgeSituation,
+    settings: DodgeSettings,
+    world: DodgeWorld,
+    tilesPerMs: number,
+    options: SecondLegOptions,
+  ): boolean {
+    const travel = candidate === HOLD ? 0 : (this.#travelTiles[candidate] ?? 0);
+    if (candidate !== HOLD && travel <= 0) return false;
+    // Holding still is a leg of no distance and of real duration — a step's
+    // worth of waiting, which is what letting a rank go by costs. Everything
+    // else arrives when its walk is done.
+    const arrivalMs = settings.leadMs + (travel > 0 ? travel : options.stepTiles) / tilesPerMs;
+    // No horizon left to turn in, or hit before the turn could be made — either
+    // way there is nothing here to step off.
+    if (arrivalMs >= settings.horizonMs) return false;
+    if ((this.#impactMs[candidate] ?? Infinity) <= arrivalMs) return false;
+
+    const stepped = this.#secondLeg.best(
+      situation.x + (this.#dirX[candidate] ?? 0) * travel,
+      situation.y + (this.#dirY[candidate] ?? 0) * travel,
+      arrivalMs,
+      this.#field,
+      this.#blasts,
+      world,
+      options,
+    );
+    if (stepped > (this.#futureMs[candidate] ?? 0)) this.#futureMs[candidate] = stepped;
+
+    // **And this is what "there is a way on" comes to: a step off, walked in
+    // full, untouched.** Measured on the step alone and never on standing where
+    // the course ends, and the difference between those two is the difference
+    // between a pattern with holes in it and a wall the player happens to be a
+    // comfortable distance in front of. Standing is clean for a while in both —
+    // that is what makes a wall dangerous rather than obvious — so a definition
+    // that counted it would have the planner wait out its warning and then
+    // discover there was nowhere to go, which is the failure the escape deadline
+    // exists to prevent. Only the walk proves a way through.
+    if (stepped > arrivalMs + options.stepTiles / tilesPerMs) this.#sustained[candidate] = 1;
+    return true;
+  }
+
   // ── Choosing ──────────────────────────────────────────────────────────────
 
   /**
@@ -1190,7 +1436,7 @@ export class DodgeController {
       // never, and a floor of `Infinity` would exclude every course including
       // the one it was derived from.
       this.#bars.impactMs =
-        Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - DOOMED_TRADE_MS;
+        Math.min(this.#futureMs[best] ?? 0, this.#survivalCapMs) - DOOMED_TRADE_MS;
       this.#bars.roomTiles = (this.#clearance[best] ?? -Infinity) - DOOMED_TRADE_TILES;
       // Nothing survives the window, so where a course leaves us has stopped
       // being a question — including whether it leaves the bubble.
@@ -1227,11 +1473,21 @@ export class DodgeController {
       // still allowed to argue below it is where the course leaves us — an
       // escape that ends up under a monster is one to prefer second, not one to
       // refuse — and, through it, crossing the fire rather than running with it.
+      //
+      // **Which is right about a wall and wrong about everything a wall is not.**
+      // The band is a statement that the only thing left to prefer is lasting
+      // longer, and lasting longer is what retreat is *for* — so with anything
+      // here that could be stepped off again, the band picks the backpedal over
+      // the way through, every time, because the way through is the one with a
+      // shot behind it inside the horizon. Those courses come in under a bar of
+      // their own; see {@link #mostAligned}. Nothing was excluded that the band
+      // admitted, so where there genuinely is no way on this is exactly the run
+      // it always was.
       const best = this.#bestSurvival(scored);
       this.#verdict = 'outrun';
       this.#bars.windowMs = -Infinity;
       this.#bars.impactMs =
-        Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - OUTRUN_TRADE_MS;
+        Math.min(this.#futureMs[best] ?? 0, this.#survivalCapMs) - OUTRUN_TRADE_MS;
       this.#bars.roomTiles = -Infinity;
       this.#bars.crowding = Infinity;
       return this.#mostAligned(scored, situation, true);
@@ -1289,7 +1545,7 @@ export class DodgeController {
   #longestUnhitWindow(scored: number): number {
     let best = -Infinity;
     for (let c = 0; c < scored; c += 1) {
-      const window = this.#impactMs[c] ?? 0;
+      const window = this.#futureMs[c] ?? 0;
       if (window > best) best = window;
     }
     return best;
@@ -1348,7 +1604,7 @@ export class DodgeController {
    */
   #survival(candidate: number): number {
     return inQuanta(
-      Math.min(this.#impactMs[candidate] ?? 0, this.#survivalCapMs),
+      Math.min(this.#futureMs[candidate] ?? 0, this.#survivalCapMs),
       IMPACT_QUANTUM_MS,
     );
   }
@@ -1421,9 +1677,21 @@ export class DodgeController {
    * the behaviour it was invented to avoid. Two courses that both survive are
    * then free to be told apart by where they leave us, which is the point of the
    * terms after it.
+   *
+   * **A course that can be stepped off again is in the top class whatever the
+   * horizon says will eventually land on it**, and without that this comparison
+   * is a standing preference for retreat. Giving ground outlasts standing in a
+   * pattern every time — the horizon can see the shot that arrives and cannot
+   * see the room that runs out — so a course threading offset ranks is always
+   * the one predicted to be hit first, and the class boundary hands the argument
+   * to the backpedal before crossing the fire has been looked at. What decides a
+   * course is good enough is whether it stays clean long enough for the decision
+   * to be made again and carried out; past that the planner is ranking
+   * predictions nobody will execute. See {@link #sustained}.
    */
   #safety(candidate: number): number {
-    const impact = this.#impactMs[candidate] ?? Infinity;
+    if (this.#sustained[candidate] === 1) return 2;
+    const impact = this.#futureMs[candidate] ?? Infinity;
     if (impact === Infinity) return 2;
     return impact > this.#reactWithinMs ? 1 : 0;
   }
@@ -1515,8 +1783,27 @@ export class DodgeController {
       // outranked every open course, won outright, and then reported a step of
       // nothing. The wheel went back to the keys that walked into the wall.
       if (c !== HOLD && (this.#travelTiles[c] ?? 0) <= 0) continue;
-      if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
-      if ((this.#impactMs[c] ?? 0) <= bars.impactMs) continue;
+      // **A course that can be stepped off again clears the survival bars on its
+      // own, and that is the whole of how a pattern gets walked through.** Both
+      // of them are statements about a *straight* course: how long before this
+      // one is uncomfortable, how long before this one is hit. A step into a gap
+      // is answered "not long" by both, correctly, because it is the step after
+      // it that carries on — and the two bars then throw away every way through
+      // the pattern and leave the backpedal, which is uncomfortable in neither
+      // because it is going nowhere near anything. See {@link #sustained}, which
+      // is only ever set for a course whose next step was actually swept and
+      // found clear. The bars on room and on being stood on are not survival and
+      // still apply.
+      //
+      // **And it never lets a course through with trouble inside the reaction
+      // window**, whatever the turn found: that is the one promise every branch
+      // below `unavoidable` makes, and a bar that could be escaped past it would
+      // be the planner settling for a hit again by another road.
+      const sustained = this.#sustained[c] === 1 && (this.#futureMs[c] ?? 0) > this.#reactWithinMs;
+      if (!sustained) {
+        if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
+        if ((this.#futureMs[c] ?? 0) <= bars.impactMs) continue;
+      }
       if ((this.#clearance[c] ?? -Infinity) < bars.roomTiles) continue;
       if (this.#crowdingOf(c) >= bars.crowding) continue;
       const dirX = this.#dirX[c] ?? 0;
@@ -1665,7 +1952,7 @@ export class DodgeController {
       dirY,
       stepTiles,
       unsafeAtMs: this.#unsafeMs[chosen] ?? Infinity,
-      impactMs: this.#impactMs[chosen] ?? Infinity,
+      impactMs: this.#futureMs[chosen] ?? Infinity,
       clearanceTiles: this.#clearance[chosen] ?? -Infinity,
       crowded: this.#crowded,
       trackedShots: tracked,
@@ -1710,7 +1997,10 @@ export class DodgeController {
   #noWorse(held: number, chosen: number): boolean {
     return (
       (this.#unsafeMs[held] ?? 0) >= (this.#unsafeMs[chosen] ?? 0) &&
-      (this.#impactMs[held] ?? 0) >= (this.#impactMs[chosen] ?? 0) &&
+      // The future rather than the straight impact, so a leg whose way on has
+      // closed is dropped the plan it closes — which is what lets the dwell
+      // outlast a step without outlasting the reason for it.
+      (this.#futureMs[held] ?? 0) >= (this.#futureMs[chosen] ?? 0) &&
       (this.#urgentClearance[chosen] ?? -Infinity) <
         (this.#urgentClearance[held] ?? -Infinity) + DWELL_BREAK_TILES &&
       (this.#clearance[chosen] ?? -Infinity) <

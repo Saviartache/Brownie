@@ -567,6 +567,18 @@ export class ThreatField {
    *   forced, and the flat margins could not begin to absorb it. Nothing
    *   downstream compensated either: the target the module is given is built
    *   from where the player is, not from where the lead said they would be.
+   * @param fromMs When this course begins. Nought for one starting from where
+   *   the player is standing, which is nearly all of them.
+   *
+   *   **What it is for is a course that bends**, which is a course described by
+   *   more than one call. A weave through a staggered pattern is a step and then
+   *   another step, and the second one starts somewhere the player is not yet
+   *   and at a moment that has not arrived — so `selfX, selfY` is where the
+   *   first leg *ends*, and everything before `fromMs` belongs to that leg and
+   *   is not this one's to report. Without it the second leg is swept as though
+   *   the player had been standing at its start point the whole time, which in a
+   *   dense pattern is a place a shot has just been through: the leg reads as a
+   *   hit it never takes, and every way through the pattern disappears.
    * @param untilMs When to stop looking, which is the horizon or sooner.
    * @param maxTravelTiles How far the course can actually go before geometry
    *   stops it. **The walk continues after that, standing still**, which is what
@@ -590,6 +602,7 @@ export class ThreatField {
     tilesPerMs: number,
     walkTilesPerMs: number,
     leadMs: number,
+    fromMs: number,
     untilMs: number,
     maxTravelTiles: number,
     safeMarginTiles: number,
@@ -600,8 +613,9 @@ export class ThreatField {
     out.urgentClearanceTiles = Infinity;
     out.unsafeAtMs = Infinity;
 
+    const beginMs = Math.max(0, fromMs);
     const endMs = Math.min(this.#horizonMs, untilMs);
-    if (endMs < 0 || this.#tracked === 0) return;
+    if (endMs < beginMs || this.#tracked === 0) return;
 
     // Where "now" ends, for the urgent half of the clearance. Clipped to the
     // sweep's own end so a course cut short by a wall or by damaging ground
@@ -617,8 +631,9 @@ export class ThreatField {
 
     // Nothing has been walked yet at the start of the sweep: the command has
     // not landed. That is the whole of the correction — the player begins where
-    // they actually are.
-    const startTravel = 0;
+    // they actually are, and a leg that begins later begins where its own
+    // `selfX, selfY` says, which is why this is nought for both of them.
+    const startTravel = Math.min(tilesPerMs * Math.max(0, beginMs - leadMs), maxTravelTiles);
     const finishTravel = Math.min(tilesPerMs * Math.max(0, endMs - leadMs), maxTravelTiles);
     const startX = selfX + dirX * startTravel;
     const startY = selfY + dirY * startTravel;
@@ -652,7 +667,10 @@ export class ThreatField {
       const near = this.#near[i] === 1;
 
       if (count === 1) {
-        // Announced and over within one sample. Still a hit if it is on us.
+        // Announced and over within one sample, which puts it at the very start
+        // of the horizon — before a leg that begins later exists at all.
+        if (beginMs > 0) continue;
+        // Still a hit if it is on us.
         const room =
           Math.max(
             Math.abs((this.#sampleX[base] ?? 0) - startX),
@@ -668,6 +686,9 @@ export class ThreatField {
       for (let k = 0; k + 1 < count; k += 1) {
         const segmentAt = k * stepMs;
         if (segmentAt > endMs) break;
+        // Wholly before this leg starts, so it is the previous leg's to answer
+        // for. The one straddling the start is kept and clipped below.
+        if (segmentAt + stepMs <= beginMs) continue;
 
         const shotAx = this.#sampleX[base + k] ?? 0;
         const shotAy = this.#sampleY[base + k] ?? 0;
@@ -682,7 +703,7 @@ export class ThreatField {
         // exact rather than a very good guess. The walk has two: the moment the
         // command lands and it starts moving at all, and the moment geometry
         // stops it again.
-        let from = segmentAt;
+        let from = Math.max(segmentAt, beginMs);
         for (;;) {
           let to = segmentEnd;
           if (leadMs > from && leadMs < to) to = leadMs;
@@ -741,7 +762,7 @@ export class ThreatField {
     // report a moment in the past.
     if (this.#escapeTiles > 0 && out.impactMs < Infinity && walkTilesPerMs > 0) {
       const needed = this.#escapeTiles / walkTilesPerMs + leadMs;
-      const mustAct = Math.max(0, out.impactMs - needed + this.#reactWithinMs);
+      const mustAct = Math.max(beginMs, out.impactMs - needed + this.#reactWithinMs);
       if (mustAct < out.unsafeAtMs) out.unsafeAtMs = mustAct;
     }
   }

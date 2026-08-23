@@ -32,6 +32,7 @@ import {
   MAX_DRAWN_MARKS,
   type DodgeMark,
 } from '../src/features/dodge/DodgeMarks.js';
+import { SecondLeg, type SecondLegOptions } from '../src/features/dodge/SecondLeg.js';
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
 import { ThreatField, type DodgeShot, type Sweep } from '../src/features/dodge/ThreatField.js';
@@ -243,7 +244,7 @@ describe('the threat field', () => {
 
   function sweepStanding(field: ThreatField, at: Position): Sweep {
     const out = emptySweep();
-    field.sweep(at.x, at.y, 0, 0, 0.006, 0.006, 0, 600, Infinity, 0, out);
+    field.sweep(at.x, at.y, 0, 0, 0.006, 0.006, 0, 0, 600, Infinity, 0, out);
     return out;
   }
 
@@ -323,9 +324,9 @@ describe('the threat field', () => {
 
     const free = emptySweep();
     const boxed = emptySweep();
-    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 600, Infinity, 0, free);
+    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 0, 600, Infinity, 0, free);
     // The same walk, with a wall a tenth of a tile away.
-    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 600, 0.1, 0, boxed);
+    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 0, 600, 0.1, 0, boxed);
 
     // Walking east takes the player under the shot; being stopped short of it
     // leaves them clear, which the swept clearance has to show.
@@ -407,6 +408,120 @@ describe('the threat field', () => {
     const swept = sweepStanding(field, { x: 0, y: 0 });
     expect(swept.clearanceTiles).toBeCloseTo(0.9 - effectiveHalf(0.5, 1, 0), 2);
     expect(swept.urgentClearanceTiles).toBeCloseTo(1.4 - effectiveHalf(0.5, 1, 0), 2);
+  });
+
+  // **A course described in two calls, and the second one owes nothing to the
+  // first's part of the horizon.** Without a start moment the second leg is
+  // swept as though the player had stood at its beginning the whole time, which
+  // in a pattern is a place a shot has just been through — every way through
+  // reads as a hit it never takes.
+  it('answers only for the part of the horizon a leg is walked in', () => {
+    const field = new ThreatField();
+    // Straight through where the player stands, and gone again by 200 ms.
+    field.build(0, 0, 0, [straightShot({ x: -3, y: 0 }, 0, 30, 0, 2000)], OPTIONS);
+
+    const whole = emptySweep();
+    field.sweep(0, 0, 0, 0, 0, 0.006, 0, 0, 600, Infinity, 0, whole);
+    expect(whole.impactMs).toBeLessThan(200);
+
+    const after = emptySweep();
+    field.sweep(0, 0, 0, 0, 0, 0.006, 300, 300, 600, Infinity, 0, after);
+    expect(after.impactMs).toBe(Infinity);
+  });
+});
+
+// **What a straight course cannot say, and the whole reason a pattern with
+// offset gaps read as having no way through it.**
+describe('the step off the end of a course', () => {
+  const OPTIONS = {
+    horizonMs: 600,
+    sampleStepMs: 40,
+    hitScale: 1,
+    padTiles: 0,
+    driftTilesPerSecond: 0,
+    reachTiles: 4,
+    engageTiles: 100,
+    reactWithinMs: 600,
+  };
+
+  /** Eight ways out, which is what the search is offered. */
+  const RING = {
+    headingX: new Float64Array(8),
+    headingY: new Float64Array(8),
+    headings: 8,
+  };
+  for (let i = 0; i < 8; i += 1) {
+    RING.headingX[i] = Math.cos((i / 8) * 2 * Math.PI);
+    RING.headingY[i] = Math.sin((i / 8) * 2 * Math.PI);
+  }
+
+  const STEP: SecondLegOptions = {
+    ...RING,
+    horizonMs: OPTIONS.horizonMs,
+    tilesPerMs: 0.006,
+    stepTiles: 1.2,
+    safeClearanceTiles: 0,
+    avoidWalls: true,
+    avoidDamagingGround: false,
+  };
+
+  const OPEN: Ground = { canStand: () => true, isDamaging: () => false };
+
+  /** A field of shots converging on `(0, 0)` from `count` evenly spaced sides. */
+  function closingIn(count: number, arrivesAtMs: number): DodgeShot[] {
+    const shots: DodgeShot[] = [];
+    const tilesPerSecond = 10;
+    const from = (tilesPerSecond * arrivesAtMs) / 1000;
+    for (let i = 0; i < count; i += 1) {
+      const angle = (i / count) * 2 * Math.PI;
+      shots.push(
+        straightShot(
+          { x: from * Math.cos(angle), y: from * Math.sin(angle) },
+          angle + Math.PI,
+          tilesPerSecond,
+          0,
+          2000,
+        ),
+      );
+    }
+    return shots;
+  }
+
+  it('is nothing at all when there is no horizon left to walk one in', () => {
+    const field = new ThreatField();
+    field.build(0, 0, 0, [], OPTIONS);
+
+    expect(new SecondLeg().best(0, 0, 600, field, new Blasts(), OPEN, STEP)).toBe(600);
+  });
+
+  it('finds the way out that the shot closing on this spot leaves open', () => {
+    const field = new ThreatField();
+    // One shot, arriving at this spot at 300 ms: standing here is a hit and
+    // seven of the eight ways off it are not.
+    field.build(0, 0, 0, closingIn(1, 300), OPTIONS);
+
+    expect(new SecondLeg().best(0, 0, 100, field, new Blasts(), OPEN, STEP)).toBe(Infinity);
+  });
+
+  it('says so when every way off is shut', () => {
+    const field = new ThreatField();
+    // Closing from all sides at once, from near enough that a step clears none
+    // of them: this is what being caught looks like, and the planner has to be
+    // able to tell it from a pattern with holes in it.
+    field.build(0, 0, 0, closingIn(16, 200), OPTIONS);
+
+    const stepped = new SecondLeg().best(0, 0, 100, field, new Blasts(), OPEN, STEP);
+    expect(stepped).toBeLessThan(300);
+  });
+
+  // A turn the ground stops dead is standing still with a heading attached, and
+  // the planner already has standing still.
+  it('refuses a turn the ground will not give half a step of', () => {
+    const field = new ThreatField();
+    field.build(0, 0, 0, closingIn(1, 300), OPTIONS);
+    const boxedIn: Ground = { canStand: (x, y) => Math.hypot(x, y) < 0.3, isDamaging: () => false };
+
+    expect(new SecondLeg().best(0, 0, 100, field, new Blasts(), boxedIn, STEP)).toBe(100);
   });
 });
 
@@ -498,7 +613,7 @@ describe('how far across the fire is out of it', () => {
       // A window sized for sidestepping a bullet, as every preset's is.
       field.build(0, 0, 0, shots, { ...OPTIONS, reactWithinMs: 420 });
       const out = emptySweep();
-      field.sweep(0, 0, 0, 0, 0, walkTilesPerMs, 60, 1000, Infinity, 0.08, out);
+      field.sweep(0, 0, 0, 0, 0, walkTilesPerMs, 60, 0, 1000, Infinity, 0.08, out);
       return out;
     };
 
@@ -734,7 +849,7 @@ describe('blasts on their way down', () => {
 
     const out = emptySweep();
     // Walking east at six tiles a second is inside it when it goes off.
-    blasts.sweep(10, 10, 1, 0, 0.006, 0.006, 60, 1000, Infinity, 0.08, out);
+    blasts.sweep(10, 10, 1, 0, 0.006, 0.006, 60, 0, 1000, Infinity, 0.08, out);
     expect(out.impactMs).toBe(500);
     expect(out.clearanceTiles).toBeLessThan(0);
   });
@@ -749,7 +864,7 @@ describe('blasts on their way down', () => {
 
     const out = emptySweep();
     // Walking the other way: through none of it by the time it goes off.
-    blasts.sweep(10, 10, -1, 0, 0.006, 0.006, 60, 1000, Infinity, 0.08, out);
+    blasts.sweep(10, 10, -1, 0, 0.006, 0.006, 60, 0, 1000, Infinity, 0.08, out);
     expect(out.impactMs).toBe(Infinity);
     expect(out.clearanceTiles).toBeGreaterThan(0);
   });
@@ -786,7 +901,7 @@ describe('blasts on their way down', () => {
     // centre as a radius, against the 3.56 the blast and the body come to — but
     // only 2.6 by the square the projectile sweep measures in, which would have
     // called this a hit.
-    blasts.sweep(10, 10, Math.SQRT1_2, Math.SQRT1_2, 0.006, 0.006, 0, 1000, 3.68, 0.08, out);
+    blasts.sweep(10, 10, Math.SQRT1_2, Math.SQRT1_2, 0.006, 0.006, 0, 0, 1000, 3.68, 0.08, out);
     expect(out.impactMs).toBe(Infinity);
     expect(out.clearanceTiles).toBeGreaterThan(0);
   });
@@ -900,6 +1015,7 @@ describe('who is driving', () => {
       plan.steer ? 0.006 : 0,
       0.006,
       SETTINGS.leadMs,
+      0,
       SETTINGS.horizonMs,
       plan.stepTiles,
       SETTINGS.safeClearanceTiles,
@@ -1033,7 +1149,20 @@ describe('what the engagement ring is allowed to change', () => {
         reactWithinMs: SETTINGS.reactWithinMs,
       });
       const out = emptySweep();
-      field.sweep(10, 10, 0, 0, 0, 0.006, SETTINGS.leadMs, SETTINGS.horizonMs, Infinity, 0.08, out);
+      field.sweep(
+        10,
+        10,
+        0,
+        0,
+        0,
+        0.006,
+        SETTINGS.leadMs,
+        0,
+        SETTINGS.horizonMs,
+        Infinity,
+        0.08,
+        out,
+      );
       return out;
     };
 
@@ -1203,6 +1332,171 @@ describe('a wall of shots with a window in it', () => {
     expect(plan.steer).toBe(true);
     // With the wall sweeping towards +y, giving ground is the only survival.
     expect(plan.dirY).toBeGreaterThan(0.5);
+  });
+});
+
+// **The complaint in the player's own words: "in a checkerboard I can walk
+// through it by hand — why do we run from it?"** Ranks with the gaps offset have
+// no straight line through them at all: whatever heading is taken, the hole in
+// one rank has a shot of the next behind it. A planner whose whole vocabulary is
+// straight courses therefore reads a pattern it could be walked through as
+// having no way through, calls the moment hopeless, and backpedals in front of
+// it until it is overtaken — which is what running away actually costs.
+describe('fire with the gaps offset', () => {
+  /**
+   * How far apart two shots in the same rank are, in tiles.
+   *
+   * **Under four half-extents, which is what makes it a checkerboard rather than
+   * a grid with a lane down it.** Wider than that and the safe strip between two
+   * shots of one rank overlaps the safe strip of the next, so there is a spot
+   * that is safe for both and standing in it is the whole answer. Narrower, and
+   * there is no such spot at all: every place that survives this rank is under a
+   * shot of the following one.
+   */
+  const COLUMN_TILES = 2;
+  /**
+   * And how far apart two ranks are.
+   *
+   * **Chosen so that a person could actually walk it**, which is the premise of
+   * the whole complaint. A rank is over the player for two half-extents' worth
+   * of its travel; what is left of the interval is the time there is to cross a
+   * column and stand in the next gap. At these numbers that is two tenths of a
+   * second against the sixth of a second the shortest step takes — and three
+   * ranks inside the planning horizon, so no one step answers the pattern.
+   */
+  const RANK_TILES = 3;
+  const SHOT_TILES_PER_SECOND = 9;
+  const SHOT_HALF = 0.25;
+
+  /**
+   * Ranks sweeping north, every other one shifted half a column across.
+   *
+   * The first is far enough off to be answerable and there are five more behind
+   * it, so this is seconds of sustained pattern rather than one volley — which
+   * is the difference between a sidestep and having to keep finding the next
+   * gap. The player starts on a column of the first rank, so standing where they
+   * are is not among the answers either. Nothing outruns it: the ranks are
+   * faster than the character.
+   */
+  function checkerboard(): ReturnType<typeof straightShot>[] {
+    const shots: ReturnType<typeof straightShot>[] = [];
+    for (let rank = 0; rank < 6; rank += 1) {
+      const y = 7 - RANK_TILES * rank;
+      const shift = rank % 2 === 0 ? 0 : COLUMN_TILES / 2;
+      for (let x = 2 + shift; x <= 18.01; x += COLUMN_TILES) {
+        shots.push(straightShot({ x, y }, Math.PI / 2, SHOT_TILES_PER_SECOND, 0, 6000, SHOT_HALF));
+      }
+    }
+    return shots;
+  }
+
+  /** What the planner is given here: margins on, nothing the model cannot describe. */
+  const WEAVE: DodgeSettings = { ...SETTINGS, driftTilesPerSecond: 0 };
+
+  /**
+   * A second of it, planned and walked exactly as the module would walk it.
+   *
+   * Four ticks of command latency, one frame of walking per tick, and the hit
+   * test done against the real geometry rather than against the planner's own
+   * report of itself — the only check that would catch a planner confident about
+   * a way through that is not there.
+   */
+  function walkedThrough(shots: readonly ReturnType<typeof straightShot>[]) {
+    const controller = new DodgeController();
+    const queued: { dirX: number; dirY: number; tiles: number }[] = [];
+    const half = effectiveHalf(SHOT_HALF, WEAVE.hitScale, 0);
+    let x = 10;
+    let y = 10;
+    let hits = 0;
+    let ground = 0;
+
+    for (let step = 0; step < 90; step += 1) {
+      const gameTimeMs = step * 20;
+      const plan = controller.plan(
+        situation({ x, y, gameTimeMs, nowMs: 1_000_000 + gameTimeMs }),
+        WEAVE,
+        OPEN_GROUND,
+        shots,
+      );
+      queued.push({ dirX: plan.dirX, dirY: plan.dirY, tiles: stepped(plan, 6) });
+      const live = queued[queued.length - 4];
+      if (live !== undefined) {
+        x += live.dirX * live.tiles;
+        y += live.dirY * live.tiles;
+      }
+      // Giving ground is walking the way the ranks are going, which is +y.
+      if (y - 10 > ground) ground = y - 10;
+      for (const shot of shots) {
+        const at = shot.positionAt(gameTimeMs);
+        if (at !== undefined && overlaps(at.x, at.y, x, y, half)) hits += 1;
+      }
+    }
+    return { hits, ground };
+  }
+
+  // **The premise, stated as a test rather than as a comment, and it is the
+  // whole trap.** Standing still is hit and so is every step, in every
+  // direction, at every length the planner would call a step rather than a run.
+  // A planner whose answers are straight courses therefore has nothing to offer
+  // here but a run — which is the reading that is wrong, and the reason the test
+  // below cannot be passed by finding a better heading.
+  it('leaves no step that answers it, in any direction', () => {
+    const field = new ThreatField();
+    field.build(0, 10, 10, checkerboard(), {
+      horizonMs: WEAVE.horizonMs,
+      sampleStepMs: WEAVE.sampleStepMs,
+      hitScale: WEAVE.hitScale,
+      padTiles: WEAVE.padTiles,
+      driftTilesPerSecond: 0,
+      reachTiles: 6.36,
+      engageTiles: WEAVE.engageWithinTiles,
+      reactWithinMs: WEAVE.reactWithinMs,
+    });
+
+    const swept = emptySweep();
+    /** How long a straight course at this heading and length lasts. */
+    const lasts = (dirX: number, dirY: number, tiles: number): number => {
+      field.sweep(
+        10,
+        10,
+        dirX,
+        dirY,
+        tiles > 0 ? 0.006 : 0,
+        0.006,
+        WEAVE.leadMs,
+        0,
+        WEAVE.horizonMs,
+        tiles,
+        WEAVE.safeClearanceTiles,
+        swept,
+      );
+      return swept.impactMs;
+    };
+
+    // The two step lengths the planner offers below a full horizon's walk, which
+    // at this character's speed are a sidestep and twice one.
+    let answered = lasts(0, 0, 0) === Infinity ? 1 : 0;
+    for (let i = 0; i < 64; i += 1) {
+      const angle = (i / 64) * 2 * Math.PI;
+      for (const tiles of [2.54, 1.27]) {
+        if (lasts(Math.cos(angle), Math.sin(angle), tiles) === Infinity) answered += 1;
+      }
+    }
+
+    expect(answered).toBe(0);
+  });
+
+  it('walks through it instead of giving ground', () => {
+    const walked = walkedThrough(checkerboard());
+
+    // Not once touched, which is the floor rather than the point: backing away
+    // survives this too, for a while.
+    expect(walked.hits).toBe(0);
+    // And it did it from about where it started: less ground given up over the
+    // whole pattern than there is between two of its ranks. Running the same
+    // second and a half is ten tiles, and it does not even work — the ranks are
+    // faster than the character and take back whatever is given.
+    expect(walked.ground).toBeLessThan(RANK_TILES);
   });
 });
 

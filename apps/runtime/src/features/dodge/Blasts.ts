@@ -151,6 +151,9 @@ export class Blasts {
    * @param walkTilesPerMs What the character can do flat out, which is what the
    *   deadline is measured against — not `tilesPerMs`, which is this particular
    *   course's speed and is nought for the one that stands still.
+   * @param fromMs When this course begins, for a course described by more than
+   *   one call — see `ThreatField.sweep`. One landing before it went off over an
+   *   earlier leg, and is that leg's to have answered for.
    */
   sweep(
     selfX: number,
@@ -160,6 +163,7 @@ export class Blasts {
     tilesPerMs: number,
     walkTilesPerMs: number,
     leadMs: number,
+    fromMs: number,
     untilMs: number,
     maxTravelTiles: number,
     safeMarginTiles: number,
@@ -167,7 +171,7 @@ export class Blasts {
   ): void {
     for (let i = 0; i < this.#count; i += 1) {
       const armsAt = this.#armsAt[i] ?? 0;
-      if (armsAt > untilMs) continue;
+      if (armsAt > untilMs || armsAt < fromMs) continue;
 
       const centreX = this.#x[i] ?? 0;
       const centreY = this.#y[i] ?? 0;
@@ -196,7 +200,7 @@ export class Blasts {
       const here = Math.hypot(selfX - centreX, selfY - centreY);
       const shortfall = Math.max(0, required + safeMarginTiles - here);
       const deadline = walkTilesPerMs > 0 ? armsAt - shortfall / walkTilesPerMs - leadMs : armsAt;
-      const mustAct = Math.max(0, Math.min(armsAt, deadline));
+      const mustAct = Math.max(fromMs, Math.min(armsAt, deadline));
       if (mustAct < out.unsafeAtMs) out.unsafeAtMs = mustAct;
     }
   }
