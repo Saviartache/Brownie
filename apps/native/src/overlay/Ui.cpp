@@ -269,7 +269,18 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
     ImGui::Checkbox("Show where we are aiming", &state.aim_markers);
     // The third of them, and the only one that costs anything on the wire: it
     // asks the runtime to keep sending what it predicts about every shot.
-    ImGui::Checkbox("Show where we are dodging", &state.dodge_markers);
+    ImGui::Checkbox("Show what the dodge is thinking", &state.dodge_markers);
+    if (ImGui::IsItemHovered()) {
+        // The one place a person can find out what the circles are. Six shapes
+        // over a fight is not something anybody guesses, and a legend printed on
+        // the map would be in the way of what it describes.
+        ImGui::SetTooltip(
+            "Over the map: every shot's remaining path, green to red by how much\n"
+            "life it has left, and the distances the planner is reasoning about —\n"
+            "the ring a shot has to enter before it is answered, each monster's\n"
+            "body and the space kept around it, how far the weapon reaches, and\n"
+            "where an area effect will land, reddening as it does.");
+    }
 
     ImGui::Separator();
 

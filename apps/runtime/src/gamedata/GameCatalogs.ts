@@ -17,6 +17,8 @@ export interface ObjectDefinition {
   readonly isInvincible: boolean;
   /** Whether one of these blocks the square it stands on — a wall, a rock. */
   readonly occupies: boolean;
+  /** How wide one of these is, in tiles. See {@link ObjectCatalog.bodyTiles}. */
+  readonly bodyTiles: number;
   /** Indexed by `bulletType`, which is the index the game shoots them by. */
   readonly projectiles: ReadonlyMap<number, ProjectileDefinition>;
   /**
@@ -87,6 +89,10 @@ export class GameObjectCatalog implements ObjectCatalog {
     return this.#byType.get(objectType)?.occupies ?? false;
   }
 
+  bodyTiles(objectType: number): number | undefined {
+    return this.#byType.get(objectType)?.bodyTiles;
+  }
+
   displayName(objectType: number): string | undefined {
     return this.#byType.get(objectType)?.id;
   }
@@ -138,6 +144,38 @@ export class GameTileCatalog implements TileCatalog {
   }
 }
 
+/** The size a `<Size>`-less object is drawn at, as the file's percentages go. */
+const STANDARD_SIZE_PERCENT = 100;
+
+/**
+ * What a body's stated size is allowed to come out as, in tiles.
+ *
+ * The file is maintained by somebody else and carries decorative entries with
+ * sizes in the thousands — a backdrop, a beam of light — which as a keep-away
+ * distance would push a planner across the room. The ceiling is a little above
+ * the largest boss anybody fights; the floor keeps a shrunken minion from
+ * reporting a body of nothing at all.
+ */
+const MIN_BODY_TILES = 0.25;
+const MAX_BODY_TILES = 6;
+
+/**
+ * How wide one object is, from what the file says about its size.
+ *
+ * `<Size>` is a percentage of the standard one-tile sprite. A few hundred
+ * objects randomise it between `<MinSize>` and `<MaxSize>` instead; the larger
+ * of those is taken, because this feeds a distance something is kept at and the
+ * cost of guessing small is being stood on.
+ */
+function readBodyTiles(element: string): number {
+  const stated =
+    parseGameNumber(childText(element, 'Size')) ??
+    parseGameNumber(childText(element, 'MaxSize')) ??
+    STANDARD_SIZE_PERCENT;
+  if (!Number.isFinite(stated) || stated <= 0) return 1;
+  return Math.min(MAX_BODY_TILES, Math.max(MIN_BODY_TILES, stated / STANDARD_SIZE_PERCENT));
+}
+
 /**
  * Reads `objects.xml`.
  *
@@ -178,6 +216,7 @@ export async function readObjectDefinitions(
       // Either marks a square as blocked. `FullOccupy` also stops sight, which
       // nothing here needs — for walking they mean the same thing.
       occupies: hasChild(element, 'OccupySquare') || hasChild(element, 'FullOccupy'),
+      bodyTiles: readBodyTiles(element),
       projectiles: new Map(readProjectiles(element).map((p) => [p.bulletType, p])),
       item: readItemFacts(element),
       container: readContainerFacts(element, objectClass),

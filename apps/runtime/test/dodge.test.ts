@@ -23,9 +23,16 @@ import {
   EnemyBodies,
   MAX_BODY_LOOKAHEAD_MS,
   OUT_OF_RANGE_CAP_TILES,
+  type BodySighting,
   type StandoffBand,
 } from '../src/features/dodge/EnemyBodies.js';
 import { Blasts, type BlastView } from '../src/features/dodge/Blasts.js';
+import {
+  DodgeMarkKind,
+  dodgeMarks,
+  MAX_DRAWN_MARKS,
+  type DodgeMark,
+} from '../src/features/dodge/DodgeMarks.js';
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
 import { ThreatField, type DodgeShot, type Sweep } from '../src/features/dodge/ThreatField.js';
@@ -47,7 +54,6 @@ import {
 } from '../src/features/dodge/hitbox.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
-import type { Motion } from '../src/state/MotionTracker.js';
 import { testLogger } from './fakes.js';
 import {
   MAX_SPEED_STAT,
@@ -93,12 +99,21 @@ function emptySweep(): Sweep {
   };
 }
 
-/** Every entity counts and none of them is going anywhere. */
-const ANY_BODY = (): Motion => ({ velocityX: 0, velocityY: 0 });
+/** Every entity counts, none is going anywhere, and all are ordinary sized. */
+const ANY_BODY = (): BodySighting => ({
+  velocityX: 0,
+  velocityY: 0,
+  halfTiles: ENEMY_CONTACT_HALF_TILES,
+});
 
 /** The same, for a body walking at `tilesPerSecond` in a direction. */
-function chasing(x: number, y: number): (enemy: EntityView) => Motion {
-  return () => ({ velocityX: x / 1000, velocityY: y / 1000 });
+function chasing(x: number, y: number): (enemy: EntityView) => BodySighting {
+  return () => ({ ...ANY_BODY(), velocityX: x / 1000, velocityY: y / 1000 });
+}
+
+/** The same, for a body of a stated width in tiles. */
+function sized(tiles: number): (enemy: EntityView) => BodySighting {
+  return () => ({ ...ANY_BODY(), halfTiles: tiles / 2 });
 }
 
 /** Nothing in the way, nothing that hurts, nobody to bump into. */
@@ -106,7 +121,6 @@ const OPEN_GROUND: DodgeWorld = {
   canStand: () => true,
   isDamaging: () => false,
   standoffAt: () => 0,
-  closingOn: () => false,
 };
 
 /** Open ground with monsters in it, judged against one band. */
@@ -115,7 +129,6 @@ function standingOff(bodies: EnemyBodies, band: StandoffBand): DodgeWorld {
     canStand: () => true,
     isDamaging: () => false,
     standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
-    closingOn: (x, y) => bodies.closingOn(x, y, band),
   };
 }
 
@@ -125,7 +138,7 @@ const SETTINGS: DodgeSettings = {
   reactWithinMs: 420,
   // Wide enough that the tests below are about the geometry they set up rather
   // than about the distance gate, which has its own coverage.
-  reactWithinTiles: 100,
+  engageWithinTiles: 100,
   sampleStepMs: 60,
   headings: 16,
   hitScale: 1,
@@ -209,14 +222,14 @@ describe('the threat field', () => {
     reachTiles: 4,
     // Wider than anything these place, so the distance gate is out of the way
     // of the tests that are about the geometry. It has its own three below.
-    reactTiles: 100,
+    engageTiles: 100,
     // The whole horizon counts as now, for the same reason.
     reactWithinMs: 600,
   };
 
   function sweepStanding(field: ThreatField, at: Position): Sweep {
     const out = emptySweep();
-    field.sweep(at.x, at.y, 0, 0, 0.006, 0, 600, Infinity, 0, out);
+    field.sweep(at.x, at.y, 0, 0, 0.006, 0.006, 0, 600, Infinity, 0, out);
     return out;
   }
 
@@ -296,9 +309,9 @@ describe('the threat field', () => {
 
     const free = emptySweep();
     const boxed = emptySweep();
-    field.sweep(0, 0, 1, 0, 0.006, 0, 600, Infinity, 0, free);
+    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 600, Infinity, 0, free);
     // The same walk, with a wall a tenth of a tile away.
-    field.sweep(0, 0, 1, 0, 0.006, 0, 600, 0.1, 0, boxed);
+    field.sweep(0, 0, 1, 0, 0.006, 0.006, 0, 600, 0.1, 0, boxed);
 
     // Walking east takes the player under the shot; being stopped short of it
     // leaves them clear, which the swept clearance has to show.
@@ -315,7 +328,7 @@ describe('the threat field', () => {
     // now it is still four tiles outside the reaction distance.
     field.build(0, 0, 0, [straightShot({ x: -6, y: 0 }, 0, 10, 0, 2000)], {
       ...OPTIONS,
-      reactTiles: 2,
+      engageTiles: 2,
       reactWithinMs: 200,
     });
 
@@ -323,14 +336,19 @@ describe('the threat field', () => {
     expect(field.tracked).toBe(1);
     expect(swept.impactMs).toBeLessThan(Infinity);
     expect(swept.clearanceTiles).toBeLessThan(0);
-    expect(swept.unsafeAtMs).toBe(Infinity);
+    // Not this decision's problem: a moment to act on is one inside the window,
+    // and this is well outside it. It is not `Infinity` — the escape deadline
+    // answers every shot whether or not it is inside the ring, which is what
+    // stops a fast one arriving unannounced — but the deadline is late, because
+    // there is plenty of time to step out of one bullet.
+    expect(swept.unsafeAtMs).toBeGreaterThan(200);
   });
 
   it('calls the same shot trouble once it is near', () => {
     const field = new ThreatField();
     field.build(0, 0, 0, [straightShot({ x: -1.5, y: 0 }, 0, 10, 0, 2000)], {
       ...OPTIONS,
-      reactTiles: 2,
+      engageTiles: 2,
       reactWithinMs: 200,
     });
 
@@ -346,7 +364,7 @@ describe('the threat field', () => {
     const field = new ThreatField();
     field.build(0, 0, 0, [straightShot({ x: -6, y: 0 }, 0, 30, 0, 2000)], {
       ...OPTIONS,
-      reactTiles: 2,
+      engageTiles: 2,
       reactWithinMs: 200,
     });
 
@@ -375,6 +393,93 @@ describe('the threat field', () => {
     const swept = sweepStanding(field, { x: 0, y: 0 });
     expect(swept.clearanceTiles).toBeCloseTo(0.9 - effectiveHalf(0.5, 1, 0), 2);
     expect(swept.urgentClearanceTiles).toBeCloseTo(1.4 - effectiveHalf(0.5, 1, 0), 2);
+  });
+});
+
+// **How wide the thing coming at you is, which is what a reaction window on its
+// own can never ask.** One bullet is a step out of the way; a wall is a run, and
+// the run has to begin long before the first shot is close enough to count as
+// this moment's problem.
+describe('how far across the fire is out of it', () => {
+  const OPTIONS = {
+    horizonMs: 1000,
+    sampleStepMs: 60,
+    hitScale: 1,
+    padTiles: 0,
+    driftTilesPerSecond: 0,
+    reachTiles: 6,
+    engageTiles: 100,
+    reactWithinMs: 1000,
+  };
+
+  /** A rank of shots sweeping north, `spread` tiles either side of `centre`. */
+  function rank(spread: number, atY: number, centre = 0): DodgeShot[] {
+    const shots: DodgeShot[] = [];
+    for (let x = centre - spread; x <= centre + spread + 0.01; x += 0.8) {
+      shots.push(straightShot({ x, y: atY }, Math.PI / 2, 8, 0, 4000));
+    }
+    return shots;
+  }
+
+  it('is about a body wide for one shot, and half the rank for a rank', () => {
+    const one = new ThreatField();
+    one.build(0, 0, 0, [straightShot({ x: 0, y: -6 }, Math.PI / 2, 8, 0, 4000)], OPTIONS);
+    expect(one.escapeTiles).toBeGreaterThan(0);
+    expect(one.escapeTiles).toBeLessThan(1.5);
+
+    const wall = new ThreatField();
+    wall.build(0, 0, 0, rank(6, -6), OPTIONS);
+    expect(wall.escapeTiles).toBeGreaterThan(6);
+  });
+
+  // Standing at the edge of a pattern is already most of the way out of it, and
+  // a width measured from its middle would say otherwise.
+  it('is nothing at all when the fire is all to one side', () => {
+    const field = new ThreatField();
+    field.build(0, 0, 0, rank(3, -6, 6), OPTIONS);
+    expect(field.escapeTiles).toBe(0);
+  });
+
+  // In a crossfire there is no across, so claiming a width for one would be
+  // claiming to know the shape of something that has none.
+  it('has no answer when the shots do not agree on a direction', () => {
+    const field = new ThreatField();
+    field.build(
+      0,
+      0,
+      0,
+      [
+        straightShot({ x: 0, y: -6 }, Math.PI / 2, 8, 0, 4000),
+        straightShot({ x: 0, y: 6 }, -Math.PI / 2, 8, 0, 4000),
+        straightShot({ x: -6, y: 0 }, 0, 8, 0, 4000),
+        straightShot({ x: 6, y: 0 }, Math.PI, 8, 0, 4000),
+      ],
+      OPTIONS,
+    );
+    expect(field.escapeTiles).toBe(0);
+  });
+
+  // **The whole point of measuring it.** Both of these land at the same moment;
+  // one of them can still be stepped out of when it gets here and the other
+  // cannot, and only the width says so.
+  it('makes a wall this decision’s problem while one shot is not', () => {
+    const walkTilesPerMs = 0.006;
+    const swept = (shots: DodgeShot[]): Sweep => {
+      const field = new ThreatField();
+      // A window sized for sidestepping a bullet, as every preset's is.
+      field.build(0, 0, 0, shots, { ...OPTIONS, reactWithinMs: 420 });
+      const out = emptySweep();
+      field.sweep(0, 0, 0, 0, 0, walkTilesPerMs, 60, 1000, Infinity, 0.08, out);
+      return out;
+    };
+
+    // Six tiles off and closing at eight tiles a second: three quarters of a
+    // second before either of them arrives.
+    const one = swept([straightShot({ x: 0, y: -6 }, Math.PI / 2, 8, 0, 4000)]);
+    const wall = swept(rank(6, -6));
+
+    expect(one.unsafeAtMs).toBeGreaterThan(420);
+    expect(wall.unsafeAtMs).toBeLessThan(420);
   });
 });
 
@@ -559,7 +664,7 @@ describe('what the verdict is allowed to claim', () => {
     // two questions genuinely come apart: a character covers four tiles inside
     // the reaction window, so at two tiles of gate a shot can be predicted to
     // land on a course without ever having counted as near.
-    const caught = drivenPlans({ ...SETTINGS, reactWithinTiles: 2 }).filter(
+    const caught = drivenPlans({ ...SETTINGS, engageWithinTiles: 2 }).filter(
       (plan) =>
         (plan.verdict === 'guide' || plan.verdict === 'evade' || plan.verdict === 'spacing') &&
         plan.impactMs <= SETTINGS.reactWithinMs,
@@ -750,7 +855,7 @@ describe('who is driving', () => {
       padTiles: SETTINGS.padTiles,
       driftTilesPerSecond: SETTINGS.driftTilesPerSecond,
       reachTiles: 4,
-      reactTiles: SETTINGS.reactWithinTiles,
+      engageTiles: SETTINGS.engageWithinTiles,
       reactWithinMs: SETTINGS.reactWithinMs,
     });
     const swept = emptySweep();
@@ -760,6 +865,7 @@ describe('who is driving', () => {
       plan.dirX,
       plan.dirY,
       0.006 * plan.speedScale,
+      0.006,
       SETTINGS.leadMs,
       SETTINGS.horizonMs,
       Infinity,
@@ -834,16 +940,18 @@ describe('what counts as trouble now', () => {
     expect(plan.steer).toBe(true);
   });
 
-  // **And the other half of the same question, which the gate had backwards.**
-  // Distance was read at the instant of planning, so a bullet crossing the room
-  // at twenty-four tiles a second counted as far — and being far it could not
-  // raise its hand, so the planner left the player standing exactly where it
-  // had predicted the shot would land. The fastest fire in the game was the one
-  // class it could not answer at all.
+  // **And the other half of the same question, which no ring can answer.**
+  // A bullet crossing the room at twenty-four tiles a second is on the player
+  // in a third of a second, so by the time it is inside any ring worth calling
+  // tight there is nothing left to do — and the planner used to leave them
+  // standing exactly where it had predicted the shot would land. What answers it
+  // is not a wider ring but the escape deadline, which asks how much time is
+  // left rather than how far away anything is.
   it('acts on a fast shot while it is still on the other side of the room', () => {
     const controller = new DodgeController();
-    // The plugin's own reaction distance, not the wide one the tests above use.
-    const settings: DodgeSettings = { ...SETTINGS, reactWithinTiles: 6 };
+    // The plugin's own ring, not the wide one the tests above use — and the
+    // shot is eight tiles outside it.
+    const settings: DodgeSettings = { ...SETTINGS, engageWithinTiles: 2.5 };
     const plan = controller.plan(situation(), settings, OPEN_GROUND, [
       straightShot({ x: 10, y: 18 }, -Math.PI / 2, 24, 0, 4000),
     ]);
@@ -851,6 +959,60 @@ describe('what counts as trouble now', () => {
     expect(plan.steer).toBe(true);
     // And the course it picked is one the shot does not reach.
     expect(plan.impactMs).toBe(Infinity);
+  });
+
+  // **The complaint the ring exists for: "you start dodging them at the
+  // spawn."** Shots in this game live a second or two, so acting on everything
+  // that will eventually arrive is acting on everything on the screen — the
+  // character shuffles from the moment a monster fires and is out of position by
+  // the time anything is near.
+  it('leaves an ordinary shot alone until it is actually close', () => {
+    const controller = new DodgeController();
+    const settings: DodgeSettings = { ...SETTINGS, engageWithinTiles: 2.5 };
+
+    const far = controller.plan(situation(), settings, OPEN_GROUND, [closingFrom(6)]);
+    expect(far.steer).toBe(false);
+    expect(far.verdict).toBe('clear');
+
+    // The same shot, a walk later. Nothing about it has changed but where it is.
+    const near = new DodgeController().plan(situation(), settings, OPEN_GROUND, [closingFrom(2.2)]);
+    expect(near.steer).toBe(true);
+  });
+});
+
+// **A ring decides when to move, and it must not decide what is true.** The
+// whole reason a tight one is safe is that everything on the screen is still
+// predicted and still ranks the courses — so a dodge of the shot arriving does
+// not walk into the wave behind it.
+describe('what the engagement ring is allowed to change', () => {
+  it('changes when to speak and nothing about the prediction', () => {
+    const shots = [straightShot({ x: 10, y: 16 }, -Math.PI / 2, 8, 0, 4000)];
+    const swept = (engageTiles: number): Sweep => {
+      const field = new ThreatField();
+      field.build(0, 10, 10, shots, {
+        horizonMs: SETTINGS.horizonMs,
+        sampleStepMs: SETTINGS.sampleStepMs,
+        hitScale: SETTINGS.hitScale,
+        padTiles: SETTINGS.padTiles,
+        driftTilesPerSecond: SETTINGS.driftTilesPerSecond,
+        reachTiles: 8,
+        engageTiles,
+        reactWithinMs: SETTINGS.reactWithinMs,
+      });
+      const out = emptySweep();
+      field.sweep(10, 10, 0, 0, 0, 0.006, SETTINGS.leadMs, SETTINGS.horizonMs, Infinity, 0.08, out);
+      return out;
+    };
+
+    const tight = swept(1);
+    const wide = swept(12);
+
+    expect(tight.impactMs).toBe(wide.impactMs);
+    expect(tight.clearanceTiles).toBe(wide.clearanceTiles);
+    expect(tight.urgentClearanceTiles).toBe(wide.urgentClearanceTiles);
+    // Only the moment it becomes worth saying something differs — and the tight
+    // ring's answer is the escape deadline rather than nothing at all.
+    expect(wide.unsafeAtMs).toBeLessThan(tight.unsafeAtMs);
   });
 });
 
@@ -931,6 +1093,42 @@ describe('a wall of shots with a window in it', () => {
     expect(plan.dirY).toBeGreaterThanOrEqual(0);
   });
 
+  // **The complaint this answers: "you stand still in front of huge attacks."**
+  // A reaction window is an allowance for stepping out of the way of a bullet.
+  // Spent on something twelve tiles across it buys nothing at all, so the
+  // planner said nothing for the whole of the warning and then discovered, at
+  // the moment the window opened, that there was nowhere left to go. What tells
+  // the two apart is the width — see `ThreatField.escapeTiles`.
+  it('starts running from a wide rank while it is still a second away', () => {
+    const controller = new DodgeController();
+    // Twelve tiles across, eight tiles below, sweeping north at eight tiles a
+    // second: nearly nine hundred milliseconds before it arrives.
+    const plan = controller.plan(situation(), EXACT, OPEN_GROUND, wall(99, 2));
+
+    expect(plan.steer).toBe(true);
+    // Not into it, and not a shuffle either: the course it picks is one nothing
+    // touches for as long as the plan looks, which is what the extra second of
+    // warning buys and what a sidestep at the last moment could not.
+    expect(plan.dirY).toBeGreaterThan(0);
+    expect(plan.impactMs).toBe(Infinity);
+    // Across it as well as ahead of it. Staying ahead of a rank faster than the
+    // character only postpones; the way out is its edge, six tiles away.
+    expect(Math.abs(plan.dirX)).toBeGreaterThan(0.3);
+  });
+
+  // And the other half of it: one shot at the same distance, at the same
+  // moment, is a step out of the way when it gets here — so it is nobody's
+  // problem yet and the player keeps the wheel.
+  it('leaves one shot at the same distance alone', () => {
+    const controller = new DodgeController();
+    const one = straightShot({ x: 10, y: 2 }, Math.PI / 2, 8, 0, 4000, 0.25);
+
+    const plan = controller.plan(situation(), EXACT, OPEN_GROUND, [one]);
+
+    expect(plan.steer).toBe(false);
+    expect(plan.verdict).toBe('clear');
+  });
+
   it('backs off when the same wall has no window at all', () => {
     const controller = new DodgeController();
     // Nothing missing, and close enough that there is no time to look for a way
@@ -989,7 +1187,6 @@ describe('where it refuses to go', () => {
     canStand: () => true,
     isDamaging: (x) => x > edge,
     standoffAt: () => 0,
-    closingOn: () => false,
   });
 
   it('steers the player around ground that is about to hurt them', () => {
@@ -1058,7 +1255,6 @@ describe('where it refuses to go', () => {
       canStand: (_x, y) => y <= 10.2,
       isDamaging: () => false,
       standoffAt: () => 0,
-      closingOn: () => false,
     };
     const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
 
@@ -1212,7 +1408,7 @@ describe('the distance to fight from', () => {
     const monster = { objectId: 2, objectType: 20, x: 5, y: 0 } as EntityView;
 
     bodies.collect([pillar, monster], 0, 0, 12, (enemy) =>
-      enemy.objectType === 10 ? undefined : { velocityX: 0, velocityY: 0 },
+      enemy.objectType === 10 ? undefined : ANY_BODY(),
     );
 
     expect(bodies.count).toBe(1);
@@ -1233,27 +1429,46 @@ describe('the distance to fight from', () => {
     expect(bodies.standoffAt(0, 0, BAND, 600)).toBeCloseTo(-0.6, 6);
   });
 
-  // **Which of the pair is closing the gap, which is a different question from
-  // whether it is closing.** A player walking at a monster shrinks the distance
-  // exactly as fast as a monster walking at the player.
-  it('tells something walking at you from something you walked at', () => {
-    const chased = new EnemyBodies();
-    chased.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
-    expect(chased.closingOn(0, 0, BAND)).toBe(true);
+  // **The live report: "they walk right up to me and I die."** The setting that
+  // keeps an ordinary monster at arm's length was measured from its middle, so
+  // against a boss four tiles across it left the player standing inside the
+  // body. The gap the setting asks for is what has to hold, whatever is
+  // standing there.
+  it('keeps the same gap from a big body as from a small one', () => {
+    const gap = BAND.keepAwayTiles - ENEMY_CONTACT_HALF_TILES;
 
-    const still = new EnemyBodies();
-    still.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, ANY_BODY);
-    expect(still.closingOn(0, 0, BAND)).toBe(false);
+    const ordinary = new EnemyBodies();
+    ordinary.collect([{ x: BAND.keepAwayTiles, y: 0 } as EntityView], 0, 0, 12, ANY_BODY);
+    expect(ordinary.standoffAt(0, 0, BAND)).toBe(0);
 
-    const leaving = new EnemyBodies();
-    leaving.collect([{ x: 1, y: 0 } as EntityView], 0, 0, 12, chasing(6, 0));
-    expect(leaving.closingOn(0, 0, BAND)).toBe(false);
+    // Four tiles across, so its edge sits where the ordinary one's did only if
+    // the near edge moved out with it.
+    const boss = new EnemyBodies();
+    boss.collect([{ x: 2 + gap, y: 0 } as EntityView], 0, 0, 12, sized(4));
+    expect(boss.standoffAt(0, 0, BAND)).toBe(0);
+    expect(boss.standoffAt(0, 0, BAND, 0)).toBe(0);
+    // And half a tile nearer is half a tile inside it.
+    expect(boss.standoffAt(0.5, 0, BAND)).toBeCloseTo(-0.5, 6);
   });
 
-  it('is not alarmed by something charging about outside the near edge', () => {
+  // **Two edges that overlap are an instruction to oscillate.** A melee weapon
+  // against something enormous puts the near edge past the far one, so a place
+  // reads as too near *and* out of range — and a planner told both steps in and
+  // out of contact forever. The near edge wins, as it does everywhere else:
+  // being able to dodge outranks being able to shoot.
+  it('does not call one place both too near and too far', () => {
+    const melee: StandoffBand = { keepAwayTiles: 2, stayWithinTiles: 3 };
     const bodies = new EnemyBodies();
-    bodies.collect([{ x: 5, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
-    expect(bodies.closingOn(0, 0, BAND)).toBe(false);
+    // Four tiles across, so the near edge lands at 3.5 — half a tile past what
+    // the weapon reaches.
+    bodies.collect([{ x: 3.5, y: 0 } as EntityView], 0, 0, 12, sized(4));
+
+    // The one place the near edge allows is not also a place to leave.
+    expect(bodies.standoffAt(0, 0, melee)).toBe(0);
+    // And the two edges meet there rather than crossing: nearer is too near,
+    // further is too far, and neither is both.
+    expect(bodies.standoffAt(0.1, 0, melee)).toBeLessThan(0);
+    expect(bodies.standoffAt(-0.1, 0, melee)).toBeGreaterThan(0);
   });
 
   // A velocity carried a whole second is a claim about a decision the monster
@@ -1406,6 +1621,175 @@ describe('keeping the fight', () => {
     // Sideways or forwards, but not straight back up the shot's own line.
     expect(plan.dirY).toBeLessThan(0.5);
   });
+
+  // **The live report: "I do no damage, because I am far away."** Preferring the
+  // course that keeps the range is not enough on its own — every course that
+  // gives ground survives fractionally longer, so the drift outwards happens a
+  // safe step at a time and there was nothing that ever walked it back. Being
+  // out of position is a reason to act, exactly as being crowded is.
+  it('steps back into weapon range once the shooting stops', () => {
+    const controller = new DodgeController();
+    const bodies = new EnemyBodies();
+    // A tile past what the weapon reaches, and nothing in the air at all.
+    bodies.collect([{ x: 10, y: 18 } as EntityView], 10, 10, 12, ANY_BODY);
+
+    const plan = controller.plan(
+      situation(),
+      SETTINGS,
+      standingOff(bodies, { keepAwayTiles: 2.5, stayWithinTiles: 7 }),
+      [],
+    );
+
+    expect(plan.verdict).toBe('spacing');
+    expect(plan.steer).toBe(true);
+    expect(plan.dirY).toBeGreaterThan(0);
+  });
+
+  // And it is a step back into the fight, not a chase: past the point where
+  // closing in stops being the player's own intent, every course is equally far
+  // and the difference decides nothing.
+  it('does not walk across the room after something out of reach', () => {
+    const controller = new DodgeController();
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 10, y: 30 } as EntityView], 10, 10, 40, ANY_BODY);
+
+    const plan = controller.plan(
+      situation(),
+      SETTINGS,
+      standingOff(bodies, { keepAwayTiles: 2.5, stayWithinTiles: 7 }),
+      [],
+    );
+
+    expect(plan.steer).toBe(false);
+  });
+
+  // **The other half of the same live report, and the case where being crowded
+  // costs most.** The distance is stated against an ordinary monster, so a body
+  // four times the width has to be kept four times as far off its middle to
+  // leave the same room — and it is the big ones that kill you for standing in
+  // them.
+  it('makes more room for a bigger body', () => {
+    const band = { keepAwayTiles: 2.5, stayWithinTiles: 7 };
+    const at = (read: (enemy: EntityView) => BodySighting): DodgePlan => {
+      const controller = new DodgeController();
+      const bodies = new EnemyBodies();
+      // Two and a half tiles north, which is exactly the stated distance.
+      bodies.collect([{ x: 10, y: 12.5 } as EntityView], 10, 10, 12, read);
+      return controller.plan(situation(), SETTINGS, standingOff(bodies, band), []);
+    };
+
+    // An ordinary monster there is where it should be, and nothing is said.
+    expect(at(ANY_BODY).steer).toBe(false);
+    // Something four tiles across at the same place is on top of the player.
+    const boss = at(sized(4));
+    expect(boss.verdict).toBe('spacing');
+    expect(boss.dirY).toBeLessThan(0);
+  });
+});
+
+// **Every complaint this feature has had was about a distance**, and every one
+// of those distances is a number in a panel nobody can check against a moving
+// fight. Drawn on the ground they check themselves.
+describe('the picture of what it is thinking', () => {
+  const BAND: StandoffBand = { keepAwayTiles: 2.5, stayWithinTiles: 7 };
+
+  function scene(overrides: Partial<Parameters<typeof dodgeMarks>[0]> = {}) {
+    return {
+      selfX: 10,
+      selfY: 10,
+      gameTimeMs: 0,
+      engageTiles: 2.5,
+      band: BAND,
+      bodies: new EnemyBodies(),
+      blasts: [] as BlastView[],
+      ...overrides,
+    };
+  }
+
+  const of = (marks: readonly DodgeMark[], kind: DodgeMarkKind): DodgeMark[] =>
+    marks.filter((mark) => mark.kind === kind);
+
+  it('draws the character, the ring it answers inside, and its reach', () => {
+    const marks = dodgeMarks(scene());
+
+    expect(of(marks, DodgeMarkKind.Player)).toHaveLength(1);
+    expect(of(marks, DodgeMarkKind.Engage)[0]?.radiusTiles).toBe(2.5);
+    expect(of(marks, DodgeMarkKind.InRange)[0]?.radiusTiles).toBe(7);
+  });
+
+  // The point of drawing the reach at all is the case where there is none to
+  // draw: a picture with a ring on it when range is not being kept would say
+  // the planner is minding something it is not.
+  it('draws no reach while range is not being kept', () => {
+    const marks = dodgeMarks(scene({ band: { keepAwayTiles: 2.5, stayWithinTiles: Infinity } }));
+
+    expect(of(marks, DodgeMarkKind.InRange)).toHaveLength(0);
+  });
+
+  it('draws each monster and the room it is being given', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, sized(4));
+
+    const marks = dodgeMarks(scene({ bodies }));
+
+    // The body at the size the catalog gave it, so a boss drawn as a rat is
+    // visible as one.
+    expect(of(marks, DodgeMarkKind.Body)[0]?.radiusTiles).toBe(2);
+    // And the circle the planner refuses to be inside, which is the body plus
+    // the gap the setting asks for.
+    expect(of(marks, DodgeMarkKind.KeepAway)[0]?.radiusTiles).toBeCloseTo(4, 6);
+  });
+
+  it('draws nothing about the monsters while it is not minding them', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
+
+    const marks = dodgeMarks(scene({ bodies, band: undefined }));
+
+    expect(of(marks, DodgeMarkKind.Body)).toHaveLength(0);
+    expect(of(marks, DodgeMarkKind.KeepAway)).toHaveLength(0);
+    expect(of(marks, DodgeMarkKind.InRange)).toHaveLength(0);
+  });
+
+  // A bomb two seconds out and one landing this instant are the same circle in
+  // the same place, and only one of them is a reason to move.
+  it('draws a blast where it lands, reddening as it does', () => {
+    const soon: BlastView = { x: 12, y: 12, radiusTiles: 3, armsAtMs: 200 };
+    const later: BlastView = { x: 4, y: 4, radiusTiles: 3, armsAtMs: 2000 };
+
+    const marks = dodgeMarks(scene({ blasts: [soon, later] }));
+    const blasts = of(marks, DodgeMarkKind.Blast);
+
+    expect(blasts).toHaveLength(2);
+    expect(blasts[0]?.radiusTiles).toBe(3);
+    expect(blasts[0]?.permille).toBeLessThan(blasts[1]?.permille ?? 0);
+  });
+
+  // One already down is history, and the ground it took is the safest on the
+  // screen. Drawing it would be drawing a crater.
+  it('says nothing about a blast that has already gone off', () => {
+    const gone: BlastView = { x: 12, y: 12, radiusTiles: 3, armsAtMs: 100 };
+
+    const marks = dodgeMarks(scene({ blasts: [gone], gameTimeMs: 500 }));
+
+    expect(of(marks, DodgeMarkKind.Blast)).toHaveLength(0);
+  });
+
+  // A crowded screen is unreadable whatever is drawn, and every one of these
+  // crosses a pipe fifty times a second.
+  it('keeps a busy screen bounded, and never half a monster', () => {
+    const bodies = new EnemyBodies();
+    const crowd = Array.from(
+      { length: 200 },
+      (_unused, i) => ({ x: 10 + (i % 20) * 0.1, y: 10 }) as EntityView,
+    );
+    bodies.collect(crowd, 10, 10, 40, ANY_BODY);
+
+    const marks = dodgeMarks(scene({ bodies }));
+
+    expect(marks.length).toBeLessThanOrEqual(MAX_DRAWN_MARKS);
+    expect(of(marks, DodgeMarkKind.Body)).toHaveLength(of(marks, DodgeMarkKind.KeepAway).length);
+  });
 });
 
 describe('which way the player is walking', () => {
@@ -1509,7 +1893,7 @@ describe('when the plugin decides', () => {
     steer: { direction: Position | undefined };
     /** Whether the module says it is drawing the shot paths. */
     view: { on: boolean };
-    showShotPaths: ReturnType<typeof vi.fn>;
+    showPicture: ReturnType<typeof vi.fn>;
   }
 
   /**
@@ -1527,7 +1911,7 @@ describe('when the plugin decides', () => {
     } = {},
   ): Harness {
     const moveTo = vi.fn();
-    const showShotPaths = vi.fn();
+    const showPicture = vi.fn();
     const cursor: { target: Position | undefined } = { target: undefined };
     const steer: { direction: Position | undefined } = { direction: undefined };
     const view = { on: false };
@@ -1566,13 +1950,14 @@ describe('when the plugin decides', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveTo, showShotPaths },
+        output: { moveTo, showPicture },
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
         view: { wanted: () => view.on },
         weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
+        bodyTiles: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);
@@ -1580,7 +1965,7 @@ describe('when the plugin decides', () => {
     return {
       host,
       moveTo,
-      showShotPaths,
+      showPicture,
       cursor,
       steer,
       view,
@@ -1691,22 +2076,26 @@ describe('when the plugin decides', () => {
 
   // Nothing is predicted for a picture nobody is looking at: the switch lives
   // on the module, because the module owns the pixels.
-  it('describes the shot paths only while the module is drawing them', () => {
-    const { plan, showShotPaths, view } = underFire(900);
+  it('describes what it is thinking only while the module is drawing it', () => {
+    const { plan, showPicture, view } = underFire(900);
 
     plan();
-    expect(showShotPaths).not.toHaveBeenCalled();
+    expect(showPicture).not.toHaveBeenCalled();
 
     view.on = true;
     plan();
-    expect(showShotPaths).toHaveBeenCalledTimes(1);
-    const paths = showShotPaths.mock.calls[0]?.[0] as { lifePermille: number }[];
+    expect(showPicture).toHaveBeenCalledTimes(1);
+    const paths = showPicture.mock.calls[0]?.[0] as { lifePermille: number }[];
     expect(paths).toHaveLength(1);
     expect(paths[0]?.lifePermille).toBeGreaterThan(0);
+    // And the distances beside them, which is what says why it did or did not
+    // answer that shot. The engagement ring at least, with nobody else about.
+    const marks = showPicture.mock.calls[0]?.[1] as { kind: number; radiusTiles: number }[];
+    expect(marks.some((mark) => mark.kind === DodgeMarkKind.Engage)).toBe(true);
   });
 
   it('clears what is drawn once, when the switch goes up', () => {
-    const { plan, showShotPaths, view } = underFire(900);
+    const { plan, showPicture, view } = underFire(900);
     view.on = true;
     plan();
     view.on = false;
@@ -1714,8 +2103,11 @@ describe('when the plugin decides', () => {
     plan();
     plan();
 
-    expect(showShotPaths).toHaveBeenCalledTimes(2);
-    expect(showShotPaths.mock.calls[1]?.[0]).toEqual([]);
+    expect(showPicture).toHaveBeenCalledTimes(2);
+    // Both halves, because a picture with only its circles left is a picture of
+    // a fight that is not happening.
+    expect(showPicture.mock.calls[1]?.[0]).toEqual([]);
+    expect(showPicture.mock.calls[1]?.[1]).toEqual([]);
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
@@ -1882,7 +2274,7 @@ function readTuning(settings: SettingsRegistry): DodgeTuning {
   return {
     horizonMs: number('horizonMs'),
     reactWithinMs: number('reactWithinMs'),
-    reactWithinTiles: number('reactWithinTiles'),
+    engageWithinTiles: number('engageWithinTiles'),
     sampleStepMs: number('stepMs'),
     headings: number('headings'),
     urgentWithinMs: number('urgentWithinMs'),
@@ -1960,13 +2352,14 @@ describe('the hit redirect', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveTo: () => undefined, showShotPaths: () => undefined },
+        output: { moveTo: () => undefined, showPicture: () => undefined },
         cursorWalk: { target: () => undefined },
         steer: { direction: () => undefined },
         view: { wanted: () => false },
         weaponRange: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,
+        bodyTiles: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);

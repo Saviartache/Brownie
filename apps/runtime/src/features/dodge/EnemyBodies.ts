@@ -42,6 +42,14 @@
  * whole reason the near edge exists. Each body carries the velocity the caller
  * derived, and a place is judged at the moment the player would be standing in
  * it.
+ *
+ * **And they are not all one tile wide.** The near edge used to be measured
+ * from a monster's centre with every monster assumed the same size, so the
+ * distance that keeps a scattering minion at arm's length put the player well
+ * inside a boss four times the width — which is the live report, and it is the
+ * one case where being crowded is most expensive. `<Size>` says how big each
+ * one is; the setting names a *gap* from the body rather than a distance from
+ * its middle, so one number holds for both.
  */
 
 import type { EntityView } from '@brownie/plugin-api';
@@ -49,17 +57,14 @@ import type { Motion } from '../../state/MotionTracker.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /**
- * How big a body is assumed to be, in tiles.
+ * How big a body is when the catalog has nothing to say about it, in tiles.
  *
- * The reference implementation's figure, and its reasoning: bosses are larger,
- * so this under-covers them — but it is a preference rather than a barrier, and
- * a number large enough to cover a boss would push the planner off every
- * ordinary monster in the game.
+ * The reference implementation's figure, and the size the game draws anything
+ * whose data omits `<Size>` at. It is also the yardstick {@link StandoffBand}
+ * is calibrated against — see {@link EnemyBodies.standoffAt} — so that the same
+ * setting means the same *gap* whatever is standing there.
  */
 export const ENEMY_CONTACT_HALF_TILES = 0.5;
-
-/** Nearer than this and the bodies are touching. The floor under the band. */
-const CONTACT_TILES = ENEMY_CONTACT_HALF_TILES + PLAYER_HALF_TILES;
 
 /**
  * How far out of weapon range is still worth being pulled back from, in tiles.
@@ -90,28 +95,31 @@ export const OUT_OF_RANGE_CAP_TILES = 2;
  */
 export const MAX_BODY_LOOKAHEAD_MS = 600;
 
-/**
- * How fast a body has to be coming at you before it counts as coming at you.
- *
- * **The line between "it is chasing me" and "I walked over there".** Both close
- * the gap and only the first is the planner's business — a player heading for a
- * portal, a bag or the next room walks past monsters the whole way, and a dodge
- * that reads their own approach as danger is one that will not let them
- * navigate. What separates the two is which body is doing the closing, and that
- * is a question about the *monster's* velocity alone.
- *
- * Above the noise a smoothed per-tick velocity carries and below anything that
- * is actually walking at somebody: a server tick moves an entity in one jump,
- * so a monster standing still still reports a twitch.
- */
-export const MIN_CLOSING_TILES_PER_SECOND = 1;
-
 /** The distances a place is judged against. See the file's note. */
 export interface StandoffBand {
-  /** Never nearer to a monster than this. Raised to the contact distance. */
+  /**
+   * Never nearer to a monster than this.
+   *
+   * Stated as the distance from the centre of an ordinary, one-tile monster,
+   * because that is what it has always meant and what the presets are tuned
+   * against — but *applied* as the gap it works out to, so a body twice the
+   * width is kept twice as far off its middle and exactly as far off its edge.
+   * Raised to the contact distance, so nought here still means "not inside it".
+   */
   readonly keepAwayTiles: number;
   /** And preferably no further. `Infinity` when range is not being kept. */
   readonly stayWithinTiles: number;
+}
+
+/** What the caller knows about one body. See {@link EnemyBodies.collect}. */
+export interface BodySighting extends Motion {
+  /**
+   * Half the width of this one, in tiles.
+   *
+   * {@link ENEMY_CONTACT_HALF_TILES} for anything the catalog cannot describe,
+   * which is what this did for every monster alike before it could tell.
+   */
+  readonly halfTiles: number;
 }
 
 export class EnemyBodies {
@@ -120,10 +128,36 @@ export class EnemyBodies {
   /** Tiles per millisecond, or nought for a body nothing is known about. */
   #vx = new Float64Array(0);
   #vy = new Float64Array(0);
+  /** Half the width of each, in tiles. */
+  #half = new Float64Array(0);
   #count = 0;
 
   get count(): number {
     return this.#count;
+  }
+
+  /**
+   * Where one of the collected bodies is, and how wide.
+   *
+   * **For drawing them, and for nothing else.** The planner asks this class
+   * questions about places; a picture of what it is thinking has to name the
+   * things themselves, and rebuilding the list a second time from the world
+   * would be a second cull that could disagree with this one — which is the one
+   * failure a debug view must not have. Out of range answers nought, so a caller
+   * that has miscounted draws a body at the origin rather than reading rubbish.
+   */
+  xOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#x[index] ?? 0) : 0;
+  }
+
+  yOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#y[index] ?? 0) : 0;
+  }
+
+  halfOf(index: number): number {
+    return index >= 0 && index < this.#count
+      ? (this.#half[index] ?? ENEMY_CONTACT_HALF_TILES)
+      : ENEMY_CONTACT_HALF_TILES;
   }
 
   /**
@@ -151,18 +185,19 @@ export class EnemyBodies {
     x: number,
     y: number,
     withinTiles: number,
-    read: (enemy: EntityView) => Motion | undefined,
+    read: (enemy: EntityView) => BodySighting | undefined,
   ): void {
     this.#count = 0;
     for (const enemy of enemies) {
       if (Math.abs(enemy.x - x) > withinTiles || Math.abs(enemy.y - y) > withinTiles) continue;
-      const motion = read(enemy);
-      if (motion === undefined) continue;
+      const sighting = read(enemy);
+      if (sighting === undefined) continue;
       if (this.#count >= this.#x.length) this.#grow();
       this.#x[this.#count] = enemy.x;
       this.#y[this.#count] = enemy.y;
-      this.#vx[this.#count] = motion.velocityX;
-      this.#vy[this.#count] = motion.velocityY;
+      this.#vx[this.#count] = sighting.velocityX;
+      this.#vy[this.#count] = sighting.velocityY;
+      this.#half[this.#count] = sighting.halfTiles;
       this.#count += 1;
     }
   }
@@ -186,8 +221,15 @@ export class EnemyBodies {
    *
    * Distance is measured centre to centre and round, unlike the square the
    * game's collision uses (see `hitbox.ts`): weapon range is a radius, and the
-   * near edge is a bubble rather than a hitbox. Squared until the end, because
-   * this is asked twice per candidate per plan.
+   * near edge is a bubble rather than a hitbox.
+   *
+   * **The near edge is per body and the far edge is not.** How near is too near
+   * depends on how big the thing is — see {@link nearEdgeOf} — while how far is
+   * too far is a property of the weapon, which reaches the same distance
+   * whatever it is pointed at. Where the two cross, on a melee weapon against
+   * something enormous, the near edge wins: being able to dodge outranks being
+   * able to shoot, and a band with nothing inside it would otherwise have the
+   * planner stepping in and out of contact forever.
    *
    * @param aheadMs How far into the future the place being asked about is. The
    *   bodies are carried forward by their own movement over it, capped at
@@ -199,52 +241,27 @@ export class EnemyBodies {
     if (this.#count === 0) return 0;
 
     const ahead = Math.min(Math.max(aheadMs, 0), MAX_BODY_LOOKAHEAD_MS);
-    let nearestSquared = Infinity;
+    // How far inside a near edge this place is, taking the worst offender —
+    // being crowded by the second-nearest of two is being crowded.
+    let intrusion = 0;
+    let nearest = Infinity;
+    let nearestEdge = 0;
     for (let i = 0; i < this.#count; i += 1) {
       const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
       const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
-      const squared = dx * dx + dy * dy;
-      if (squared < nearestSquared) nearestSquared = squared;
-    }
-
-    const nearest = Math.sqrt(nearestSquared);
-    const keepAway = Math.max(band.keepAwayTiles, CONTACT_TILES);
-    if (nearest < keepAway) return nearest - keepAway;
-    if (nearest > band.stayWithinTiles) {
-      return Math.min(nearest - band.stayWithinTiles, OUT_OF_RANGE_CAP_TILES);
-    }
-    return 0;
-  }
-
-  /**
-   * Whether anything already inside the near edge is walking towards a place.
-   *
-   * **Not "is the gap closing" — "is something closing it".** The gap between a
-   * player and a monster shrinks just as fast when the player walks at it, and
-   * that is a route, not a threat. Only the body's own velocity is read here,
-   * so a boss standing where the player chose to stand next to it says no and a
-   * minion running them down says yes.
-   *
-   * Any body inside the near edge will do rather than the nearest one: being
-   * run down by the second-closest of two is being run down.
-   */
-  closingOn(x: number, y: number, band: StandoffBand): boolean {
-    const keepAway = Math.max(band.keepAwayTiles, CONTACT_TILES);
-    const closing = MIN_CLOSING_TILES_PER_SECOND / 1000;
-
-    for (let i = 0; i < this.#count; i += 1) {
-      const dx = x - (this.#x[i] ?? 0);
-      const dy = y - (this.#y[i] ?? 0);
       const distance = Math.hypot(dx, dy);
-      if (distance >= keepAway) continue;
-      // On top of us already, so there is no direction to be closing along and
-      // nothing left to wait for.
-      if (distance === 0) return true;
-      // How fast it is eating the gap, which is its velocity along the line
-      // between the two.
-      if (((this.#vx[i] ?? 0) * dx + (this.#vy[i] ?? 0) * dy) / distance > closing) return true;
+      const edge = nearEdgeOf(this.#half[i] ?? ENEMY_CONTACT_HALF_TILES, band);
+      if (distance - edge < intrusion) intrusion = distance - edge;
+      if (distance < nearest) {
+        nearest = distance;
+        nearestEdge = edge;
+      }
     }
-    return false;
+
+    if (intrusion < 0) return intrusion;
+    const stayWithin = Math.max(band.stayWithinTiles, nearestEdge);
+    if (nearest > stayWithin) return Math.min(nearest - stayWithin, OUT_OF_RANGE_CAP_TILES);
+    return 0;
   }
 
   #grow(): void {
@@ -253,13 +270,34 @@ export class EnemyBodies {
     const y = new Float64Array(length);
     const vx = new Float64Array(length);
     const vy = new Float64Array(length);
+    const half = new Float64Array(length);
     x.set(this.#x);
     y.set(this.#y);
     vx.set(this.#vx);
     vy.set(this.#vy);
+    half.set(this.#half);
     this.#x = x;
     this.#y = y;
     this.#vx = vx;
     this.#vy = vy;
+    this.#half = half;
   }
+}
+
+/**
+ * How near a body of this size is too near, from its centre, in tiles.
+ *
+ * **The setting names a gap, and is stated as a distance.** `keepAwayTiles` has
+ * always meant "from the middle of an ordinary monster", which is what the
+ * presets are tuned against — so the gap it asks for is that distance less the
+ * ordinary body, and the same gap held against a body four times as wide is a
+ * larger distance. Without this the number that keeps a minion at arm's length
+ * left the player standing inside a boss.
+ *
+ * Floored at contact, so a keep-away of nought still means "not overlapping"
+ * rather than "as close as you like".
+ */
+export function nearEdgeOf(halfTiles: number, band: StandoffBand): number {
+  const gap = Math.max(band.keepAwayTiles - ENEMY_CONTACT_HALF_TILES, PLAYER_HALF_TILES);
+  return halfTiles + gap;
 }

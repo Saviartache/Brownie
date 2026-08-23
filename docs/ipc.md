@@ -343,8 +343,9 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `move`  | x·100, y·100, speed·100, holdMs                   | walk towards here, no faster than this, for this long unless replaced                                 |
 | `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
-| `trail-begin` / `trail-end` | —                     | brackets a set of shot paths, which is committed whole                                                |
+| `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trail` | life‰, x·100, y·100, … (pairs)                    | one shot's remaining path, from where it is now to where it stops existing                            |
+| `mark`  | kind, x·100, y·100, radius·100, ahead‰            | one circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, the weapon's reach, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has |
 
 `weapon` carries one field of text — the item's own id — so unlike its
 neighbours it is percent-encoded and the module reads it with the same splitter
@@ -491,13 +492,23 @@ holding it, so the runtime lets go of an unrestated one inside half a second —
 see `apps/runtime/src/features/dodge/SteerIntent.ts`. The release is a single
 `0`, which is what makes letting go immediate.
 
-**`trail` is the one thing on this link that is only ever looked at.** Where a
-shot will be is the game's own motion model applied to parameters out of its
-data files, so only the runtime can work it out; drawing it is pixels, so only
+**`trail` and `mark` are the one thing on this link that is only ever looked
+at.** Where a shot will be is the game's own motion model applied to parameters
+out of its data files, and how near a monster may stand is a setting the runtime
+owns — so only the runtime can work either out; drawing them is pixels, so only
 the module can do that. Putting the prediction on the map beside the shots it
 claims to describe is the only way to see whether it is right — a drawn line
 that runs where the shot actually goes says the model holds, and one that veers
 off says it does not, in the half second it takes to look.
+
+**And the circles answer the question the paths cannot**: not "is the prediction
+right" but "is the decision right". Every complaint this feature has had was
+about a distance — it dodges shots that were never near, it lets monsters stand
+on top of me, it walks out of range, it ignored that bomb — and each of those is
+a number in a settings panel that nobody can check against a moving fight. On
+the ground they check themselves. Both halves travel inside one bracket because
+they describe one plan: this plan's shots against the last plan's circles would
+be a picture of a moment that never happened.
 
 Each path starts at **where the shot is now**, not where it was fired. The part
 already travelled is not information — it is visible on the screen as the shot
@@ -519,7 +530,7 @@ was killed mid-fight looks like from there.
 
 | action       | fields      | meaning                                    |
 | ------------ | ----------- | ------------------------------------------ |
-| `dodge-view` | `1` or `0`  | whether the module wants the shot paths    |
+| `dodge-view` | `1` or `0`  | whether the module wants the dodge picture |
 
 **The only switch that travels this way**, and it has to: the checkbox is in the
 module's own scene list, because what it turns on is drawing, and what it turns

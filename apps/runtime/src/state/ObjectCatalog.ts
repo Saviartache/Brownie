@@ -52,6 +52,21 @@ export interface ObjectCatalog {
    * one.
    */
   occupies(objectType: number): boolean;
+  /**
+   * How wide one of these is, in tiles.
+   *
+   * **A monster's body is not one tile, and treating every one as though it
+   * were is what lets a boss stand on top of somebody.** `<Size>` in
+   * `objects.xml` is a percentage of the standard sprite — 400 on a large boss,
+   * 60 on a scattering minion — and it scales the space the thing actually
+   * takes up. Nothing on the wire carries it, so anything keeping its distance
+   * has to ask the catalog.
+   *
+   * `undefined` for a type the catalog has never heard of, and for every type
+   * while no data file has been read, so a caller can tell "one tile" from "no
+   * idea" and pick its own fallback.
+   */
+  bodyTiles(objectType: number): number | undefined;
   /** Display name from the catalog, when the entity carries no name stat. */
   displayName(objectType: number): string | undefined;
   /**
@@ -91,6 +106,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isPet: () => false,
   isInvincible: () => false,
   occupies: () => false,
+  bodyTiles: () => undefined,
   displayName: () => undefined,
   projectile: () => undefined,
   item: () => undefined,

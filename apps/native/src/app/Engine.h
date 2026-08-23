@@ -44,7 +44,7 @@
 #include "overlay/ActionQueue.h"
 #include "overlay/ControlRecord.h"
 #include "overlay/Overlay.h"
-#include "overlay/ShotTrails.h"
+#include "overlay/DodgePicture.h"
 #include "overlay/WorldMarkers.h"
 #include "overlay/Ui.h"
 
@@ -218,14 +218,16 @@ class Engine {
     /// behind it. **Render thread.**
     void DrawAim(std::uint64_t now_ms, const std::optional<FrameScreen>& screen) const;
 
-    /// Draws every shot's remaining path over the map. **Render thread.**
+    /// Draws what the dodge planner is thinking over the map. **Render thread.**
     ///
-    /// The runtime says where the shots are going, because that is its motion
-    /// model and its game data; this projects the answer and hands it to the
-    /// overlay. @returns how many were drawn, for the panel's own line.
-    [[nodiscard]] int DrawShotTrails(std::uint64_t now_ms, const std::optional<FrameScreen>& screen);
+    /// The runtime says where the shots are going and which distances it is
+    /// keeping, because that is its motion model, its game data and its
+    /// settings; this projects the answer and hands it to the overlay.
+    /// @returns how many shot paths were drawn, for the panel's own line.
+    [[nodiscard]] int DrawDodgePicture(std::uint64_t now_ms,
+                                       const std::optional<FrameScreen>& screen);
 
-    /// Tells the runtime whether the shot paths are wanted, when that changes.
+    /// Tells the runtime whether the dodge picture is wanted, when that changes.
     /// **IPC thread**, from the loop.
     ///
     /// Restated whenever the link comes back rather than only on the tick it is
@@ -501,15 +503,16 @@ class Engine {
     /// missed. Render thread only.
     Cadence steer_{kSteerIntervalMs};
 
-    /// Every shot's remaining path, as the runtime last described it. Written
-    /// on the IPC thread by the record handler, read by the frame that draws
-    /// it — one writer, one reader, and a set only ever swapped whole.
-    overlay::ShotTrails trails_;
+    /// What the dodge planner is thinking, as the runtime last described it.
+    /// Written on the IPC thread by the record handler, read by the frame that
+    /// draws it — one writer, one reader, and a set only ever swapped whole.
+    overlay::DodgePicture picture_;
     /// Projected into every frame that draws them, and kept so that a frame
     /// with fifty shots on it allocates nothing.
     std::vector<overlay::ScreenPoint> trail_points_;
     std::vector<int> trail_lengths_;
     std::vector<float> trail_lives_;
+    std::vector<overlay::RingMark> ring_marks_;
     /// What was last said to the runtime about wanting them, and whether
     /// anything has been said at all on this connection.
     bool sent_dodge_view_ = false;

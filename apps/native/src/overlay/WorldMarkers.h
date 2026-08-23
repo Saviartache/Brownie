@@ -86,4 +86,42 @@ void DrawAim(const AimMarkers& markers);
 /// the theme, as `Overlay.h` requires.
 void DrawShotTrails(const TrailMarkers& markers);
 
+/// What one of the planner's circles is, so the drawing can tell them apart.
+///
+/// Mirrors `MarkKind` in `DodgePicture.h`, which mirrors the runtime's. Kept as
+/// a plain int rather than the enum so this file needs nothing from the record
+/// layer — the overlay draws what it is handed and knows nothing about wires.
+enum class RingRole : int {
+    Player = 0,
+    Engage = 1,
+    Body = 2,
+    KeepAway = 3,
+    InRange = 4,
+    Blast = 5,
+};
+
+/// One circle on the ground, already projected.
+struct RingMark {
+    RingRole role = RingRole::Player;
+    ScreenPoint centre;
+    /// In the window's own pixels, which is what the projection gives.
+    float radius = 0.0F;
+    /// How much of its wait is still ahead, from one to nought. Only a blast
+    /// has a wait; everything else carries one and ignores it.
+    float ahead = 1.0F;
+};
+
+/// Draws the distances the planner is reasoning about.
+///
+/// **The circles are the argument, and each one answers a complaint.** The
+/// engagement ring says why a shot was or was not answered; the keep-away
+/// circles say what the planner is refusing to stand inside, and around what;
+/// the range ring says why it will not follow the player further out; a blast's
+/// footprint says what it is walking out of and how soon.
+///
+/// Sizes are pixels because a tile is a different number of them at every zoom,
+/// and the caller is the only thing that knows the camera. See
+/// `ScreenProjection.h`.
+void DrawDodgeRings(const RingMark* marks, int count);
+
 }  // namespace brownie::overlay

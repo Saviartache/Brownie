@@ -41,6 +41,16 @@
  * the first tier answers, and the extra tiers are the difference between "no
  * escape" and threading a fan.
  *
+ * **A window is not the same question as a wall, and one number tells them
+ * apart.** A bullet is answered by a sidestep, so "is this trouble close enough
+ * to act on" is the right question about one. A pattern several tiles deep is
+ * answered by a run, and asking the same question about it produces the failure
+ * the player reported: nothing was close enough to be this moment's problem
+ * until the moment nothing could be done. The signature of the second is that
+ * *every* candidate, in every direction, is predicted to be hit inside the
+ * horizon — a single shot never manages that — and it is what the `outrun`
+ * verdict is for.
+ *
  * **A wall is not damage.** Walking into one costs a step, so geometry here
  * *shortens* a course rather than condemning it: the sweep keeps going with the
  * player standing where the wall stopped them, and that course simply stops
@@ -48,14 +58,32 @@
  * costs health, so reaching it is scored exactly like being hit, and heading
  * into it is worth taking the wheel for even when nothing is in the air.
  *
+ * **Where to stand is part of the same decision, and it is not goal-seeking.**
+ * A band — no nearer to a monster than leaves room to dodge, no further than the
+ * weapon reaches — is a *preference between the courses already being compared*,
+ * which costs a comparison and can never fight the player for the wheel. It has
+ * to be able to act, though, and not only to rank: every course that gives
+ * ground survives fractionally longer than every course that does not, so a
+ * planner that only ranks on it drifts out of the fight one safe step at a time
+ * and a monster that walks onto somebody is watched in silence. Both edges are
+ * one rule, and both stand down the moment the player's own walking is what is
+ * fixing the distance.
+ *
  * **What is deliberately not here.** No goal-seeking, no orbit, no enemy lock,
- * no path drawing. Those are movement features that happen to share a planner,
- * and folding them in is how the reference ended up with a nine-hundred-line
- * arbiter and a mode-hysteresis timer. This decides one thing.
+ * no path drawing. The band is a preference over candidates, not a place to go;
+ * nothing here picks a destination. Folding one in is how the reference ended up
+ * with a nine-hundred-line arbiter and a mode-hysteresis timer. This decides one
+ * thing.
  */
 
 import { Blasts, type BlastView } from './Blasts.js';
-import { ThreatField, type DodgeShot, type Sweep, type ThreatFieldOptions } from './ThreatField.js';
+import {
+  COHERENT_FLOW,
+  ThreatField,
+  type DodgeShot,
+  type Sweep,
+  type ThreatFieldOptions,
+} from './ThreatField.js';
 import { WalkReach, type Ground, type Reach } from './WalkReach.js';
 
 /** A session with nothing throwing bombs, which is most of them. */
@@ -69,8 +97,16 @@ export type DodgeVerdict =
   | 'intent-safe'
   /** Not urgent: moved to the nearest course that is safe and still theirs. */
   | 'guide'
-  /** Nothing in the air; something has simply walked too close. Making room. */
+  /** Nothing in the air; the fighting distance is wrong. Fixing it. */
   | 'spacing'
+  /**
+   * Nowhere within reach stays clear. Running, while there is still time to.
+   *
+   * The wide-attack case, and the whole reason it has a name: a wall of shots
+   * is not answered by a sidestep, and by the time one is close enough to be
+   * this moment's problem the only answer left is which hit to take.
+   */
+  | 'outrun'
   /** Something lands soon. Survival first, their heading second. */
   | 'evade'
   /** No course clears the window. This is the one that is hit latest and least. */
@@ -96,12 +132,14 @@ export interface DodgeSettings {
    */
   readonly reactWithinMs: number;
   /**
-   * How near a shot has to be before it may take the wheel, in tiles.
+   * How near a shot has to actually be before it may take the wheel, in tiles.
    *
-   * The other half of the same question — see {@link ThreatFieldOptions.reactTiles}
-   * for why time alone leaves the planner reacting to fire across the room.
+   * The ring — see {@link ThreatFieldOptions.engageTiles}. Safe to keep tight
+   * because it is not the only trigger: a shot too fast, or a pattern too wide,
+   * for the ring to be reached in time raises its hand on the escape deadline
+   * instead, which is about time rather than distance.
    */
-  readonly reactWithinTiles: number;
+  readonly engageWithinTiles: number;
   /** Spacing of predicted shot positions. See {@link ThreatFieldOptions}. */
   readonly sampleStepMs: number;
   /** How many directions to consider, evenly spaced. */
@@ -184,6 +222,15 @@ export interface DodgePlan {
   readonly clearanceTiles: number;
   /** How many shots could reach the player at all. */
   readonly trackedShots: number;
+  /**
+   * How many area effects are on their way down and could catch us.
+   *
+   * Reported beside the shots and not folded into them: whether a blast was
+   * seen at all is the one thing a log cannot otherwise answer, because the
+   * telegraph that announces one is decoded from a packet body nobody
+   * documented. A takeover line with blasts in it is the proof it arrived.
+   */
+  readonly trackedBlasts: number;
 }
 
 /**
@@ -207,17 +254,6 @@ export interface DodgeWorld extends Ground {
    *   walked up to from one that is walking up to the player.
    */
   standoffAt(x: number, y: number, aheadMs: number): number;
-  /**
-   * Whether anything already inside the near edge is walking towards a place.
-   *
-   * **The one question that decides whether being crowded may overrule the
-   * player's own walking.** A gap closing because they are heading somewhere is
-   * a route — to a portal, a bag, the next room — and a planner that reads it as
-   * danger cannot be navigated past a monster. A gap closing because something
-   * is running them down is not theirs to have chosen. See
-   * `EnemyBodies.closingOn`.
-   */
-  closingOn(x: number, y: number): boolean;
 }
 
 /** The course that stays put. Always index nought, always considered. */
@@ -300,6 +336,17 @@ const URGENT_TRADE_MS = 120;
 const DOOMED_TRADE_MS = 60;
 const DOOMED_TRADE_TILES = 0.05;
 
+/**
+ * And for the run out of a wide pattern.
+ *
+ * A sample, and no more. Being generous here is what turns a run back into a
+ * shuffle: the heading the player is pressing outranks everything in
+ * {@link DodgeController.#mostAligned}, so any course admitted alongside the
+ * best one is a course their keys can pick — and their keys are how they came to
+ * be standing in front of a wall.
+ */
+const OUTRUN_TRADE_MS = 20;
+
 /** More than the overlay allows, so the tables never resize in a fight. */
 const MAX_HEADINGS = 64;
 
@@ -348,14 +395,6 @@ const ALIGNMENT_QUANTUM = 0.02;
 const RETREAT_QUANTUM = 0.2;
 
 /**
- * How much the shots must agree on a direction before "back" means anything.
- *
- * In a crossfire there is no back, and a rule about not retreating would be a
- * rule about nothing. Below this the whole idea switches itself off.
- */
-const COHERENT_FLOW = 0.35;
-
-/**
  * How much of a course must run with the shots before it counts as giving
  * ground.
  *
@@ -391,7 +430,16 @@ function standoffCost(outOfBandTiles: number): number {
 interface Bars {
   /** Trouble must be strictly later than this. */
   windowMs: number;
-  /** And a hit no earlier than this. */
+  /**
+   * And a hit strictly later than this.
+   *
+   * **Strictly, because the release test is strict**, and a course that is hit
+   * at exactly the moment the window closes has to be refused by both or by
+   * neither. Admitted here while refused there, it produced a plan that would
+   * not hand the wheel back and then chose to stand still anyway — a `guide`
+   * verdict steering nowhere, with a hit predicted on the last sample of the
+   * window. Both are now "a hit inside the window is a hit inside the window".
+   */
   impactMs: number;
   /** And at least this much room over the horizon. */
   roomTiles: number;
@@ -458,25 +506,53 @@ export class DodgeController {
   #crowded = false;
 
   /**
+   * And whether the nearest one is further off than the weapon reaches.
+   *
+   * **The other edge of the same band, and until now it could only ever be a
+   * tiebreak.** Every course that gives ground survives a little longer than
+   * every course that does not, so a planner that only ever *ranks* on this
+   * drifts out of range one safe step at a time and then has nothing to say,
+   * because nothing is shooting at somebody nobody can reach. The live report
+   * was the plain one: "I do no damage, because I am far away." Being out of
+   * position is a reason to plan, exactly as being crowded is.
+   *
+   * Bounded by the band itself rather than by a rule here: `standoffAt` stops
+   * counting past a couple of tiles out of range, so every course a plan can
+   * reach is equally far from a monster across the room and the term decides
+   * nothing. That is what keeps this a step back into the fight and not a chase.
+   */
+  #tooFar = false;
+
+  /**
    * How badly the place the player is standing sits against the monsters.
    *
    * Signed as {@link DodgeWorld.standoffAt} reports it, and kept because two
-   * separate decisions are made against it: whether anything has walked inside
-   * the bubble at all, and — when something has — which courses count as
-   * getting out of it rather than merely moving.
+   * separate decisions are made against it: which edge of the band has been
+   * crossed, and — once one has — which courses count as getting back inside it
+   * rather than merely moving.
    */
   #hereStandoff = 0;
 
   /**
-   * Whether being crowded is something the player is doing to themselves.
+   * Whether being out of position is something the player is choosing.
    *
-   * True while they are steering and nothing inside the bubble is coming at
-   * them — which is what walking somewhere past a monster looks like. Read by
-   * the release test and by {@link #choose}, and both have to agree: releasing
-   * on it while the bar in the scoring still insisted on leaving the bubble
-   * would hand the wheel back on one plan and take it on the next.
+   * True while they are steering and the course they are steering leaves them
+   * better placed than standing here would — which is what walking a route past
+   * a monster, or walking back towards one, looks like. Read by the release test
+   * and by {@link #choose}, and both have to agree: releasing on it while the
+   * bar in the scoring still insisted on fixing the distance would hand the
+   * wheel back on one plan and take it on the next.
    */
   #yielding = false;
+
+  /**
+   * Whether nothing within reach stays clear for the whole horizon.
+   *
+   * The wide-attack state. Kept between plans only for its own hysteresis band
+   * — see {@link #nothingStaysClear} — and cleared with everything else when the
+   * air goes quiet.
+   */
+  #caught = false;
 
   /**
    * The course last committed to, and until when it stands.
@@ -549,6 +625,7 @@ export class DodgeController {
     this.#doomed = false;
     this.#doomedBefore = false;
     this.#urgent = false;
+    this.#caught = false;
     this.#held = false;
     this.#heldX = 0;
     this.#heldY = 0;
@@ -575,7 +652,7 @@ export class DodgeController {
 
     // A character that cannot move has no plan to make — paralysed, petrified,
     // or simply between characters. Every candidate would be the same place.
-    if (!(tilesPerMs > 0)) return this.#nothing('clear', 0);
+    if (!(tilesPerMs > 0)) return this.#nothing('clear', 0, 0);
 
     const headings = this.#prepare(settings.headings);
     const stride = this.#stride;
@@ -604,7 +681,7 @@ export class DodgeController {
       padTiles: settings.padTiles,
       driftTilesPerSecond: settings.driftTilesPerSecond,
       reachTiles,
-      reactTiles: settings.reactWithinTiles,
+      engageTiles: settings.engageWithinTiles,
       reactWithinMs,
     };
     this.#field.build(situation.gameTimeMs, situation.x, situation.y, shots, fieldOptions);
@@ -619,42 +696,29 @@ export class DodgeController {
     );
 
     const onHazard = settings.avoidDamagingGround && situation.onDamagingGround;
-    // Something has walked inside the bubble. Not damage yet, and still a reason
-    // to speak: the room being taken is the room a dodge needs, so waiting until
-    // it is damage is waiting until there is nowhere left to go.
+    // How badly the place they are standing sits against the monsters — too
+    // near one to have room to dodge, or too far from the nearest to be hitting
+    // anything. Not damage either way, and both a reason to speak: the room
+    // being taken is the room a dodge needs, and a dodge that has quietly backed
+    // its player out of weapon range has turned the damage off.
     //
-    // **Whoever is driving, and that is a correction.** This used to stand down
-    // the moment the player touched a key, on the reasoning that somebody
-    // walking into a boss has said where they want to be. That is true of
-    // walking *towards* one and false of everything else — a monster closing on
-    // a player who is walking anywhere at all is not a request, and the live
-    // report was the plain one: "they just walk up and kill me". What decides
-    // whether to leave them alone is not whether their hands are on the keys,
-    // it is whether what they are doing with them is making room; see
-    // {@link #standoffOf} and the release test below.
-    // Asked about right now, because "has something got inside the bubble" is a
-    // question about the present. Where a *course* leaves the player is asked
-    // about the moment they would arrive; see {@link #standoffFor}.
+    // Asked about right now, because "where am I standing" is a question about
+    // the present. Where a *course* leaves the player is asked about the moment
+    // they would arrive; see {@link #standoffFor}.
     this.#hereStandoff = world.standoffAt(situation.x, situation.y, 0);
     this.#crowded = this.#hereStandoff < 0;
-    const crowded = this.#crowded;
-    // **Their own route, and it is not the planner's business.** Crowding used
-    // to stand down whenever a key was down, which meant it never acted at all;
-    // the correction to that then read *any* shrinking gap as trouble, so a
-    // player walking to a portal was steered off it every time their path went
-    // near a monster. What separates the two is which of the pair is doing the
-    // closing, and only the monster's own velocity can say. A player with their
-    // hands off the keys has chosen nothing, so nothing is yielded to.
-    this.#yielding = steering && !world.closingOn(situation.x, situation.y);
+    this.#tooFar = this.#hereStandoff > 0;
+    const offBand = this.#crowded || this.#tooFar;
     const tracked = this.#field.tracked;
+    const blastCount = this.#blasts.count;
     // Shots in flight and blasts on their way down. Either is a reason to think.
-    const incoming = tracked + this.#blasts.count;
+    const incoming = tracked + blastCount;
 
     // The cheapest way out, and the common one: nothing can reach us, the ground
-    // is fine, nobody is on top of us and nobody is walking anywhere. Asked
-    // before any probing, because probing the map is the expensive half of a
-    // plan with nothing to decide.
-    if (incoming === 0 && !onHazard && !crowded && !steering) return this.#nothing('clear', 0);
+    // is fine, we are standing at a sensible distance and nobody is walking
+    // anywhere. Asked before any probing, because probing the map is the
+    // expensive half of a plan with nothing to decide.
+    if (incoming === 0 && !onHazard && !offBand && !steering) return this.#nothing('clear', 0, 0);
 
     this.#measureGround(situation, settings, world, headings, reachTiles, tilesPerMs);
 
@@ -663,10 +727,10 @@ export class DodgeController {
     if (
       incoming === 0 &&
       !onHazard &&
-      !crowded &&
+      !offBand &&
       (this.#hazardMs[own] ?? Infinity) > HAZARD_GUARD_MS
     ) {
-      return this.#nothing('clear', 0);
+      return this.#nothing('clear', 0, 0);
     }
 
     this.#score(situation, settings, 0, firstTier, tilesPerMs, horizonMs, onHazard, world);
@@ -675,13 +739,38 @@ export class DodgeController {
       // Getting off it may well need part speed too — a pool with one clean
       // step out of it is exactly the case the extra tiers exist for.
       this.#score(situation, settings, firstTier, total, tilesPerMs, horizonMs, onHazard, world);
-      return this.#commit('escape', this.#leaveHazard(situation, total), total, situation, tracked);
+      return this.#commit(
+        'escape',
+        this.#leaveHazard(situation, total),
+        total,
+        situation,
+        tracked,
+        blastCount,
+      );
     }
 
     // What the player is already doing, which is the baseline every branch below
     // is measured against.
     const ownUnsafeAt = this.#unsafeMs[own] ?? Infinity;
     const ownHazard = this.#hazardMs[own] ?? Infinity;
+
+    // **Whether their own walking is the answer to being out of position.** The
+    // question this settles used to be asked of the monster alone — "is anything
+    // inside the bubble coming at me" — which is right about a minion running
+    // somebody down and silent about the two cases the player actually
+    // complained of: a boss that has arrived and stopped, and a player who has
+    // drifted out of range with their hand still on a key. Both read as "nobody
+    // is closing", and both went unanswered.
+    //
+    // What replaces it is the plain question, and it costs a comparison because
+    // the numbers were already computed: does the course they are steering leave
+    // them better placed than standing here would? A route past a monster does;
+    // shuffling against one that is on top of them does not; walking away from
+    // something matching their speed does not either, because the bodies are
+    // carried forward and the gap comes out the same. One rule for both edges of
+    // the band, and none of it applies to a player who has let go of the keys —
+    // they have chosen nothing, so there is nothing to yield to.
+    this.#yielding = steering && this.#standoffOf(own) < this.#hereCost();
 
     // **Mid-escape, and letting go now would undo it.** A walk out of a pattern
     // takes several hundred milliseconds, and it passes through moments where
@@ -710,11 +799,28 @@ export class DodgeController {
     // something close and being about to be hit by anything at all are both
     // reasons to stay.
     const ownImpact = this.#impactMs[own] ?? Infinity;
+    // **Nowhere within reach stays clear, and waiting will not make one.** A
+    // reaction window is sized for sidestepping a bullet; a wall of shots is
+    // several tiles deep and leaving it is a run, not a step. Judged only on how
+    // soon the first one arrives, the planner sat still through the whole of the
+    // warning — the shots were not yet "this moment's problem" — and then found,
+    // at the moment they became one, that no course survived. Every verdict in
+    // the live log for those seconds reads `unavoidable`, and the player's
+    // description was the accurate one: standing there doing something
+    // incomprehensible.
+    //
+    // The signature is exact and costs nothing: every candidate, in every
+    // direction, is predicted to be hit inside the horizon. A single bullet
+    // never does that — sixteen headings and one of them walks out of it. Only a
+    // pattern too wide to step out of does, and the answer to one is to start
+    // running while there is still most of a second of it left.
+    this.#caught = this.#nothingStaysClear(firstTier, horizonMs);
     if (
       ownUnsafeAt > releaseBar &&
       ownImpact > releaseBar &&
       ownHazard > HAZARD_GUARD_MS &&
-      (!crowded || this.#yielding) &&
+      (!offBand || this.#yielding) &&
+      !this.#caught &&
       !committed
     ) {
       // Their course is fine for as long as this decision is about. Nothing to
@@ -731,6 +837,7 @@ export class DodgeController {
         impactMs: ownImpact,
         clearanceTiles: this.#clearance[own] ?? Infinity,
         trackedShots: tracked,
+        trackedBlasts: blastCount,
       };
     }
 
@@ -756,14 +863,32 @@ export class DodgeController {
       chosen = this.#choose(scored, reactWithinMs, urgent, situation);
     }
 
-    // Said plainly when nothing was in the air and the only reason to move was
-    // that something walked in. The choice is the same one; the log is the only
+    // Said plainly when nothing in the air was the reason to move and the
+    // fighting distance was. The choice is the same one; the log is the only
     // place a person can tell the two apart.
     const verdict =
-      this.#verdict === 'guide' && crowded && ownUnsafeAt > reactWithinMs
+      this.#verdict === 'guide' && offBand && ownUnsafeAt > reactWithinMs
         ? 'spacing'
         : this.#verdict;
-    return this.#commit(verdict, chosen, scored, situation, tracked);
+    return this.#commit(verdict, chosen, scored, situation, tracked, blastCount);
+  }
+
+  /**
+   * Whether every candidate is predicted to be hit inside the horizon.
+   *
+   * The wide-attack test. Hysteresis of one sample either side, because both
+   * numbers land on the prediction grid and a bare threshold on a quantised
+   * signal changes its mind every plan or two — which here would be the
+   * difference between running and not.
+   */
+  #nothingStaysClear(scored: number, horizonMs: number): boolean {
+    const bar = this.#caught ? horizonMs + this.#quantumMs : horizonMs;
+    return this.#longestUnhitWindow(scored) < bar;
+  }
+
+  /** How badly the place they are standing sits, on the scale the bars use. */
+  #hereCost(): number {
+    return inQuanta(standoffCost(this.#hereStandoff), STANDOFF_QUANTUM_TILES);
   }
 
   // ── Candidate tables ──────────────────────────────────────────────────────
@@ -916,6 +1041,7 @@ export class DodgeController {
         this.#dirX[c] ?? 0,
         this.#dirY[c] ?? 0,
         speed,
+        tilesPerMs,
         settings.leadMs,
         until,
         travel,
@@ -1045,6 +1171,28 @@ export class DodgeController {
       this.#bars.standoff = Infinity;
       return this.#mostAligned(scored, situation, true);
     }
+    if (this.#caught) {
+      // **A wall, and there is still time to be somewhere else.** Nothing within
+      // reach stays clear for the horizon, but the first of it is not here yet —
+      // so this is the moment the run has to start, and it is the moment the
+      // planner used to spend deferring to whatever the player was pressing.
+      //
+      // Ranked from the best survival available and traded no further than a
+      // hair, which is what makes it a *run*: with a loose bar the heading term
+      // in {@link #mostAligned} would hand the answer straight back to the
+      // player's own keys, and their keys are what walked into the wall. What is
+      // still allowed to argue below it is where the course leaves us — an
+      // escape that ends out of weapon range is one to prefer second, not one to
+      // refuse — and, through it, not running along with the fire.
+      const best = this.#bestSurvival(scored);
+      this.#verdict = 'outrun';
+      this.#bars.windowMs = -Infinity;
+      this.#bars.impactMs =
+        Math.min(this.#impactMs[best] ?? 0, this.#survivalCapMs) - OUTRUN_TRADE_MS;
+      this.#bars.roomTiles = -Infinity;
+      this.#bars.standoff = Infinity;
+      return this.#mostAligned(scored, situation, true);
+    }
     // There is time. Take the course closest to where they were going out of
     // everything that clears the window — the difference between a feature that
     // reads as help and one that reads as a hand on the shoulder.
@@ -1060,19 +1208,22 @@ export class DodgeController {
     this.#bars.windowMs = reactWithinMs;
     this.#bars.impactMs = reactWithinMs;
     this.#bars.roomTiles = -Infinity;
-    // **And when something is walking onto us, a course has to be getting out
-    // of the way.** This is the branch a crowded player reaches, and every term
+    // **And when the fighting distance is wrong, a course has to be fixing
+    // it.** This is the branch a player out of position reaches, and every term
     // that measures where a course leaves us sits below the one that prefers
     // the heading they are pressing — so their own course won outright and the
-    // planner watched a monster walk onto them without a word. A bar rather
-    // than a reordering, because that is what the other three are: survival
-    // still comes first, and among the courses that survive *and* make room,
-    // theirs is still preferred. Lifted entirely while they are the ones
-    // closing the gap: that is a route, not a mistake to correct.
+    // planner watched a monster walk onto them without a word, or watched them
+    // drift out of range and said nothing at all. A bar rather than a
+    // reordering, because that is what the other three are: survival still comes
+    // first, and among the courses that survive *and* fix the distance, theirs
+    // is still preferred. Lifted entirely while their own walking is what is
+    // fixing it: that is a route, not a mistake to correct.
+    //
+    // Both edges, one rule. It reads as backing off from a boss on top of them
+    // and as stepping back into range of one they have drifted away from, and
+    // there is no reason for those to be two mechanisms.
     this.#bars.standoff =
-      this.#crowded && !this.#yielding
-        ? inQuanta(standoffCost(this.#hereStandoff), STANDOFF_QUANTUM_TILES)
-        : Infinity;
+      (this.#crowded || this.#tooFar) && !this.#yielding ? this.#hereCost() : Infinity;
     return this.#mostAligned(scored, situation, true);
   }
 
@@ -1083,9 +1234,16 @@ export class DodgeController {
    * to give ground — and a pattern with a window in it should be walked through
    * rather than backed away from. The window is usually a short step, which is
    * exactly what the full-speed ring cannot reach.
+   *
+   * **Or because the correction wanted is a small one.** Fixing the fighting
+   * distance is a step or two, and a second of full speed in any direction is
+   * five or six tiles — which overshoots the band as surely as standing still
+   * misses it, so with only the fast ring to choose from *every* course scored
+   * as out of position and the planner had nothing it was allowed to pick.
    */
   #worthACloserLook(chosen: number, scored: number, reactWithinMs: number): boolean {
     if (this.#longestSafeWindow(scored) <= reactWithinMs) return true;
+    if ((this.#crowded || this.#tooFar) && !this.#yielding) return true;
     if (this.#field.flowCoherence < COHERENT_FLOW) return false;
     const along =
       (this.#dirX[chosen] ?? 0) * this.#field.flowX + (this.#dirY[chosen] ?? 0) * this.#field.flowY;
@@ -1309,7 +1467,7 @@ export class DodgeController {
 
     for (let c = 0; c < scored; c += 1) {
       if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
-      if ((this.#impactMs[c] ?? 0) < bars.impactMs) continue;
+      if ((this.#impactMs[c] ?? 0) <= bars.impactMs) continue;
       if ((this.#clearance[c] ?? -Infinity) < bars.roomTiles) continue;
       if (this.#standoffOf(c) >= bars.standoff) continue;
       const dirX = this.#dirX[c] ?? 0;
@@ -1324,19 +1482,20 @@ export class DodgeController {
       // the first candidate to clear the bar is taken whatever it scores.
       //
       // **Unless standing is not a request worth honouring**, which is two
-      // cases. One: something has walked on top of them, and staying is the
-      // position the terms below exist to leave. Two — and this is what looked
-      // like the dodge shuffling on the spot instead of getting out — nothing
-      // clears the window at all. Holding still then outranked *every* moving
-      // course before their room was so much as looked at, because it is index
-      // nought and wins the first key outright; so under saturated fire the
-      // planner stood there and took it while a course with most of a tile of
-      // clearance sat unexamined. A player who let go of the keys asked to stay
-      // where they are. They did not ask to be shot.
+      // cases. One: where they are standing is out of position — something has
+      // walked on top of them, or they have drifted out of range of everything —
+      // and staying there is exactly what the terms below exist to leave. Two —
+      // and this is what looked like the dodge shuffling on the spot instead of
+      // getting out — nothing clears the window at all. Holding still then
+      // outranked *every* moving course before their room was so much as looked
+      // at, because it is index nought and wins the first key outright; so under
+      // saturated fire the planner stood there and took it while a course with
+      // most of a tile of clearance sat unexamined. A player who let go of the
+      // keys asked to stay where they are. They did not ask to be shot.
       const dot = standing
         ? steering
           ? -Infinity
-          : this.#crowded || !keepPosition
+          : this.#crowded || this.#tooFar || this.#caught || !keepPosition
             ? 0
             : 1
         : steering
@@ -1407,6 +1566,7 @@ export class DodgeController {
     scored: number,
     situation: DodgeSituation,
     tracked: number,
+    blasts: number,
   ): DodgePlan {
     let chosen = candidate;
 
@@ -1447,6 +1607,7 @@ export class DodgeController {
       impactMs: this.#impactMs[chosen] ?? Infinity,
       clearanceTiles: this.#clearance[chosen] ?? -Infinity,
       trackedShots: tracked,
+      trackedBlasts: blasts,
     };
   }
 
@@ -1495,7 +1656,7 @@ export class DodgeController {
     );
   }
 
-  #nothing(verdict: DodgeVerdict, tracked: number): DodgePlan {
+  #nothing(verdict: DodgeVerdict, tracked: number, blasts: number): DodgePlan {
     this.#forget();
     return {
       verdict,
@@ -1507,6 +1668,7 @@ export class DodgeController {
       impactMs: Infinity,
       clearanceTiles: Infinity,
       trackedShots: tracked,
+      trackedBlasts: blasts,
     };
   }
 

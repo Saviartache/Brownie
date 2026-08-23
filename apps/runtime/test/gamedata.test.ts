@@ -181,6 +181,34 @@ describe('object catalog', () => {
     expect(catalog.displayName(0xffff)).toBeUndefined();
   });
 
+  // What the spacing band keeps its distance from. `<Size>` is a percentage of
+  // the standard one-tile sprite, and a body four times the width has to be
+  // kept four times as far off its middle to leave the same room.
+  it('reads how big one is, and refuses a decorative one', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x1" id="ordinary"><Enemy /></Object>
+          <Object type="0x2" id="boss"><Enemy /><Size>400</Size></Object>
+          <Object type="0x3" id="varied"><Enemy /><MinSize>80</MinSize><MaxSize>160</MaxSize></Object>
+          <Object type="0x4" id="backdrop"><Size>4000</Size></Object>
+          <Object type="0x5" id="nonsense"><Size>not a number</Size></Object>
+        </Objects>`),
+      ),
+    );
+
+    // No statement means the size the game draws it at.
+    expect(catalog.bodyTiles(0x1)).toBe(1);
+    expect(catalog.bodyTiles(0x2)).toBe(4);
+    // Randomised: the larger, because guessing small here means being stood on.
+    expect(catalog.bodyTiles(0x3)).toBeCloseTo(1.6, 6);
+    // A backdrop as a keep-away distance would push the planner off the screen.
+    expect(catalog.bodyTiles(0x4)).toBe(6);
+    expect(catalog.bodyTiles(0x5)).toBe(1);
+    // Told apart from a type nobody has heard of, so a caller can fall back.
+    expect(catalog.bodyTiles(0xffff)).toBeUndefined();
+  });
+
   it('skips a malformed entry instead of losing the catalog over it', async () => {
     const document = `<Objects>
       <Object id="no type"><Class>Player</Class></Object>

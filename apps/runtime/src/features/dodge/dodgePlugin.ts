@@ -69,11 +69,17 @@ import {
   type DodgeTuning,
 } from './dodgePresets.js';
 import { overDamagingGround } from './damagingGround.js';
-import { EnemyBodies, OUT_OF_RANGE_CAP_TILES } from './EnemyBodies.js';
+import {
+  ENEMY_CONTACT_HALF_TILES,
+  EnemyBodies,
+  OUT_OF_RANGE_CAP_TILES,
+  type BodySighting,
+} from './EnemyBodies.js';
 import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
 import { isBlastEffect } from '../../state/blasts/BlastStore.js';
 import { registerHitRedirect } from './hitRedirect.js';
 import { shotPaths, type ShotPath } from './ShotPaths.js';
+import { dodgeMarks, type DodgeMark } from './DodgeMarks.js';
 
 /**
  * How often a plan is made when nothing prompts one.
@@ -135,7 +141,7 @@ const MIN_RANGE_TILES = 1;
 const MAX_RANGE_TILES = 16;
 
 /**
- * How often the drawn shot paths are refreshed.
+ * How often the drawn picture is refreshed.
  *
  * Slower than a plan on purpose: this is a picture for a person, and a person
  * cannot tell twenty a second from fifty. Each one is a few hundred numbers
@@ -185,18 +191,20 @@ export interface DodgeOutput {
    */
   moveTo(x: number, y: number, speedTilesPerSecond: number, holdMs: number): void;
   /**
-   * Replaces the shot paths the module is drawing over the map.
+   * Replaces the picture the module is drawing over the map.
    *
-   * Wholesale, because a set of curves half-replaced is a picture of two
-   * different moments. Sent only while something is watching — see
-   * {@link DodgeView} — and the module lets go of them on its own if they stop
+   * Wholesale, and both halves together, because a set half-replaced is a
+   * picture of two different moments — and because the paths and the circles
+   * describe one plan and disagreeing about which plan would be worse than
+   * showing neither. Sent only while something is watching — see
+   * {@link DodgeView} — and the module lets go of it on its own if it stops
    * arriving, so switching the feature off needs no message.
    */
-  showShotPaths(paths: readonly ShotPath[]): void;
+  showPicture(paths: readonly ShotPath[], marks: readonly DodgeMark[]): void;
 }
 
 /**
- * Whether anybody is looking at the shot paths.
+ * Whether anybody is looking at the dodge picture.
  *
  * **The one switch in this feature that lives on the other side.** What it turns
  * on is drawing, which only the module can do, so the module owns the checkbox
@@ -277,6 +285,17 @@ export interface DodgeInputs {
    * has it, and again nothing on the wire tells them apart.
    */
   readonly isInvincible: (objectType: number) => boolean;
+  /**
+   * How wide one of these is, in tiles.
+   *
+   * **The distance that keeps a minion at arm's length puts you inside a boss**,
+   * and nothing on the wire says how big anything is — `<Size>` is in
+   * `objects.xml`, so the composition root hands it over exactly as it does the
+   * two above. `undefined` for a type the catalog cannot describe, and for every
+   * type while no data file has been read, in which case the ordinary body
+   * stands in and the band behaves as it did before it could tell.
+   */
+  readonly bodyTiles: (objectType: number) => number | undefined;
 }
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
@@ -347,21 +366,33 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         max: 1200,
         step: 20,
       });
-      // **The other half of the same question, and the half a clock cannot
-      // answer.** A shot crossing the room at sixteen tiles a second is inside
-      // a four-hundred-millisecond window from nearly seven tiles away — so a
-      // window measured only in time still hands the wheel over for fire that
-      // is plainly nowhere near, and still stops the player closing on whatever
-      // is doing the firing. Past this, a shot is predicted and ranked exactly
-      // as before; it simply cannot be the reason a dodge starts.
-      const reactWithinTiles = context.settings.range('reactWithinTiles', {
-        label: 'Only act on shots within (tiles)',
+      // **How close a shot gets before the character is moved, and the setting
+      // that decides how the whole feature reads.** Shots in this game live for
+      // a second or two, so a planner that acts on anything that will *reach*
+      // the player eventually is acting on nearly everything on the screen: the
+      // character shuffles from the moment a monster fires and is out of
+      // position by the time the shot is anywhere near. Live report: "we catch
+      // half the shots we should not, because you start dodging them at the
+      // spawn." Measured where the shot is right now, so it means what it says.
+      //
+      // **It never changes what is predicted.** Everything in the air is still
+      // swept and still ranks the courses, which is what stops a dodge of the
+      // near shot from walking into the far one. This decides only when to
+      // speak.
+      //
+      // Safe to keep tight because it is not the only trigger: a shot too fast,
+      // or a pattern too wide, to be answered from this distance raises its hand
+      // on the escape deadline instead — see `ThreatField.escapeTiles` — which
+      // asks whether there is still *time*, not how far away anything is. Blasts
+      // are not gated by it at all: an area effect is a place, not an approach.
+      const engageWithinTiles = context.settings.range('engageWithinTiles', {
+        label: 'Start dodging a shot within (tiles)',
         group: 'Reaction',
         advanced: true,
-        default: 6,
-        min: 2,
-        max: 16,
-        step: 0.5,
+        default: 2.5,
+        min: 1,
+        max: 8,
+        step: 0.25,
       });
       // **Coarser than a stepped planner's step, and that is the point.** The
       // sweep between two samples is exact, so this bounds how far a *curve*
@@ -529,13 +560,19 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // every escape needs, so by the time contact damage says so there is
       // nowhere left to go. Raised on its own to the distance at which the
       // bodies touch, so nought here still means "not inside it".
+      //
+      // Stated from the middle of an ordinary, one-tile monster; what actually
+      // holds is the gap it works out to, so a boss four tiles across is kept
+      // four times as far off its centre and exactly as far off its edge. See
+      // `EnemyBodies.standoffAt`.
+      //
       // Owned by the preset, unlike the rest of this group: how much room to
       // insist on is exactly the trade the preset is about.
       const keepAway = context.settings.range('keepAwayTiles', {
         label: 'Keep monsters at least (tiles)',
         group: 'Spacing',
         advanced: true,
-        default: 2,
+        default: 2.5,
         min: 0,
         max: 6,
         step: 0.25,
@@ -544,7 +581,9 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // objective; staying alive while shooting is. Every course that gives
       // ground survives a little longer than every course that does not, so a
       // planner with nothing to say about range walks itself out of the fight
-      // one safe step at a time.
+      // one safe step at a time — and, having drifted, has nothing to dodge and
+      // no reason to come back. Off, the planner will neither prefer to stay in
+      // range nor step back into it.
       const stayInRange = context.settings.boolean('stayInRange', {
         label: "Stay within your weapon's range",
         group: 'Spacing',
@@ -625,7 +664,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const readTuning = (): DodgeTuning => ({
         horizonMs: horizonMs.get(),
         reactWithinMs: reactWithinMs.get(),
-        reactWithinTiles: reactWithinTiles.get(),
+        engageWithinTiles: engageWithinTiles.get(),
         sampleStepMs: sampleStepMs.get(),
         headings: headings.get(),
         urgentWithinMs: urgentWithinMs.get(),
@@ -654,7 +693,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         try {
           horizonMs.set(values.horizonMs);
           reactWithinMs.set(values.reactWithinMs);
-          reactWithinTiles.set(values.reactWithinTiles);
+          engageWithinTiles.set(values.engageWithinTiles);
           sampleStepMs.set(values.sampleStepMs);
           headings.set(values.headings);
           urgentWithinMs.set(values.urgentWithinMs);
@@ -684,7 +723,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       for (const handle of [
         horizonMs,
         reactWithinMs,
-        reactWithinTiles,
+        engageWithinTiles,
         sampleStepMs,
         headings,
         urgentWithinMs,
@@ -716,12 +755,21 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       /** Wall time of the plan being made, for the tracker's own clock. */
       let sightedAtMs = 0;
       /**
-       * What one enemy is doing, or nothing when it is not a body to avoid.
+       * What is read back about one enemy, rewritten in place.
+       *
+       * The collection loop consumes it before asking again, so one record
+       * serves every body rather than one per body per plan — twenty of them,
+       * fifty times a second, for two numbers and a size.
+       */
+      const sighting = { velocityX: 0, velocityY: 0, halfTiles: ENEMY_CONTACT_HALF_TILES };
+      /**
+       * What one enemy is doing and how big it is, or nothing when it is not a
+       * body to avoid.
        *
        * Held once rather than built per plan: it closes over nothing that
        * changes, and the collection loop asks it of every enemy in reach.
        */
-      const bodyMotion = (enemy: EntityView): Motion | undefined => {
+      const bodySighting = (enemy: EntityView): BodySighting | undefined => {
         if (inputs.isObstacle(enemy.objectType) || inputs.isInvincible(enemy.objectType)) {
           return undefined;
         }
@@ -729,7 +777,14 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // Seen only once, which every monster is on the plan it comes into
         // reach. A body that is not known to be moving is treated as still,
         // which is what this did for all of them before it could tell.
-        return motion.motionAt(enemy.objectId, sightedAtMs) ?? STILL;
+        const moving: Motion = motion.motionAt(enemy.objectId, sightedAtMs) ?? STILL;
+        sighting.velocityX = moving.velocityX;
+        sighting.velocityY = moving.velocityY;
+        // Halved, because the catalog states a width and the band works in
+        // half-extents. The ordinary body for anything it cannot describe.
+        const width = inputs.bodyTiles(enemy.objectType);
+        sighting.halfTiles = width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2;
+        return sighting;
       };
 
       // The map, as the controller sees it. Built once and pointed at the
@@ -756,7 +811,6 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           mapView !== undefined &&
           overDamagingGround(mapView, x, y, hazardClearance),
         standoffAt: (x, y, aheadMs) => bodies.standoffAt(x, y, band, aheadMs),
-        closingOn: (x, y) => bodies.closingOn(x, y, band),
       };
 
       let lastPlanAtMs = 0;
@@ -814,15 +868,14 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        * The distances this character should be fighting between.
        *
        * The near edge is a setting; the far edge is the weapon's own reach, cut
-       * to leave a little in hand. **Never inverted**: a melee weapon reaches
-       * three and a half tiles, so a keep-away larger than the range would leave
-       * a band with nothing in it and every place equally wrong. Where they
-       * cross, the near edge wins — being able to dodge outranks being able to
-       * shoot, and the planner is a dodge.
+       * to leave a little in hand. Where the two cross — a melee weapon against
+       * something enormous — the near edge wins, but that is settled where the
+       * bodies are known rather than here: how near is too near depends on how
+       * big the thing is, and this end of it knows only the weapon. See
+       * `EnemyBodies.standoffAt`.
        */
       const updateBand = (session: SessionView): void => {
-        const keepAwayTiles = Math.max(0, keepAway.get());
-        band.keepAwayTiles = keepAwayTiles;
+        band.keepAwayTiles = Math.max(0, keepAway.get());
         if (!stayInRange.get()) {
           band.stayWithinTiles = Infinity;
           return;
@@ -832,7 +885,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           MAX_RANGE_TILES,
           Math.max(MIN_RANGE_TILES, reach ?? fallbackRangeTiles.get()),
         );
-        band.stayWithinTiles = Math.max(keepAwayTiles, (usable * rangePercent.get()) / 100);
+        band.stayWithinTiles = (usable * rangePercent.get()) / 100;
       };
 
       /**
@@ -931,7 +984,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const settings: DodgeSettings = {
           horizonMs: horizonMs.get(),
           reactWithinMs: reactWithinMs.get(),
-          reactWithinTiles: reactWithinTiles.get(),
+          engageWithinTiles: engageWithinTiles.get(),
           sampleStepMs: sampleStepMs.get(),
           headings: headings.get(),
           hitScale: hitScale.get(),
@@ -961,7 +1014,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             self.x,
             self.y,
             searchTiles + ENEMY_SEARCH_MARGIN_TILES,
-            bodyMotion,
+            bodySighting,
           );
         } else {
           bodies.clear();
@@ -1003,6 +1056,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           context.log.debug(
             plan.steer
               ? `dodge took over (${plan.verdict}): ${String(plan.trackedShots)} shots,` +
+                  ` ${String(plan.trackedBlasts)} blasts,` +
                   ` room ${plan.clearanceTiles.toFixed(2)}t,` +
                   ` clear for ${describe(plan.unsafeAtMs)},` +
                   ` hit in ${describe(plan.impactMs)}`
@@ -1088,20 +1142,36 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        * when the switch goes up, so what is on the screen goes with it rather
        * than waiting out its own freshness.
        */
-      const showPaths = (session: SessionView): void => {
+      const showPicture = (session: SessionView): void => {
         const now = Date.now();
         if (!inputs.view.wanted()) {
           if (!showing) return;
           showing = false;
-          inputs.output.showShotPaths([]);
+          inputs.output.showPicture([], []);
           return;
         }
         if (now - lastShownAtMs < SHOW_INTERVAL_MS) return;
         lastShownAtMs = now;
         showing = true;
         const world = session.world;
-        inputs.output.showShotPaths(
+        const self = session.self;
+        // **The state the last plan actually used, not a second guess at it.**
+        // `bodies` and `band` are whatever the planner filled in a moment ago —
+        // so a body missing from the picture is a body missing from the
+        // decision, which is the one thing a debug view has to be able to say.
+        // Empty when the spacing group is switched off, which is honest: it is
+        // then not minding the monsters at all.
+        inputs.output.showPicture(
           shotPaths(world.gameTimeMs, world.projectiles(), MAX_DRAWN_SHOTS),
+          dodgeMarks({
+            selfX: self.x,
+            selfY: self.y,
+            gameTimeMs: world.gameTimeMs,
+            engageTiles: engageWithinTiles.get(),
+            band: mindMonsters.get() ? band : undefined,
+            bodies,
+            blasts: avoidBlasts.get() ? liveBlasts(world) : NO_BLASTS,
+          }),
         );
       };
 
@@ -1109,7 +1179,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const session = context.sessions.current();
         if (session === undefined) return;
         planNow(session);
-        showPaths(session);
+        showPicture(session);
       }, PLAN_INTERVAL_MS);
 
       // The one packet that changes the answer by arriving. Everything else a

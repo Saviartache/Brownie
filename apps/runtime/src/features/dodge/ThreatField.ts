@@ -80,29 +80,34 @@ export interface ThreatFieldOptions {
    */
   readonly reachTiles: number;
   /**
-   * How near a shot has to come before it may take the wheel, in tiles.
+   * How near a shot has to actually be before it may take the wheel, in tiles.
    *
-   * **The distance half of "is this trouble now", and the time half is not
-   * enough on its own.** A shot crossing the room at sixteen tiles a second is
-   * inside a four-hundred-millisecond window from nearly seven tiles away — so a
-   * planner bounded only by time still reacts to fire the player can see is
-   * nowhere near them, and still cannot walk up to the thing that fired it.
+   * **The ring, and it is measured where the shot is right now.** A dodge that
+   * starts when a bullet is fired across the room is a dodge that spends the
+   * whole fight walking backwards: most shots in this game live for a second or
+   * two, so "it will reach me eventually" describes nearly everything on the
+   * screen. Live report: "we catch half the shots we should not, because you
+   * start dodging them at the spawn." Inside the ring the planner answers;
+   * outside it, the player keeps the wheel.
    *
-   * Shots further off than this are predicted and swept exactly as before; they
-   * simply do not set {@link Sweep.unsafeAtMs}. They still shape *which* course
-   * is chosen once something nearby forces a choice, which is the point of
-   * keeping them: reacting late is fine, walking into the wave behind the one
-   * being dodged is not.
+   * **It decides when to move and never what to think.** Shots outside it are
+   * predicted, swept and ranked exactly as those inside — they set
+   * {@link Sweep.impactMs} and both clearances — so the course chosen still
+   * accounts for the wave behind the one being dodged. The only thing this gates
+   * is {@link Sweep.unsafeAtMs}, which is the number that decides whether to
+   * speak at all.
    *
-   * **Measured over the reaction window, not at the instant of planning.** The
-   * distance a shot is at right now says very little: a bullet seven tiles out
-   * doing twenty tiles a second is on the player in a third of a second, and
-   * reading it as "far" left the one class of shot that is genuinely hard to
-   * dodge unable to raise its hand at all — the planner then only ever saw it
-   * through {@link Sweep.impactMs}, by which time the answer was to be hit. What
-   * decides is how near it gets while this decision is still the current one.
+   * **And it is safe to make it small only because it is not the only trigger.**
+   * A ring alone is a bet that the shot is slow: at two tiles a bullet doing
+   * twenty tiles a second arrives in eighty milliseconds and there is nothing to
+   * be done, which is the failure an earlier version answered by measuring the
+   * ring over the reaction window instead — and that quietly turned every ring
+   * back into "about five tiles". What actually answers it is the escape
+   * deadline below, which is a statement about whether there is still *time* and
+   * needs no distance at all. So the ring can be as tight as the player likes,
+   * and physics still overrules it for the shots that genuinely cannot wait.
    */
-  readonly reactTiles: number;
+  readonly engageTiles: number;
   /**
    * How long that window is, in milliseconds.
    *
@@ -151,7 +156,7 @@ export interface Sweep {
   urgentClearanceTiles: number;
   /**
    * When the walk first has less than the caller's margin of room, counting
-   * only the shots that are already near — see {@link ThreatFieldOptions.reactTiles}.
+   * only the shots already inside the ring — see {@link ThreatFieldOptions.engageTiles}.
    *
    * **This is the number that says whether to act, and it is not the same
    * question as how the walk ends.** A shot eight tiles away with a long life
@@ -161,6 +166,16 @@ export interface Sweep {
    * towards a monster. When the trouble starts is what decides whether it is
    * this moment's problem; the other two numbers decide which way to go once it
    * is.
+   *
+   * **And it is a deadline, not an arrival.** Getting out of the way of one
+   * bullet takes a step, so for one bullet the two are nearly the same moment
+   * and this reads as "when does it get here". Getting out of the way of a
+   * pattern six tiles across takes a second of running, and a number that only
+   * said when the first shot arrived left the planner with nothing to say until
+   * there was no longer time to do anything — which is exactly what the player
+   * described as standing still in front of a wall. See
+   * {@link ThreatField.escapeTiles}; `Blasts.sweep` reached the same conclusion
+   * first, for the same reason, about a disc too wide to step out of.
    */
   unsafeAtMs: number;
 }
@@ -209,6 +224,25 @@ const CLEARANCE_INTEREST_TILES = 1.0;
  */
 const UNMODELLED_DRIFT_FACTOR = 3;
 
+/**
+ * How much the shots must agree on a direction before "across" means anything.
+ *
+ * In a crossfire there is no across, so neither the width of the pattern nor a
+ * rule about not retreating describes anything real, and both switch themselves
+ * off here rather than needing a special case apiece.
+ */
+export const COHERENT_FLOW = 0.35;
+
+/**
+ * How much clear of the fire counts as out of it, in tiles.
+ *
+ * Only ever added to {@link ThreatField.escapeTiles}, which sizes a deadline
+ * rather than a position: leaving by a hair is leaving by less than the
+ * prediction can promise, so the run has to be worth starting for a margin
+ * rather than for the last millimetre.
+ */
+const ESCAPE_MARGIN_TILES = 0.25;
+
 export class ThreatField {
   #sampleX = new Float64Array(0);
   #sampleY = new Float64Array(0);
@@ -235,6 +269,7 @@ export class ThreatField {
   #flowX = 0;
   #flowY = 0;
   #flowCoherence = 0;
+  #escapeTiles = 0;
 
   /** How many shots could reach the player, and are therefore swept against. */
   get tracked(): number {
@@ -278,6 +313,34 @@ export class ThreatField {
   }
 
   /**
+   * How far across the fire the player has to get to be out of it, in tiles.
+   *
+   * **The width of the pattern, and the number that tells a bullet from a
+   * wall.** A shot is answered by a step, so this comes out at about one tile
+   * for one of them and changes nothing. A wave twenty shots wide is answered by
+   * a run, and the run has to start long before the first shot is close enough
+   * to be this moment's problem — which is the whole of the failure the planner
+   * had in front of wide attacks. See {@link Sweep.unsafeAtMs}, which is where
+   * it becomes a deadline.
+   *
+   * Measured across the {@link flowX} axis, from the near shots only — far fire
+   * shapes which way to go and never how urgent it is — and taking the *nearer*
+   * of the two edges, because leaving by whichever side is closer is leaving.
+   * Nought when the shots do not agree on a direction at all: a crossfire has no
+   * across, and claiming a width for one would be claiming to know something
+   * about a pattern that has no shape.
+   *
+   * **Gaps are deliberately not modelled.** A pattern with a hole in it is
+   * narrower than this says, so the deadline it produces is early — and early is
+   * the safe direction, because all it decides is when the planner starts
+   * looking. Which way to actually go is the candidate sweep's answer, and that
+   * one does see the hole.
+   */
+  get escapeTiles(): number {
+    return this.#escapeTiles;
+  }
+
+  /**
    * Predicts everything in flight, keeping what could matter.
    *
    * Allocates nothing after the first few plans: the buffers grow to the busiest
@@ -310,7 +373,7 @@ export class ThreatField {
     // Everywhere the player could stand within the horizon, as a square. A shot
     // whose own path never enters it cannot be dodged into or out of.
     const reach = Math.max(0, options.reachTiles);
-    const reactSquared = Math.max(0, options.reactTiles) ** 2;
+    const engageSquared = Math.max(0, options.engageTiles) ** 2;
     const skipBeyond =
       reach +
       (IMPLAUSIBLE_SPEED_TILES_PER_SECOND * horizonMs) / 1000 +
@@ -346,10 +409,10 @@ export class ThreatField {
       let maxY = start.y;
       this.#sampleX[base] = start.x;
       this.#sampleY[base] = start.y;
-      // The closest this shot comes to where the player is standing, over the
-      // part of its path that is still this decision's problem. See
-      // {@link ThreatFieldOptions.reactTiles}.
-      let nearestSquared = (start.x - selfX) ** 2 + (start.y - selfY) ** 2;
+      // Where this shot is *now*, which is the whole of the ring test. See
+      // {@link ThreatFieldOptions.engageTiles} for why it is not the closest it
+      // gets over the window, which is what it used to be.
+      const hereSquared = (start.x - selfX) ** 2 + (start.y - selfY) ** 2;
 
       let taken = 1;
       for (let k = 1; k < this.#samples; k += 1) {
@@ -364,10 +427,6 @@ export class ThreatField {
         else if (at.x > maxX) maxX = at.x;
         if (at.y < minY) minY = at.y;
         else if (at.y > maxY) maxY = at.y;
-        if (k * stepMs <= this.#reactWithinMs) {
-          const squared = (at.x - selfX) ** 2 + (at.y - selfY) ** 2;
-          if (squared < nearestSquared) nearestSquared = squared;
-        }
         taken += 1;
       }
 
@@ -387,7 +446,7 @@ export class ThreatField {
       this.#sampleCount[slot] = taken;
       this.#half[slot] = half;
       this.#drifts[slot] = drift;
-      this.#near[slot] = nearestSquared <= reactSquared ? 1 : 0;
+      this.#near[slot] = hereSquared <= engageSquared ? 1 : 0;
       this.#minX[slot] = minX - widest;
       this.#minY[slot] = minY - widest;
       this.#maxX[slot] = maxX + widest;
@@ -420,6 +479,48 @@ export class ThreatField {
       this.#flowY = 0;
       this.#flowCoherence = 0;
     }
+    this.#measureWidth(selfX, selfY);
+  }
+
+  /**
+   * How far across the fire is out of it. See {@link escapeTiles}.
+   *
+   * A second pass over the kept shots rather than a term inside the first,
+   * because the axis it measures across is the flow — which is not known until
+   * every shot has been looked at.
+   */
+  #measureWidth(selfX: number, selfY: number): void {
+    this.#escapeTiles = 0;
+    if (this.#flowCoherence < COHERENT_FLOW) return;
+
+    // Across the fire, which is the flow turned a right angle. Which of the two
+    // right angles does not matter: both sides are measured.
+    const acrossX = -this.#flowY;
+    const acrossY = this.#flowX;
+    // How far the pattern reaches to either side of where the player stands.
+    // Nought rather than negative, so a wave entirely off to one side leaves the
+    // other side needing no travel at all — which it does not.
+    //
+    // **Every shot kept, not only the ones inside the ring.** What makes a wave
+    // wide is precisely the shots that are nowhere near the player: they are
+    // what is in the way of leaving. The ring says when an *arriving* shot is
+    // worth answering; this says how long leaving would take, and they are
+    // different questions about different shots. What keeps it honest is the
+    // coherence gate above — a room full of unrelated fire has no width because
+    // it has no direction.
+    let left = 0;
+    let right = 0;
+    for (let i = 0; i < this.#tracked; i += 1) {
+      const base = i * this.#samples;
+      const offset =
+        ((this.#sampleX[base] ?? 0) - selfX) * acrossX +
+        ((this.#sampleY[base] ?? 0) - selfY) * acrossY;
+      const half = this.#half[i] ?? 0;
+      if (offset + half > right) right = offset + half;
+      if (half - offset > left) left = half - offset;
+    }
+    const nearer = Math.min(left, right);
+    this.#escapeTiles = nearer > 0 ? nearer + ESCAPE_MARGIN_TILES : 0;
   }
 
   /**
@@ -448,6 +549,10 @@ export class ThreatField {
    * @param safeMarginTiles How much room counts as comfortable. Only decides
    *   {@link Sweep.unsafeAtMs}, which is what tells "this is a problem now" from
    *   "this is a problem eventually".
+   * @param walkTilesPerMs What the character can do flat out, which is what the
+   *   escape deadline is measured against — not `tilesPerMs`, which is this
+   *   particular course's speed and is nought for the one that stands still.
+   *   The same parameter, for the same reason, as `Blasts.sweep`'s.
    * @param out Filled in place, so a plan's hundred sweeps allocate nothing.
    */
   sweep(
@@ -456,6 +561,7 @@ export class ThreatField {
     dirX: number,
     dirY: number,
     tilesPerMs: number,
+    walkTilesPerMs: number,
     leadMs: number,
     untilMs: number,
     maxTravelTiles: number,
@@ -581,6 +687,35 @@ export class ThreatField {
           from = to;
         }
       }
+    }
+
+    // **The last responsible moment, which is the other half of the decision to
+    // move and the half that owes nothing to distance.** The ring above says a
+    // shot is worth answering once it is actually close; this says a shot has to
+    // be answered *now* whatever the ring thinks, because waiting any longer
+    // makes the escape impossible. One bullet needs a body's width of travel and
+    // therefore raises its hand about two tiles out; a bullet at twenty tiles a
+    // second needs the same travel and therefore raises its hand five tiles out;
+    // a wall six tiles deep raises its hand before it is halfway across the room.
+    // All three fall out of the same line, which is why there is no second
+    // setting for the fast ones.
+    //
+    // Every shot counts here, inside the ring or not: the ring decides which
+    // *arrival* is worth answering, and this decides whether there is time left
+    // at all. `Blasts.sweep` reached the same arithmetic first, about a disc too
+    // wide to step out of.
+    //
+    // **Offset by the caller's own window**, so that the release test — which
+    // grants `reactWithinMs` before it speaks — reads exactly "is there still
+    // time to walk clear" rather than granting that allowance a second time.
+    //
+    // Never earlier than now and never later than the hit itself: a run that
+    // should already have started is a reason to start it, not a reason to
+    // report a moment in the past.
+    if (this.#escapeTiles > 0 && out.impactMs < Infinity && walkTilesPerMs > 0) {
+      const needed = this.#escapeTiles / walkTilesPerMs + leadMs;
+      const mustAct = Math.max(0, out.impactMs - needed + this.#reactWithinMs);
+      if (mustAct < out.unsafeAtMs) out.unsafeAtMs = mustAct;
     }
   }
 

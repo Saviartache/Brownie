@@ -22,6 +22,13 @@
  * are applied by writing them into the settings rather than by standing in
  * front of them: the advanced sliders then show what is actually in use, and
  * moving one is what turns the label into Custom. See `dodgePlugin`.
+ *
+ * **What a preset is mostly about is the shots, not the monsters.** How close a
+ * bullet gets before the planner moves, and how much room it insists on when it
+ * looks for a way past one, are what a person feels as "twitchy" or "calm" —
+ * they change the answer fifty times a second. How near a monster may stand is a
+ * safety floor rather than a style: nothing should be allowed inside two tiles
+ * whatever the preset says, and the presets differ above that by a little.
  */
 
 /** The numbers a preset assigns. Every one is also a setting of its own. */
@@ -30,8 +37,8 @@ export interface DodgeTuning {
   readonly horizonMs: number;
   /** How soon trouble has to be to be this moment's problem. */
   readonly reactWithinMs: number;
-  /** And how near, which is the half a clock cannot answer. */
-  readonly reactWithinTiles: number;
+  /** And how near a shot has to actually be. The main lever on how it feels. */
+  readonly engageWithinTiles: number;
   /** How finely shots are predicted. */
   readonly sampleStepMs: number;
   /** How many directions are considered. */
@@ -68,7 +75,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
   relaxed: {
     horizonMs: 900,
     reactWithinMs: 300,
-    reactWithinTiles: 4.5,
+    engageWithinTiles: 2,
     sampleStepMs: 70,
     headings: 12,
     urgentWithinMs: 130,
@@ -76,12 +83,12 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.05,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.05,
-    keepAwayTiles: 1.5,
+    keepAwayTiles: 2,
   },
   balanced: {
     horizonMs: 1000,
     reactWithinMs: 420,
-    reactWithinTiles: 6,
+    engageWithinTiles: 2.5,
     sampleStepMs: 60,
     headings: 16,
     urgentWithinMs: 160,
@@ -89,12 +96,12 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.1,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.08,
-    keepAwayTiles: 2,
+    keepAwayTiles: 2.5,
   },
   cautious: {
     horizonMs: 1200,
     reactWithinMs: 560,
-    reactWithinTiles: 8,
+    engageWithinTiles: 3.5,
     sampleStepMs: 50,
     headings: 20,
     urgentWithinMs: 200,
@@ -102,7 +109,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.2,
     driftTilesPerSecond: 0.25,
     safeClearanceTiles: 0.14,
-    keepAwayTiles: 2.5,
+    keepAwayTiles: 3,
   },
 };
 

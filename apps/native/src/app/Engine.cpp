@@ -57,7 +57,7 @@ constexpr std::string_view kCursorWalkAction = "unstick";
 /// `Engine::ObserveSteer`.
 constexpr std::string_view kSteerAction = "steer";
 
-/// Whether the shot paths are wanted. See `Engine::PublishDodgeView`.
+/// Whether the dodge picture is wanted. See `Engine::PublishDodgeView`.
 constexpr std::string_view kDodgeViewAction = "dodge-view";
 
 /// A unit vector as thousandths, which fits either component in four digits and
@@ -306,7 +306,7 @@ void Engine::AcceptRecord(std::string_view record) {
     // Before the plugin mirror, and only because it is cheaper to ask: a set of
     // paths arrives fifty records at a time while the switch is on, and the
     // mirror would look at every one of them.
-    if (trails_.Apply(record, ::GetTickCount64())) {
+    if (picture_.Apply(record, ::GetTickCount64())) {
         return;
     }
     if (controls_.Apply(record)) {
@@ -441,7 +441,7 @@ void Engine::Turn() {
         }
         // What was drawn belonged to a runtime that is no longer there, and the
         // next one has not been told the box is ticked.
-        trails_.Reset();
+        picture_.Reset();
         dodge_view_stated_ = false;
 
         // Read on every attempt, never cached. The runtime mints a fresh secret
@@ -464,7 +464,7 @@ void Engine::Turn() {
         }
     }
 
-    // Whether the shot paths are wanted, said on the turn it changes and again
+    // Whether the dodge picture is wanted, said on the turn it changes and again
     // whenever a new runtime has to be told.
     PublishDodgeView();
 
@@ -852,16 +852,17 @@ void Engine::DrawMovement(std::uint64_t now_ms, const std::optional<FrameScreen>
     overlay::DrawMovement(markers);
 }
 
-int Engine::DrawShotTrails(std::uint64_t now_ms, const std::optional<FrameScreen>& screen) {
-    if (!screen.has_value() || !trails_.fresh(now_ms)) {
+int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScreen>& screen) {
+    if (!screen.has_value() || !picture_.fresh(now_ms)) {
         return 0;
     }
 
     trail_points_.clear();
     trail_lengths_.clear();
     trail_lives_.clear();
+    ring_marks_.clear();
 
-    for (const overlay::ShotTrail& trail : trails_.trails()) {
+    for (const overlay::ShotTrail& trail : picture_.trails()) {
         for (const overlay::TilePoint& point : trail.points) {
             overlay::ScreenPoint on_screen;
             game::ToScreen(screen->basis, game::WorldPoint{point.x, point.y}, on_screen.x,
@@ -871,6 +872,31 @@ int Engine::DrawShotTrails(std::uint64_t now_ms, const std::optional<FrameScreen
         trail_lengths_.push_back(static_cast<int>(trail.points.size()));
         trail_lives_.push_back(trail.life);
     }
+
+    // **A radius in tiles is a different number of pixels at every zoom**, and
+    // the camera is the only thing that knows which — so the conversion happens
+    // here, where the basis is, and the overlay is handed pixels like everything
+    // else. Averaged over the two axes because a circle in the world stays a
+    // circle on the screen only while the scale is even, and one that is not is
+    // better drawn a hair wrong than not at all.
+    const game::ScreenBasis& basis = screen->basis;
+    const float east = std::hypot(basis.east_x, basis.east_y);
+    const float south = std::hypot(basis.south_x, basis.south_y);
+    const float pixels_per_tile = (east + south) * 0.5F;
+
+    for (const overlay::DodgeMark& mark : picture_.marks()) {
+        overlay::RingMark ring;
+        ring.role = static_cast<overlay::RingRole>(mark.kind);
+        game::ToScreen(basis, game::WorldPoint{mark.centre.x, mark.centre.y}, ring.centre.x,
+                       ring.centre.y);
+        ring.radius = mark.radius_tiles * pixels_per_tile;
+        ring.ahead = mark.ahead;
+        ring_marks_.push_back(ring);
+    }
+
+    // The circles under the paths: the paths are what moves, and a line lost
+    // behind a ring is a line nobody can follow.
+    overlay::DrawDodgeRings(ring_marks_.data(), static_cast<int>(ring_marks_.size()));
 
     const int count = static_cast<int>(trail_lengths_.size());
     overlay::TrailMarkers markers;
@@ -1217,7 +1243,7 @@ void Engine::DrawFrame() {
     // The shots first, so what the module is doing to the character is drawn
     // over them rather than under fifty lines. Zero while the switch is off,
     // which is also what the panel's line reads.
-    frame_model_.trails_drawn = frame_ui_.dodge_markers ? DrawShotTrails(now, screen) : 0;
+    frame_model_.trails_drawn = frame_ui_.dodge_markers ? DrawDodgePicture(now, screen) : 0;
     if (frame_ui_.movement_markers) {
         DrawMovement(now, screen, pointed);
     }

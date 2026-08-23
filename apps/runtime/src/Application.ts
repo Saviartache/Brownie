@@ -162,7 +162,7 @@ export class Application {
   /// when *not* to act — see `SteerIntent.ts`.
   readonly #steer = new SteerTracker();
 
-  /// Whether the module is drawing the shot paths, and therefore wants them.
+  /// Whether the module is drawing the dodge picture, and therefore wants it.
   ///
   /// **The only switch that travels this way**, and it does because what it
   /// turns on is drawing: the module owns the checkbox because the module owns
@@ -282,9 +282,10 @@ export class Application {
         if (first === '1') this.#steer.observe(Number(second) / 1000, Number(third) / 1000);
         else this.#steer.release();
       }
-      // The module asking to be sent the shot paths, or to stop being sent
-      // them. Anything that is not "1" is off, which is the safe reading of a
-      // field that did not arrive as either.
+      // The module asking to be sent the dodge picture — the shot paths and
+      // the distances alike — or to stop being sent it. Anything that is not
+      // "1" is off, which is the safe reading of a field that did not arrive as
+      // either.
       else if (kind === 'dodge-view') this.#dodgeView = first === '1';
     });
 
@@ -317,6 +318,7 @@ export class Application {
           isPet: (type) => this.#objects.isPet(type),
           isInvincible: (type) => this.#objects.isInvincible(type),
           occupies: (type) => this.#objects.occupies(type),
+          bodyTiles: (type) => this.#objects.bodyTiles(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
           item: (type) => this.#objects.item(type),
@@ -455,15 +457,30 @@ export class Application {
           },
           // Bracketed, so a set half-received is never drawn: the module stages
           // what arrives between the two and commits on the closing record —
-          // the same shape the plugin sync uses, and for the same reason.
-          showShotPaths: (paths) => {
-            this.#native.publishRecord('trail-begin');
+          // the same shape the plugin sync uses, and for the same reason. Both
+          // halves of the picture go inside one bracket because they describe
+          // one plan, and a frame showing this plan's shots against the last
+          // plan's circles would be a picture of a moment that never happened.
+          showPicture: (paths, marks) => {
+            this.#native.publishRecord('dodge-begin');
             for (const path of paths) {
               const fields: (string | number)[] = ['trail', path.lifePermille];
               for (const coordinate of path.points) fields.push(Math.round(coordinate * 100));
               this.#native.publishRecord(fields.join('|'));
             }
-            this.#native.publishRecord('trail-end');
+            for (const mark of marks) {
+              this.#native.publishRecord(
+                [
+                  'mark',
+                  mark.kind,
+                  Math.round(mark.x * 100),
+                  Math.round(mark.y * 100),
+                  Math.round(mark.radiusTiles * 100),
+                  mark.permille,
+                ].join('|'),
+              );
+            }
+            this.#native.publishRecord('dodge-end');
           },
         },
         // The manual override, which comes from the module whole: the chord is
@@ -497,6 +514,10 @@ export class Application {
         // room rather than the fight.
         isObstacle: (objectType) => this.#objects.occupies(objectType),
         isInvincible: (objectType) => this.#objects.isInvincible(objectType),
+        // And the third thing the band cannot work without: how big the monster
+        // actually is. The distance that keeps an ordinary one at arm's length
+        // leaves the player standing well inside a boss four times the width.
+        bodyTiles: (objectType) => this.#objects.bodyTiles(objectType),
       }),
     );
 

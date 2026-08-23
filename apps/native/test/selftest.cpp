@@ -42,7 +42,7 @@
 #include "overlay/ActionQueue.h"
 #include "overlay/ControlRecord.h"
 #include "overlay/InputQueue.h"
-#include "overlay/ShotTrails.h"
+#include "overlay/DodgePicture.h"
 #include "overlay/WorldRecord.h"
 
 namespace {
@@ -489,45 +489,64 @@ void TextRecordsCarryTheWholeMessage() {
     Check(text.text == "a|b|c", "and a refusal changes nothing");
 }
 
-/// A set of shot paths is drawn whole or not at all, and lets go on its own.
+/// The dodge picture is drawn whole or not at all, and lets go on its own.
 ///
 /// Both halves matter and for the same reason: a picture of two moments is a
 /// picture of neither, and a picture of a fight that ended is worse than none.
-void ShotTrailsCommitWholeSetsAndExpire() {
-    brownie::overlay::ShotTrails trails;
-    Check(trails.trails().empty(), "a fresh set is empty");
-    Check(!trails.fresh(1000), "and is not worth drawing");
+/// Paths and circles share one bracket because they describe one plan.
+void DodgePictureCommitsWholeSetsAndExpires() {
+    brownie::overlay::DodgePicture picture;
+    Check(picture.trails().empty(), "a fresh picture has no paths");
+    Check(picture.marks().empty(), "and no circles");
+    Check(!picture.fresh(1000), "and is not worth drawing");
 
-    Check(trails.Apply("trail-begin", 1000), "a set opens");
-    Check(trails.Apply("trail|1000|1000|2000|1100|2000", 1000), "a path is taken");
-    Check(trails.trails().empty(), "and is not visible until the set closes");
-    Check(trails.Apply("trail-end", 1000), "the set closes");
-    Check(trails.trails().size() == 1, "and commits together");
-    Check(trails.fresh(1000), "and is worth drawing");
+    Check(picture.Apply("dodge-begin", 1000), "a set opens");
+    Check(picture.Apply("trail|1000|1000|2000|1100|2000", 1000), "a path is taken");
+    Check(picture.Apply("mark|3|1000|2000|250|1000", 1000), "so is a circle");
+    Check(picture.trails().empty(), "and neither is visible until the set closes");
+    Check(picture.marks().empty(), "on either half");
+    Check(picture.Apply("dodge-end", 1000), "the set closes");
+    Check(picture.trails().size() == 1, "and commits together");
+    Check(picture.marks().size() == 1, "both halves of it");
+    Check(picture.fresh(1000), "and is worth drawing");
 
-    const brownie::overlay::ShotTrail& trail = trails.trails()[0];
+    const brownie::overlay::ShotTrail& trail = picture.trails()[0];
     Check(trail.points.size() == 2, "with both of its points");
     Check(std::fabs(trail.points[0].x - 10.0F) < 0.001F, "in tiles rather than hundredths");
     Check(std::fabs(trail.points[1].y - 20.0F) < 0.001F, "on both axes");
     Check(std::fabs(trail.life - 1.0F) < 0.001F, "and its life as a fraction");
 
+    const brownie::overlay::DodgeMark& mark = picture.marks()[0];
+    Check(mark.kind == brownie::overlay::MarkKind::KeepAway, "and the circle knows what it is");
+    Check(std::fabs(mark.centre.x - 10.0F) < 0.001F, "where it is, in tiles");
+    Check(std::fabs(mark.radius_tiles - 2.5F) < 0.001F, "and how wide");
+    Check(std::fabs(mark.ahead - 1.0F) < 0.001F, "with nothing to wait for");
+
     // The rule every reading on this link follows: silence means stop.
-    Check(!trails.fresh(1000 + brownie::overlay::kTrailFreshMs + 1), "an old set goes stale");
+    Check(!picture.fresh(1000 + brownie::overlay::kPictureFreshMs + 1), "an old set goes stale");
 
     // A path with one end is not a path, and a record outside a set is not one
-    // either — both are dropped rather than drawn.
-    Check(trails.Apply("trail-begin", 2000), "another set opens");
-    Check(trails.Apply("trail|500|100|100", 2000), "a one-point path is taken");
-    Check(trails.Apply("trail|500|100|100|abc|200", 2000), "so is one that does not parse");
-    Check(trails.Apply("trail-end", 2000), "and it closes");
-    Check(trails.trails().empty(), "with neither of them in it");
+    // either — both are dropped rather than drawn. A circle whose kind this
+    // build does not know is dropped for the same reason: drawing it as
+    // whichever shape came first would be inventing information.
+    Check(picture.Apply("dodge-begin", 2000), "another set opens");
+    Check(picture.Apply("trail|500|100|100", 2000), "a one-point path is taken");
+    Check(picture.Apply("trail|500|100|100|abc|200", 2000), "so is one that does not parse");
+    Check(picture.Apply("mark|99|100|100|100|1000", 2000), "so is a circle of no known kind");
+    Check(picture.Apply("mark|1|100|100", 2000), "and one missing its fields");
+    Check(picture.Apply("mark|1|100|100|-50|1000", 2000), "and one of negative width");
+    Check(picture.Apply("dodge-end", 2000), "and it closes");
+    Check(picture.trails().empty(), "with none of them in it");
+    Check(picture.marks().empty(), "on either half");
 
-    Check(trails.Apply("trail|1000|0|0|100|100", 3000), "a path outside a set is ours");
-    Check(trails.trails().empty(), "and is not drawn");
-    Check(!trails.Apply("world|1|2", 3000), "and a world record is somebody else's");
+    Check(picture.Apply("trail|1000|0|0|100|100", 3000), "a path outside a set is ours");
+    Check(picture.Apply("mark|1|0|0|100|1000", 3000), "and so is a circle");
+    Check(picture.trails().empty(), "and neither is drawn");
+    Check(picture.marks().empty(), "on either half");
+    Check(!picture.Apply("world|1|2", 3000), "and a world record is somebody else's");
 
-    trails.Reset();
-    Check(!trails.fresh(3000), "a reset drops what was committed");
+    picture.Reset();
+    Check(!picture.fresh(3000), "a reset drops what was committed");
 }
 
 /// Player noclip refuses what it cannot detour, and either detour stands alone.
@@ -1911,7 +1930,7 @@ int main() {
     AFailedSetupIsTheOnlyPluginPutOutOfReach();
     AControlRecordThatSaysTooLittleIsRefused();
     SelectOptionsAndVisibilityAreRead();
-    ShotTrailsCommitWholeSetsAndExpire();
+    DodgePictureCommitsWholeSetsAndExpires();
     ActionQueueHandsInteractionsOver();
     ActionQueueKeepsTheNewestWhenFull();
     InputQueueHandsMessagesOver();

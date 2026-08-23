@@ -362,13 +362,13 @@ struct UiState {
     /// down. See `WorldMarkers.h`.
     bool movement_markers = false;
     bool aim_markers = false;
-    /// Whether to draw every shot's remaining path over the map, coloured by
-    /// how much life it has left.
+    /// Whether to draw what the dodge planner is thinking over the map: every
+    /// shot's remaining path, and the distances it is reasoning about.
     ///
     /// **The one switch in this list the runtime hears about**, and it has to:
     /// what it turns on is a prediction only the runtime can make, so ticking
     /// the box asks for it and unticking it stops the traffic. See
-    /// `Engine::PublishDodgeView` and `ShotTrails.h`.
+    /// `Engine::PublishDodgeView` and `DodgePicture.h`.
     bool dodge_markers = false;
 };
 

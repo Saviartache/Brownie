@@ -21,6 +21,16 @@ constexpr float kStroke = 2.0F;
 /// where every shot is as loud as the character is a picture of nothing.
 constexpr float kShotRadius = 3.0F;
 constexpr float kTrailStroke = 1.5F;
+/// The planner's own circles, which are drawn at whatever size the world says.
+///
+/// Thinner than the marks above: several of them overlap around every monster,
+/// and the picture is meant to be read *through*. Below the minimum a circle is
+/// a dot that says nothing, and ImGui draws a degenerate one as a smear.
+constexpr float kRingStroke = 1.0F;
+constexpr float kMinRingRadius = 2.0F;
+/// How solid the two circles that are filled rather than outlined are.
+constexpr float kBodyFill = 0.18F;
+constexpr float kBlastFill = 0.22F;
 
 /// One theme colour, held at full opacity.
 ///
@@ -31,6 +41,13 @@ constexpr float kTrailStroke = 1.5F;
     ImVec4 colour = ImGui::GetStyleColorVec4(which);
     colour.w = 1.0F;
     return ImGui::ColorConvertFloat4ToU32(colour);
+}
+
+/// The same colour, at a stated opacity. For the circles that are filled.
+[[nodiscard]] ImU32 Faded(ImU32 colour, float alpha) {
+    ImVec4 parts = ImGui::ColorConvertU32ToFloat4(colour);
+    parts.w = alpha;
+    return ImGui::ColorConvertFloat4ToU32(parts);
 }
 
 [[nodiscard]] ImVec2 At(ScreenPoint point) {
@@ -148,6 +165,65 @@ void DrawAim(const AimMarkers& markers) {
         list->AddLine(At(markers.player), At(markers.target), aim, kStroke);
     }
     list->AddCircle(At(markers.target), kAimRadius, aim, 0, kStroke);
+}
+
+void DrawDodgeRings(const RingMark* marks, int count) {
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    if (list == nullptr || marks == nullptr) {
+        return;
+    }
+
+    // The three the theme keeps for data rather than for chrome. Which is which
+    // matters less than that they differ in every stock theme: what tells these
+    // apart in a fight is size and position, and the colour is there to stop two
+    // circles the same size reading as the same thing.
+    const ImU32 line = Solid(ImGuiCol_PlotLines);
+    const ImU32 mark = Solid(ImGuiCol_PlotHistogram);
+    const ImU32 pick = Solid(ImGuiCol_CheckMark);
+
+    for (int i = 0; i < count; ++i) {
+        const RingMark& ring = marks[i];
+        // Below a pixel or two a circle is a dot that says nothing, and ImGui
+        // draws a degenerate one as a smear.
+        if (!(ring.radius >= kMinRingRadius)) {
+            continue;
+        }
+        const ImVec2 centre = At(ring.centre);
+
+        switch (ring.role) {
+            case RingRole::Player:
+                list->AddCircle(centre, ring.radius, line, 0, kStroke);
+                break;
+            case RingRole::Engage:
+                // Thin, because it is the largest thing on the screen most of
+                // the time and a heavy line that size is a wall around the
+                // character rather than a mark on the ground.
+                list->AddCircle(centre, ring.radius, line, 0, kRingStroke);
+                break;
+            case RingRole::Body:
+                // Filled, faintly: this is the thing itself, and what is
+                // interesting is where its edge is rather than what is under it.
+                list->AddCircleFilled(centre, ring.radius, Faded(mark, kBodyFill));
+                list->AddCircle(centre, ring.radius, mark, 0, kRingStroke);
+                break;
+            case RingRole::KeepAway:
+                list->AddCircle(centre, ring.radius, mark, 0, kStroke);
+                break;
+            case RingRole::InRange:
+                list->AddCircle(centre, ring.radius, pick, 0, kRingStroke);
+                break;
+            case RingRole::Blast:
+                // **The one that is coloured by its own number**, for the same
+                // reason the shot trails are: green to red is how long there is
+                // left to walk out of it, and a bomb two seconds out and one
+                // landing this instant are otherwise the same circle in the same
+                // place. Filled as well as outlined, because what matters about
+                // a blast is the ground it takes rather than its edge.
+                list->AddCircleFilled(centre, ring.radius, Lifetime(ring.ahead, kBlastFill));
+                list->AddCircle(centre, ring.radius, Lifetime(ring.ahead, 1.0F), 0, kStroke);
+                break;
+        }
+    }
 }
 
 }  // namespace brownie::overlay
