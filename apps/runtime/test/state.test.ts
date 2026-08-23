@@ -582,6 +582,13 @@ describe('standing room', () => {
     expect(withWallColumnAt(3).canStandAt(2.5, 2)).toBe(true);
   });
 
+  // The game's own collision half is 0.2285 and the one a *shot* is tested
+  // against is 0.2139. Sizing the body by the smaller of the two admits places
+  // the client refuses to stand in, and the server puts the character back.
+  it('measures the body by the half the game walks with, not the one it shoots with', () => {
+    expect(withWallColumnAt(3).canStandAt(2.78, 2)).toBe(false);
+  });
+
   it('refuses the same place once room to spare is asked for', () => {
     expect(withWallColumnAt(3).canStandAt(2.5, 2, 0.3)).toBe(false);
   });

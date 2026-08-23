@@ -250,9 +250,20 @@ export async function readObjectDefinitions(
       // reason a health-based guess at this would nearly work and then quietly
       // fail on the eight that do.
       isInvincible: hasChild(element, 'Invincible'),
-      // Either marks a square as blocked. `FullOccupy` also stops sight, which
-      // nothing here needs — for walking they mean the same thing.
-      occupies: hasChild(element, 'OccupySquare') || hasChild(element, 'FullOccupy'),
+      // All three mark a square as blocked. `FullOccupy` also stops sight,
+      // which nothing here needs — for walking they mean the same thing.
+      //
+      // **`EnemyOccupySquare` is the one that is easy to miss and expensive to
+      // miss.** It is what breakable walls, pillars and destructibles carry:
+      // things with hit points and the enemy flag that the game still refuses
+      // to let a character walk into. Reading only the other two leaves 2244 of
+      // the file's objects looking like open floor, so a plan walks into one,
+      // the server puts the character back where it was, and the player reads
+      // the snap-back as being stuck in the wall.
+      occupies:
+        hasChild(element, 'OccupySquare') ||
+        hasChild(element, 'FullOccupy') ||
+        hasChild(element, 'EnemyOccupySquare'),
       // The game's own word for a thing that is part of the room, and the
       // absence of any shot to go with it. See {@link killsAsStructure}.
       isScenery: killsAsStructure(element) && projectiles.length === 0,

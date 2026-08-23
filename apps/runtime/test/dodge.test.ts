@@ -35,7 +35,8 @@ import {
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
 import { ThreatField, type DodgeShot, type Sweep } from '../src/features/dodge/ThreatField.js';
-import { overDamagingGround } from '../src/features/dodge/damagingGround.js';
+import { GroundCache, type GroundSource } from '../src/features/dodge/GroundCache.js';
+import { WalkReach, type Ground } from '../src/features/dodge/WalkReach.js';
 import { createDodgePlugin } from '../src/features/dodge/dodgePlugin.js';
 import {
   DODGE_PRESETS,
@@ -1165,6 +1166,34 @@ describe('a wall of shots with a window in it', () => {
     expect(plan.verdict).toBe('clear');
   });
 
+  // **A course that cannot be walked is not a course.** Pressing into a wall,
+  // the heading they are pressing is worth no distance at all — and ranked on
+  // their intent alone it beat every open one, reported a step of nothing, and
+  // handed the wheel back with the shots arriving. The answer has to come from a
+  // course that actually moves.
+  it('does not answer with a course the wall gives no distance to', () => {
+    const controller = new DodgeController();
+    const walled: DodgeWorld = {
+      // Solid a hair east of the player, so every heading with an easterly
+      // component is worth nothing at all.
+      canStand: (x) => x <= 10.05,
+      isDamaging: () => false,
+      crowdingAt: () => 0,
+    };
+
+    const plan = controller.plan(
+      situation({ intentX: 1, intentY: 0 }),
+      EXACT,
+      walled,
+      wall(99, 9.9),
+    );
+
+    expect(plan.steer).toBe(true);
+    // Compared loosely because a heading on the ring is a cosine: due north
+    // comes out as `cos(π / 2)`, which is not exactly nought.
+    expect(plan.dirX).toBeLessThan(0.05);
+  });
+
   it('backs off when the same wall has no window at all', () => {
     const controller = new DodgeController();
     // Nothing missing, and close enough that there is no time to look for a way
@@ -1181,39 +1210,124 @@ describe('a wall of shots with a window in it', () => {
 // asking about the single point at the middle of the character, so a course
 // that put most of the body over lava and the centre a hair outside it read as
 // clear — and then the next thing that moved the character put them in it.
-describe('how near damaging ground a course may pass', () => {
-  /** One damaging tile at (5, 5), and safe ground everywhere else. */
-  const pool = {
-    tileAt: (x: number, y: number) => ({
-      type: 0,
-      blocking: false,
-      damaging: Math.floor(x) === 5 && Math.floor(y) === 5,
-    }),
-  };
+describe('the ground, one tile at a time', () => {
+  /** A cache pointed at `source`, with the player standing at (5.5, 5.5). */
+  function aimedAt(source: GroundSource): GroundCache {
+    const cache = new GroundCache();
+    cache.aim(source, 5.5, 5.5, 0);
+    return cache;
+  }
+
+  /** One damaging tile at (5, 5), open floor everywhere else. */
+  function pool(): GroundCache {
+    return aimedAt({
+      canStandAt: () => true,
+      tileAt: (x, y) => ({
+        type: 0,
+        blocking: false,
+        damaging: Math.floor(x) === 5 && Math.floor(y) === 5,
+      }),
+    });
+  }
 
   it('refuses a place whose body overlaps it, margin or no margin', () => {
     // Centre in tile 4, body reaching into tile 5.
-    expect(overDamagingGround(pool, 4.9, 5.5, 0)).toBe(true);
+    expect(pool().isDamaging(4.9, 5.5, 0)).toBe(true);
     // And the same centre with the whole body clear of it.
-    expect(overDamagingGround(pool, 4.5, 5.5, 0)).toBe(false);
+    expect(pool().isDamaging(4.5, 5.5, 0)).toBe(false);
   });
 
   it('refuses a place the margin reaches into', () => {
-    expect(overDamagingGround(pool, 4.5, 5.5, 0)).toBe(false);
-    expect(overDamagingGround(pool, 4.5, 5.5, 0.5)).toBe(true);
+    expect(pool().isDamaging(4.5, 5.5, 0)).toBe(false);
+    expect(pool().isDamaging(4.5, 5.5, 0.5)).toBe(true);
   });
 
   it('sweeps the whole box rather than its corners', () => {
     // A margin wide enough that the box spans three tiles across, with the
     // damaging one in the middle column where no corner lands.
-    expect(overDamagingGround(pool, 5.5, 3.7, 1.5)).toBe(true);
+    expect(pool().isDamaging(5.5, 3.7, 1.5)).toBe(true);
   });
 
-  // The server sends tiles around the player and no further, and refusing what
-  // has not been described is `canStandAt`'s job.
-  it('does not call ground it has never been told about damaging', () => {
-    const unknown = { tileAt: (): undefined => undefined };
-    expect(overDamagingGround(unknown, 5, 5, 1)).toBe(false);
+  // The server sends tiles around the player and no further. A body may not be
+  // planned into ground nobody has described; calling it a fire as well would
+  // have the planner flee the edge of its own knowledge.
+  it('refuses ground it has never been told about, and does not call it damaging', () => {
+    const unknown = aimedAt({ canStandAt: () => false, tileAt: () => undefined });
+    expect(unknown.canStand(5.5, 5.5, 0)).toBe(false);
+    expect(unknown.isDamaging(5.5, 5.5, 1)).toBe(false);
+  });
+
+  it('keeps a body off a wall by the margin it is given', () => {
+    const beside = aimedAt({
+      canStandAt: (x) => Math.floor(x) !== 11,
+      tileAt: () => undefined,
+    });
+
+    // Body clear of tile 11, margin reaching into it.
+    expect(beside.canStand(10.6, 5.5, 0)).toBe(true);
+    expect(beside.canStand(10.6, 5.5, 0.25)).toBe(false);
+  });
+
+  it('never shrinks the body below its own size', () => {
+    const inside = aimedAt({
+      canStandAt: (x) => Math.floor(x) !== 11,
+      tileAt: () => undefined,
+    });
+
+    // A negative margin unclamped would pull the body clear of the wall it is
+    // already overlapping.
+    expect(inside.canStand(10.9, 5.5, -1)).toBe(false);
+  });
+
+  it('asks the map about a tile once, and about the body every time', () => {
+    const canStandAt = vi.fn(() => true);
+    const cache = aimedAt({ canStandAt, tileAt: () => undefined });
+
+    cache.canStand(5.5, 5.5, 0);
+    cache.canStand(5.5, 5.5, 0);
+    expect(canStandAt).toHaveBeenCalledTimes(1);
+
+    // A step inside the same tile is a fresh box, over three tiles this has not
+    // been asked about yet.
+    cache.canStand(5.9, 5.9, 0);
+    expect(canStandAt).toHaveBeenCalledTimes(4);
+  });
+
+  it('asks again once the player has stepped into the next tile', () => {
+    const canStandAt = vi.fn(() => true);
+    const source: GroundSource = { canStandAt, tileAt: () => undefined };
+    const cache = new GroundCache();
+
+    cache.aim(source, 5.5, 5.5, 0);
+    cache.canStand(5.5, 5.5, 0);
+    cache.aim(source, 6.5, 5.5, 0);
+    cache.canStand(5.5, 5.5, 0);
+
+    expect(canStandAt).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('how far each course can be walked', () => {
+  /** Open floor, with everything from x = 12 eastwards solid. */
+  const wallEastOf12: Ground = {
+    canStand: (x) => x < 12,
+    isDamaging: () => false,
+  };
+  const east = new Float64Array([1]);
+  const level = new Float64Array([0]);
+
+  // A reach is a distance from the player, so it stops being true the moment
+  // they move. Kept until their *tile* changed, it was measured from wherever
+  // they entered that tile and reused while they crossed it — which is a wall
+  // reported most of a tile further off than it is.
+  it('measures from where the player is, not from where they entered the tile', () => {
+    const reach = new WalkReach();
+
+    reach.measure(10, 10, east, level, 1, 6, wallEastOf12);
+    expect(reach.wallTilesFor(0)).toBeCloseTo(1.8, 5);
+
+    reach.measure(10.9, 10, east, level, 1, 6, wallEastOf12);
+    expect(reach.wallTilesFor(0)).toBeCloseTo(1, 5);
   });
 });
 
@@ -1239,6 +1353,23 @@ describe('where it refuses to go', () => {
     // Turned, not stopped and not reversed: still going roughly their way.
     expect(plan.dirX).toBeLessThan(1);
     expect(Math.abs(plan.dirY)).toBeGreaterThan(0);
+  });
+
+  // The probe used to be kept until the player's *tile* changed, so a course
+  // that was a walk from the pool when they entered the tile was still a walk
+  // from it once they had crossed to the far edge. That is the dodge stepping
+  // into lava it had already been told about.
+  it('sees the pool it has walked up to inside one tile', () => {
+    const controller = new DodgeController();
+    const lava = lavaEastOf(11.4);
+
+    // Entering the tile, with the pool still a walk away: nothing to say.
+    expect(controller.plan(situation({ intentX: 1 }), SETTINGS, lava, []).steer).toBe(false);
+
+    // Most of a tile later, and half a step from the edge of it.
+    const plan = controller.plan(situation({ x: 10.9, intentX: 1 }), SETTINGS, lava, []);
+    expect(plan.steer).toBe(true);
+    expect(plan.dirX).toBeLessThan(1);
   });
 
   it('leaves them alone when the same ground is still a walk away', () => {
@@ -2261,25 +2392,15 @@ describe('when the plugin decides', () => {
     expect(moveBy).not.toHaveBeenCalled();
   });
 
-  it('plans with room to spare around walls', () => {
-    const canStandAt = vi.fn((_x: number, _y: number, _clearanceTiles?: number) => true);
-    const { plan } = underFire(900, { canStandAt });
-
-    plan();
-
-    // The first question is whether the player has that room where they stand;
-    // every question after it carries the same margin.
-    expect(canStandAt).toHaveBeenCalledWith(10, 10, 0.25);
-    expect(canStandAt.mock.calls.every((call) => call[2] === 0.25)).toBe(true);
-  });
-
   it('drops the margin once the player is already inside it', () => {
-    // Everything fits, but nothing fits with room to spare: a player hugging a
-    // wall, which is exactly the case where demanding the margin would refuse
-    // every step out of it and pin them there.
-    const canStandAt = (_x: number, _y: number, clearanceTiles?: number): boolean =>
-      clearanceTiles === 0;
-    const { moveBy, plan } = underFire(900, { canStandAt });
+    // A corridor two tiles wide, running north and south. The body fits in it
+    // and the body plus the margin below does not fit anywhere in it — which is
+    // exactly the case where demanding the margin would refuse every step out
+    // and pin the player against the wall with the setting meant to keep them
+    // off it. The way out is along the corridor, and the shot is crossing it.
+    const corridor = (x: number): boolean => Math.floor(x) === 9 || Math.floor(x) === 10;
+    const { host, moveBy, plan } = underFire(900, { canStandAt: corridor });
+    host.settingsOf('auto-dodge')?.apply('wallClearanceTiles', 0.8);
 
     plan();
 

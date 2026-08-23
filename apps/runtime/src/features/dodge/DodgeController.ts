@@ -956,11 +956,12 @@ export class DodgeController {
   /**
    * How far each course can go, and where it meets ground worth avoiding.
    *
-   * The heading table is cached — walls do not move and the player usually has
-   * not — while the player's own direction is measured every plan, because it
-   * changes on a keystroke and it is the one that decides whether they keep the
-   * wheel. Distances are measured once per *direction*; what they become is per
-   * candidate, because a course that stops short of a pool never reaches it.
+   * Measured from where the character is, every plan: a reach is a distance
+   * from the player, and one remembered across a step is one that reports a
+   * wall further off than it is. Distances are measured once per *direction* —
+   * the ring, plus the player's own heading, which is not on it — and what they
+   * become is per candidate, because a course that stops short of a pool never
+   * reaches it.
    */
   #measureGround(
     situation: DodgeSituation,
@@ -992,7 +993,7 @@ export class DodgeController {
       return;
     }
 
-    this.#reach.refresh(
+    this.#reach.measure(
       situation.x,
       situation.y,
       this.#headingX,
@@ -1000,7 +1001,6 @@ export class DodgeController {
       headings,
       reachTiles,
       world,
-      situation.nowMs,
     );
     this.#reach.probe(
       situation.x,
@@ -1507,6 +1507,14 @@ export class DodgeController {
     let bestRoom = -Infinity;
 
     for (let c = 0; c < scored; c += 1) {
+      // **A course the ground gives no distance to is not a course.** It is
+      // holding still with a heading attached — the sweep already scored it as
+      // standing, and holding still is candidate nought and always considered.
+      // What the heading still buys it is the alignment term below, which is
+      // the first key: pressed into a wall, the direction the player is holding
+      // outranked every open course, won outright, and then reported a step of
+      // nothing. The wheel went back to the keys that walked into the wall.
+      if (c !== HOLD && (this.#travelTiles[c] ?? 0) <= 0) continue;
       if ((this.#unsafeMs[c] ?? 0) <= bars.windowMs) continue;
       if ((this.#impactMs[c] ?? 0) <= bars.impactMs) continue;
       if ((this.#clearance[c] ?? -Infinity) < bars.roomTiles) continue;

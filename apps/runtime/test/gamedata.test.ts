@@ -173,6 +173,28 @@ describe('object catalog', () => {
     expect(catalog.isInvincible(0x0d59)).toBe(false);
   });
 
+  // A breakable wall is an enemy with hit points *and* a wall, and the game
+  // refuses to let a character into its square. Reading only the other two
+  // markers left 2244 of the file's objects looking like open floor, so a plan
+  // walked into one and the server put the character straight back.
+  it('counts a destructible wall among the things that own their square', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+  <Object type="0x01" id="Wall"><OccupySquare /></Object>
+  <Object type="0x02" id="Statue"><FullOccupy /></Object>
+  <Object type="0x03" id="Breakable Pillar"><Enemy /><EnemyOccupySquare /></Object>
+  <Object type="0x04" id="Grass" />
+</Objects>`),
+      ),
+    );
+
+    expect(catalog.occupies(0x01)).toBe(true);
+    expect(catalog.occupies(0x02)).toBe(true);
+    expect(catalog.occupies(0x03)).toBe(true);
+    expect(catalog.occupies(0x04)).toBe(false);
+  });
+
   it('says "no" about a type it has never heard of', async () => {
     const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
     expect(catalog.isPlayer(0xffff)).toBe(false);

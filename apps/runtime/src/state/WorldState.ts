@@ -5,7 +5,7 @@ import type {
   TileView,
   WorldView,
 } from '@brownie/plugin-api';
-import { PLAYER_HALF_TILES } from '../features/dodge/hitbox.js';
+import { PLAYER_ENVIRONMENT_HALF_TILES } from '../features/dodge/hitbox.js';
 import type { BlastRadiusTable } from './blasts/BlastRadiusTable.js';
 import { BlastStore } from './blasts/BlastStore.js';
 import { EntityStore } from './EntityStore.js';
@@ -192,8 +192,10 @@ export class WorldState implements WorldView {
    * the tile map walks into every wall in the game.
    *
    * **The player's corners are tested, not their centre.** A body is a square
-   * of about 0.43 tiles across, so a centre on free ground says nothing about
-   * whether the body fits — and the difference is exactly the case of squeezing
+   * of about 0.46 tiles across — {@link PLAYER_ENVIRONMENT_HALF_TILES}, which is
+   * the half the client's own collision routine uses and *not* the smaller one
+   * a shot is tested against — so a centre on free ground says nothing about
+   * whether the body fits, and the difference is exactly the case of squeezing
    * along a wall, which is where a dodge spends most of its time.
    *
    * Unknown ground is refused. The server sends tiles around the player and no
@@ -207,7 +209,7 @@ export class WorldState implements WorldView {
    * cannot.
    */
   canStandAt(x: number, y: number, clearanceTiles = 0): boolean {
-    const half = PLAYER_HALF_TILES + Math.max(0, clearanceTiles);
+    const half = PLAYER_ENVIRONMENT_HALF_TILES + Math.max(0, clearanceTiles);
     return (
       this.#standable(x - half, y - half) &&
       this.#standable(x + half, y - half) &&

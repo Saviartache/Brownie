@@ -21,7 +21,7 @@ import { MotionTracker } from '../../state/MotionTracker.js';
 import type { DodgeSettings, DodgeWorld } from './DodgeController.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeCatalog } from './dodgeInputs.js';
-import { overDamagingGround } from './damagingGround.js';
+import { GroundCache } from './GroundCache.js';
 import { ENEMY_CONTACT_HALF_TILES, EnemyBodies, type BodySighting } from './EnemyBodies.js';
 
 /** How far past the player's own reach to look for bodies worth avoiding. */
@@ -30,6 +30,15 @@ const ENEMY_SEARCH_MARGIN_TILES = 2;
 export class DodgeScene {
   readonly #catalog: DodgeCatalog;
   readonly #bodies = new EnemyBodies();
+  /**
+   * What the ground is, one tile at a time.
+   *
+   * **The planner asks about places, not tiles**, a few hundred of them per
+   * plan — so the map is asked about each *tile* once and the body geometry is
+   * redone exactly from wherever the character is. See {@link GroundCache} for
+   * why the tile is the thing worth remembering and the reach is not.
+   */
+  readonly #ground = new GroundCache();
   /**
    * How fast the monsters near the player are moving.
    *
@@ -74,8 +83,7 @@ export class DodgeScene {
     halfTiles: ENEMY_CONTACT_HALF_TILES,
   };
 
-  /** The map the adapter below is currently pointed at. */
-  #map: WorldView | undefined;
+  /** How far off a wall a *course* is planned, this plan. */
   #clearance = 0;
   /** How far off damaging ground a *course* is planned, this plan. */
   #hazardClearance = 0;
@@ -104,11 +112,9 @@ export class DodgeScene {
       isInvincible: catalog.isInvincible,
     };
     this.world = {
-      canStand: (x, y) => this.#map?.canStandAt(x, y, this.#clearance) ?? false,
+      canStand: (x, y) => this.#ground.canStand(x, y, this.#clearance),
       isDamaging: (x, y) =>
-        this.#damagingMatters &&
-        this.#map !== undefined &&
-        overDamagingGround(this.#map, x, y, this.#hazardClearance),
+        this.#damagingMatters && this.#ground.isDamaging(x, y, this.#hazardClearance),
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
     };
   }
@@ -162,7 +168,7 @@ export class DodgeScene {
   observe(session: SessionView, controls: DodgeControls, planning: DodgeSettings): void {
     const self = session.self;
     const map = session.world;
-    this.#map = map;
+    this.#ground.aim(map, self.x, self.y, map.gameTimeMs);
 
     // **The margin is dropped when the player is already inside it.** Demanding
     // clearance the current position does not have makes every step out of it
@@ -172,7 +178,7 @@ export class DodgeScene {
     // leave.
     const wallClearance = controls.walls.clearanceTiles.get();
     this.#clearance =
-      wallClearance > 0 && map.canStandAt(self.x, self.y, wallClearance) ? wallClearance : 0;
+      wallClearance > 0 && this.#ground.canStand(self.x, self.y, wallClearance) ? wallClearance : 0;
 
     this.#damagingMatters = controls.hazards.avoid.get();
     // **And the same rule for the margin around lava**, for the same reason: a
@@ -182,7 +188,7 @@ export class DodgeScene {
     // drops it and being inside the *pool* is a different question.
     const hazardClearance = controls.hazards.clearanceTiles.get();
     this.#hazardClearance =
-      hazardClearance > 0 && !overDamagingGround(map, self.x, self.y, hazardClearance)
+      hazardClearance > 0 && !this.#ground.isDamaging(self.x, self.y, hazardClearance)
         ? hazardClearance
         : 0;
     this.#onDamagingGround =
@@ -229,7 +235,7 @@ export class DodgeScene {
   reset(): void {
     this.#bodies.clear();
     this.#motion.clear();
-    this.#map = undefined;
+    this.#ground.clear();
     this.#minding = false;
   }
 

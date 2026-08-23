@@ -19,13 +19,27 @@
  */
 
 /**
- * The player's collision half-extent, in tiles.
+ * The player's collision half-extent against *shots*, in tiles.
  *
- * Deliberately distinct from the slightly larger half the game uses for wall
- * collision — the two tests are different tests, and using one for the other is
- * wrong in both directions.
+ * Deliberately distinct from {@link PLAYER_ENVIRONMENT_HALF_TILES} — the two
+ * tests are different tests, and using one for the other is wrong in both
+ * directions.
  */
 export const PLAYER_HALF_TILES = 0.2139;
+
+/**
+ * The player's collision half-extent against the *map*, in tiles.
+ *
+ * What the client measures a body by when it asks whether it fits: the ground
+ * under it, and any object that owns its square. Bigger than the projectile
+ * half above, and the difference is not cosmetic — a plan that sizes the body
+ * by the smaller one walks to places the game refuses to put the character, the
+ * server puts them back, and the player reads that as being stuck in the wall.
+ *
+ * The reference implementation's `kPlayerChebyshevScale`, taken there from the
+ * client's own collision routine.
+ */
+export const PLAYER_ENVIRONMENT_HALF_TILES = 0.2285;
 
 /**
  * The collision multiplier of a shot whose data does not state one.
