@@ -100,6 +100,7 @@ const SHOP_WORDS: readonly string[] = [
   'cheapfame',
   'instantdelivery',
   'autodelivery',
+  'fastdelivery',
   'giftcard',
   'dailylottery',
   'freespins',
@@ -171,12 +172,17 @@ const SHOP_DOMAINS: readonly RegExp[] = SHOP_HOSTS.map(
  * The shop whose name and domain are both ordinary words, so the dot itself has
  * to be there.
  *
- * `rpg.rip` cannot go in the list above at any strictness: compacted, `rpg` and
- * `rip` sit next to each other in `anyone else play this rpg? rip my streak`.
- * Matched against the flattened text instead, where a separator that is not a
- * dot is still a separator.
+ * `rp6.rip` cannot go in the list above at any strictness: compacted, `rpg` and
+ * `rip` sit next to each other in `anyone else play this rpg? rip my streak`,
+ * and `.rip` is not a top-level domain `SHOP_TLDS` can carry for every host —
+ * `got a white bag, rip` would become spam. Matched against the flattened text
+ * instead, where a separator that is not a dot is still a separator.
+ *
+ * `rp6` is the name; `rpg` is the same line with the digit typed back as the
+ * letter it is standing in for, and the bot writes the dot out as `(dot)` or
+ * `[dot]` so that neither form reads as a domain.
  */
-const SHOP_ADDRESSES: readonly RegExp[] = [/\brpg\s*[.[(]\s*rip\b/];
+const SHOP_ADDRESSES: readonly RegExp[] = [/\brp[6g]\s*[.[(]\s*(?:dot\s*[)\]]?\s*)?rip\b/];
 
 /** Phrases the word list cannot express, matched against the flattened text. */
 const SHOP_PHRASES: readonly RegExp[] = [

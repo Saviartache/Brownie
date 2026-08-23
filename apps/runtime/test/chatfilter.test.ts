@@ -138,9 +138,16 @@ describe('the spam signals', () => {
     // say. See `SHOP_HOSTS`.
     ['whitebag.net is open again', 'shop-domain'],
     ['realmshop.info oldest store', 'shop-domain'],
-    ['rpg.rip pots', 'shop-domain'],
+    ['rp6.rip pots', 'shop-domain'],
     ['rp6.shop cheap', 'shop-domain'],
+    // Seen in the wild: the dot spelled out so the name is not a domain, and
+    // `g` for `6` so it is not the name either.
+    ['RP6(dot)RiP - 24/7 Fast Delivery, Maxing, UTs, STs, FP, Buffs, Eggs & More!', 'shop-domain'],
+    ['rpg [dot] rip, cheapest', 'shop-domain'],
     ['selling realm items, paypal only, instant delivery', 'shop-word'],
+    // The same claim in the third spelling of it, so the banner is still
+    // recognised once the bot moves off the domain above.
+    ['24/7 fast delivery, maxing, buffs', 'shop-word'],
     ['cheap fame service, message me', 'shop-word'],
     ['pay by venmo or cash app', 'payment-method'],
     ['shipping to your vault today', 'shop-phrase'],
