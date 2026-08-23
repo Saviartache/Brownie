@@ -384,6 +384,7 @@ describe('the auto-aim plugin', () => {
     plan: () => void;
   } {
     const aimAt = vi.fn();
+    const lockedOn = vi.fn();
     const enemies: EntityView[] = [];
     let gameTimeMs = 0;
     let cursorPoint: Position | undefined;
@@ -423,7 +424,7 @@ describe('the auto-aim plugin', () => {
     });
     host.load(
       createAutoAimPlugin({
-        output: { aimAt },
+        output: { aimAt, lockedOn },
         weapon: () => ('weapon' in options ? options.weapon : WEAPON),
         isObstacle: (objectType) => objectType === WALL_TYPE,
         isInvincible: (objectType) => objectType === SPAWNER_TYPE,
@@ -715,7 +716,7 @@ describe('the auto-aim plugin: letting shots through walls', () => {
     });
     host.load(
       createAutoAimPlugin({
-        output: { aimAt: () => undefined },
+        output: { aimAt: () => undefined, lockedOn: () => undefined },
         weapon: () => undefined,
         isObstacle: () => false,
         isInvincible: () => false,

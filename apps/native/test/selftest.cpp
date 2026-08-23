@@ -501,13 +501,17 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     Check(!picture.fresh(1000), "and is not worth drawing");
 
     Check(picture.Apply("dodge-begin", 1000), "a set opens");
-    Check(picture.Apply("trail|1000|1000|2000|1100|2000", 1000), "a path is taken");
-    Check(picture.Apply("mark|3|1000|2000|250|1000", 1000), "so is a circle");
+    // One record per kind, several things in each: the packing is the whole
+    // reason the picture arrives fast enough to be worth drawing.
+    Check(picture.Apply("trails|1000,1000,2000,1100,2000|500,0,0,100,100", 1000),
+          "two paths in one record are taken");
+    Check(picture.Apply("marks|3,1000,2000,250,1000|1,0,0,300,1000", 1000),
+          "and two circles in another");
     Check(picture.trails().empty(), "and neither is visible until the set closes");
     Check(picture.marks().empty(), "on either half");
     Check(picture.Apply("dodge-end", 1000), "the set closes");
-    Check(picture.trails().size() == 1, "and commits together");
-    Check(picture.marks().size() == 1, "both halves of it");
+    Check(picture.trails().size() == 2, "and commits together");
+    Check(picture.marks().size() == 2, "both halves of it");
     Check(picture.fresh(1000), "and is worth drawing");
 
     const brownie::overlay::ShotTrail& trail = picture.trails()[0];
@@ -530,17 +534,17 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     // build does not know is dropped for the same reason: drawing it as
     // whichever shape came first would be inventing information.
     Check(picture.Apply("dodge-begin", 2000), "another set opens");
-    Check(picture.Apply("trail|500|100|100", 2000), "a one-point path is taken");
-    Check(picture.Apply("trail|500|100|100|abc|200", 2000), "so is one that does not parse");
-    Check(picture.Apply("mark|99|100|100|100|1000", 2000), "so is a circle of no known kind");
-    Check(picture.Apply("mark|1|100|100", 2000), "and one missing its fields");
-    Check(picture.Apply("mark|1|100|100|-50|1000", 2000), "and one of negative width");
+    Check(picture.Apply("trails|500,100,100", 2000), "a one-point path is taken");
+    Check(picture.Apply("trails|500,100,100,abc,200", 2000), "so is one that does not parse");
+    Check(picture.Apply("marks|99,100,100,100,1000", 2000), "so is a circle of no known kind");
+    Check(picture.Apply("marks|1,100,100", 2000), "and one missing its fields");
+    Check(picture.Apply("marks|1,100,100,-50,1000", 2000), "and one of negative width");
     Check(picture.Apply("dodge-end", 2000), "and it closes");
     Check(picture.trails().empty(), "with none of them in it");
     Check(picture.marks().empty(), "on either half");
 
-    Check(picture.Apply("trail|1000|0|0|100|100", 3000), "a path outside a set is ours");
-    Check(picture.Apply("mark|1|0|0|100|1000", 3000), "and so is a circle");
+    Check(picture.Apply("trails|1000,0,0,100,100", 3000), "a path outside a set is ours");
+    Check(picture.Apply("marks|1,0,0,100,1000", 3000), "and so is a circle");
     Check(picture.trails().empty(), "and neither is drawn");
     Check(picture.marks().empty(), "on either half");
     Check(!picture.Apply("world|1|2", 3000), "and a world record is somebody else's");

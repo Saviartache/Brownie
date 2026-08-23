@@ -220,6 +220,17 @@ export interface DodgePlan {
   readonly impactMs: number;
   /** The least room that course ever has, over the whole horizon. */
   readonly clearanceTiles: number;
+  /**
+   * Whether something is standing inside the near edge right now.
+   *
+   * **What tells "get out of this" from every other reason to walk.** A dodge is
+   * a sidestep with a margin in hand; making room from a monster already on top
+   * of the player is a shove, and the difference is worth a little speed — see
+   * where the caller spends it. Reported rather than folded into
+   * {@link speedScale}, because the scale is about which candidate was chosen
+   * and this is about how hard to carry it out.
+   */
+  readonly crowded: boolean;
   /** How many shots could reach the player at all. */
   readonly trackedShots: number;
   /**
@@ -836,6 +847,7 @@ export class DodgeController {
         unsafeAtMs: ownUnsafeAt,
         impactMs: ownImpact,
         clearanceTiles: this.#clearance[own] ?? Infinity,
+        crowded: this.#crowded,
         trackedShots: tracked,
         trackedBlasts: blastCount,
       };
@@ -1243,7 +1255,10 @@ export class DodgeController {
    */
   #worthACloserLook(chosen: number, scored: number, reactWithinMs: number): boolean {
     if (this.#longestSafeWindow(scored) <= reactWithinMs) return true;
-    if ((this.#crowded || this.#tooFar) && !this.#yielding) return true;
+    // Only for the far edge. Stepping back into range is a short correction and
+    // a second of full speed overshoots it; getting out from under something is
+    // the opposite, and offering it a third of a step is offering it nothing.
+    if (this.#tooFar && !this.#yielding) return true;
     if (this.#field.flowCoherence < COHERENT_FLOW) return false;
     const along =
       (this.#dirX[chosen] ?? 0) * this.#field.flowX + (this.#dirY[chosen] ?? 0) * this.#field.flowY;
@@ -1606,6 +1621,7 @@ export class DodgeController {
       unsafeAtMs: this.#unsafeMs[chosen] ?? Infinity,
       impactMs: this.#impactMs[chosen] ?? Infinity,
       clearanceTiles: this.#clearance[chosen] ?? -Infinity,
+      crowded: this.#crowded,
       trackedShots: tracked,
       trackedBlasts: blasts,
     };
@@ -1667,6 +1683,7 @@ export class DodgeController {
       unsafeAtMs: Infinity,
       impactMs: Infinity,
       clearanceTiles: Infinity,
+      crowded: false,
       trackedShots: tracked,
       trackedBlasts: blasts,
     };

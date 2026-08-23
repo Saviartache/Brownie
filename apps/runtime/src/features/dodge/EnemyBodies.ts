@@ -95,6 +95,9 @@ export const OUT_OF_RANGE_CAP_TILES = 2;
  */
 export const MAX_BODY_LOOKAHEAD_MS = 600;
 
+/** No body is the one being shot at. */
+const NOBODY = -1;
+
 /** The distances a place is judged against. See the file's note. */
 export interface StandoffBand {
   /**
@@ -131,6 +134,17 @@ export class EnemyBodies {
   /** Half the width of each, in tiles. */
   #half = new Float64Array(0);
   #count = 0;
+  /**
+   * Which of them the shots are being pointed at, or {@link NOBODY}.
+   *
+   * **What the far edge of the band is measured to.** "Stay within your
+   * weapon's range" is a distance to something, and the nearest body is the
+   * wrong something: it kept the player in reach of whatever wandered closest
+   * while the monster they were shooting walked away. The near edge is
+   * unchanged and still asks about every body — being crowded is about whoever
+   * is crowding you, not about who you are shooting.
+   */
+  #target = NOBODY;
 
   get count(): number {
     return this.#count;
@@ -186,8 +200,10 @@ export class EnemyBodies {
     y: number,
     withinTiles: number,
     read: (enemy: EntityView) => BodySighting | undefined,
+    targetObjectId?: number,
   ): void {
     this.#count = 0;
+    this.#target = NOBODY;
     for (const enemy of enemies) {
       if (Math.abs(enemy.x - x) > withinTiles || Math.abs(enemy.y - y) > withinTiles) continue;
       const sighting = read(enemy);
@@ -198,6 +214,7 @@ export class EnemyBodies {
       this.#vx[this.#count] = sighting.velocityX;
       this.#vy[this.#count] = sighting.velocityY;
       this.#half[this.#count] = sighting.halfTiles;
+      if (enemy.objectId === targetObjectId) this.#target = this.#count;
       this.#count += 1;
     }
   }
@@ -205,6 +222,7 @@ export class EnemyBodies {
   /** Drops everything. Used when the feature is off, so a stale list cannot score. */
   clear(): void {
     this.#count = 0;
+    this.#target = NOBODY;
   }
 
   /**
@@ -244,23 +262,25 @@ export class EnemyBodies {
     // How far inside a near edge this place is, taking the worst offender —
     // being crowded by the second-nearest of two is being crowded.
     let intrusion = 0;
-    let nearest = Infinity;
-    let nearestEdge = 0;
+    // And how far it is from the one worth staying in range of, which is the
+    // target when there is one and the nearest body when there is not.
+    let reach = Infinity;
+    let reachEdge = 0;
     for (let i = 0; i < this.#count; i += 1) {
       const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
       const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
       const distance = Math.hypot(dx, dy);
       const edge = nearEdgeOf(this.#half[i] ?? ENEMY_CONTACT_HALF_TILES, band);
       if (distance - edge < intrusion) intrusion = distance - edge;
-      if (distance < nearest) {
-        nearest = distance;
-        nearestEdge = edge;
+      if (this.#target === NOBODY ? distance < reach : i === this.#target) {
+        reach = distance;
+        reachEdge = edge;
       }
     }
 
     if (intrusion < 0) return intrusion;
-    const stayWithin = Math.max(band.stayWithinTiles, nearestEdge);
-    if (nearest > stayWithin) return Math.min(nearest - stayWithin, OUT_OF_RANGE_CAP_TILES);
+    const stayWithin = Math.max(band.stayWithinTiles, reachEdge);
+    if (reach > stayWithin) return Math.min(reach - stayWithin, OUT_OF_RANGE_CAP_TILES);
     return 0;
   }
 

@@ -20,6 +20,12 @@
 // are committed together — the same shape the plugin list uses, for the same
 // reason. Both halves in one bracket, because they describe one plan.
 //
+// **And packed, one record per kind rather than one per thing.** Fifty paths and
+// sixty circles twenty times a second is two thousand messages a second as a
+// record apiece, against a reader that takes sixteen kilobytes per turn of its
+// loop — the module fell behind, the picture arrived too late to be fresh, and
+// it blinked out until the box was unticked and ticked again.
+//
 // **It expires.** The runtime says nothing when nobody is watching, and a
 // runtime that was killed or restarted says nothing either, so silence has to
 // mean "stop drawing" on its own. Otherwise a set from a fight two minutes ago
@@ -77,10 +83,10 @@ struct DodgeMark {
 
 /// How long a committed set stands without being restated.
 ///
-/// A few of the runtime's own publishes, so a stalled turn of its loop does not
-/// blink the picture, and short enough that a runtime which stops talking stops
-/// drawing within half a second.
-inline constexpr std::uint64_t kPictureFreshMs = 500;
+/// Several of the runtime's own publishes, so neither a stalled turn of its loop
+/// nor a busy moment on the link blinks the picture — and short enough that a
+/// runtime which stops talking stops drawing about as fast as anybody notices.
+inline constexpr std::uint64_t kPictureFreshMs = 1000;
 
 class DodgePicture {
   public:

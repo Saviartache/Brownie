@@ -75,6 +75,7 @@ import {
   OUT_OF_RANGE_CAP_TILES,
   type BodySighting,
 } from './EnemyBodies.js';
+import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker, type Motion } from '../../state/MotionTracker.js';
 import { isBlastEffect } from '../../state/blasts/BlastStore.js';
 import { registerHitRedirect } from './hitRedirect.js';
@@ -296,6 +297,21 @@ export interface DodgeInputs {
    * stands in and the band behaves as it did before it could tell.
    */
   readonly bodyTiles: (objectType: number) => number | undefined;
+  /**
+   * Which enemy auto-aim is pointing the shots at, when it is pointing at one.
+   *
+   * **"Stay within your weapon's range" has to mean range of *something*.**
+   * Measured against the nearest monster it kept the player in reach of
+   * whatever happened to be closest — a minion, a summon, whatever wandered
+   * past — while the thing they were actually shooting walked out of range and
+   * the damage stopped. What they are shooting is a question only auto-aim can
+   * answer, and it answers it here; see `AimOutput.lockedOn`.
+   *
+   * `undefined` while nothing is being aimed at, or while auto-aim is off, and
+   * the band falls back to the nearest body — which is the best guess available
+   * and is what it always did.
+   */
+  readonly aimTarget: () => number | undefined;
 }
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
@@ -743,6 +759,28 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const controller = new DodgeController();
       const bodies = new EnemyBodies();
       /**
+       * What counts as a monster worth keeping away from.
+       *
+       * **The same question auto-aim asks, and the same answer**, because the
+       * two lists are the same list: a thing not worth shooting at is a thing
+       * not worth walking around. A wall in this game is an object with hit
+       * points and the enemy flag; a brazier, a torch and a spawn anchor are
+       * `<Enemy/>` with no health bar at all. Ranking those as monsters put a
+       * three-tile no-go circle around every decoration in the room, and the
+       * live report was the plain one: "I cannot get through there."
+       *
+       * **Except for the one rule that does not carry over.** A boss in an
+       * invulnerable phase cannot be shot and can still walk over somebody, so
+       * `skipUntouchable` is off here where auto-aim offers it as a setting:
+       * what the band is about is contact and room, not damage.
+       */
+      const shootable: ShootableRules = {
+        skipUntouchable: false,
+        skipObstacles: true,
+        isObstacle: inputs.isObstacle,
+        isInvincible: inputs.isInvincible,
+      };
+      /**
        * How fast the monsters near the player are moving.
        *
        * **What tells a monster the player walked up to from one that walked up
@@ -771,9 +809,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        * changes, and the collection loop asks it of every enemy in reach.
        */
       const bodySighting = (enemy: EntityView): BodySighting | undefined => {
-        if (inputs.isObstacle(enemy.objectType) || inputs.isInvincible(enemy.objectType)) {
-          return undefined;
-        }
+        if (!isShootable(enemy, shootable)) return undefined;
         motion.observe(enemy.objectId, enemy.x, enemy.y, sightedAtMs);
         // Seen only once, which every monster is on the plan it comes into
         // reach. A body that is not known to be moving is treated as still,
@@ -1016,6 +1052,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             self.y,
             searchTiles + ENEMY_SEARCH_MARGIN_TILES,
             bodySighting,
+            inputs.aimTarget(),
           );
         } else {
           bodies.clear();
@@ -1075,8 +1112,16 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
 
         // At the speed the plan asked for, which is not always full: the safe
         // place in a wall of shots is often inside the ring rather than on it.
-        let wantX = plan.dirX * speed * plan.speedScale;
-        let wantY = plan.dirY * speed * plan.speedScale;
+        //
+        // **Except when something is standing on the player**, which is a shove
+        // rather than a sidestep and is worth the margin the ordinary speed
+        // keeps in hand — the whole complaint is that monsters get close anyway.
+        // The margin exists because a command past the server's own limit is
+        // what makes it pull the character back; the *limit* is what this
+        // spends, and no more.
+        const urgency = plan.crowded ? session.self.walkSpeedTilesPerSecond : speed;
+        let wantX = plan.dirX * urgency * plan.speedScale;
+        let wantY = plan.dirY * urgency * plan.speedScale;
 
         // **Cancelling their input rather than adding to it.** The module's step
         // lands on top of whatever the game's own movement did this frame, so
@@ -1108,7 +1153,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // than that, and a command past the character's own speed is what makes
         // the server pull them back — so the correction is allowed to be partial
         // and is never allowed to be a snap-back.
-        const commanded = Math.min(magnitude, speed);
+        const commanded = Math.min(magnitude, urgency);
         const hold = holdMs.get();
         // Far enough that the module's per-frame step is never the thing that
         // truncates the walk. It is a direction, expressed as a place.

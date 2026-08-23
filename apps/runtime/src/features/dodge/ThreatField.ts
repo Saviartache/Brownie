@@ -243,6 +243,14 @@ export const COHERENT_FLOW = 0.35;
  */
 const ESCAPE_MARGIN_TILES = 0.25;
 
+/**
+ * How far past the reachable set a shot still counts as being in the way.
+ *
+ * A body's width and a little, because a shot that passes exactly at the edge of
+ * where the player could get to is still a shot they would have run into.
+ */
+const SWATH_MARGIN_TILES = 1;
+
 export class ThreatField {
   #sampleX = new Float64Array(0);
   #sampleY = new Float64Array(0);
@@ -252,6 +260,8 @@ export class ThreatField {
   #drifts = new Float64Array(0);
   /** Whether this shot is close enough to be worth taking the wheel over. */
   #near = new Uint8Array(0);
+  /** And whether it ever comes near enough to be part of the pattern. */
+  #inSwath = new Uint8Array(0);
   #minX = new Float64Array(0);
   #minY = new Float64Array(0);
   #maxX = new Float64Array(0);
@@ -374,6 +384,12 @@ export class ThreatField {
     // whose own path never enters it cannot be dodged into or out of.
     const reach = Math.max(0, options.reachTiles);
     const engageSquared = Math.max(0, options.engageTiles) ** 2;
+    // How near a shot has to come, at some point in the horizon, before it
+    // counts as part of the pattern being escaped. Everywhere the player could
+    // reach and a body's width past it: a shot that never gets that close is
+    // neither going to hit them nor stand between them and anywhere they could
+    // go, whatever direction it is travelling. See {@link escapeTiles}.
+    const swathSquared = (Math.max(0, options.reachTiles) + SWATH_MARGIN_TILES) ** 2;
     const skipBeyond =
       reach +
       (IMPLAUSIBLE_SPEED_TILES_PER_SECOND * horizonMs) / 1000 +
@@ -414,6 +430,13 @@ export class ThreatField {
       // gets over the window, which is what it used to be.
       const hereSquared = (start.x - selfX) ** 2 + (start.y - selfY) ** 2;
 
+      // And the closest it ever gets to where the player is standing, over the
+      // whole horizon. What that decides is whether it is part of the *pattern*
+      // — see {@link escapeTiles}. A shot that stays further off than the player
+      // could walk in the time available is not in anybody's way, whatever
+      // direction it happens to be travelling.
+      let nearestSquared = hereSquared;
+
       let taken = 1;
       for (let k = 1; k < this.#samples; k += 1) {
         const at = shot.positionAt(gameTimeMs + k * stepMs);
@@ -427,6 +450,8 @@ export class ThreatField {
         else if (at.x > maxX) maxX = at.x;
         if (at.y < minY) minY = at.y;
         else if (at.y > maxY) maxY = at.y;
+        const squared = (at.x - selfX) ** 2 + (at.y - selfY) ** 2;
+        if (squared < nearestSquared) nearestSquared = squared;
         taken += 1;
       }
 
@@ -447,6 +472,7 @@ export class ThreatField {
       this.#half[slot] = half;
       this.#drifts[slot] = drift;
       this.#near[slot] = hereSquared <= engageSquared ? 1 : 0;
+      this.#inSwath[slot] = nearestSquared <= swathSquared ? 1 : 0;
       this.#minX[slot] = minX - widest;
       this.#minY[slot] = minY - widest;
       this.#maxX[slot] = maxX + widest;
@@ -511,6 +537,7 @@ export class ThreatField {
     let left = 0;
     let right = 0;
     for (let i = 0; i < this.#tracked; i += 1) {
+      if (this.#inSwath[i] !== 1) continue;
       const base = i * this.#samples;
       const offset =
         ((this.#sampleX[base] ?? 0) - selfX) * acrossX +
@@ -740,6 +767,10 @@ export class ThreatField {
     const near = new Uint8Array(capacity);
     near.set(this.#near.subarray(0, Math.min(this.#near.length, capacity)));
     this.#near = near;
+
+    const inSwath = new Uint8Array(capacity);
+    inSwath.set(this.#inSwath.subarray(0, Math.min(this.#inSwath.length, capacity)));
+    this.#inSwath = inSwath;
 
     this.#half = grow(this.#half, capacity);
     this.#drifts = grow(this.#drifts, capacity);

@@ -440,6 +440,21 @@ describe('how far across the fire is out of it', () => {
     expect(field.escapeTiles).toBe(0);
   });
 
+  // **The live report: "we should dodge the projectile, not the source."** A
+  // rank crossing the far side of the room is going somewhere else, and every
+  // shot in it agrees about the direction — so as a *pattern* it looked wide
+  // and urgent, and the planner started running from something that was never
+  // going to be near. What decides is how close a shot ever gets to where the
+  // player could walk, which is a fact about the shot rather than about the
+  // volley it belongs to.
+  it('is nothing at all for a rank that never comes near', () => {
+    const field = new ThreatField();
+    // Twelve tiles off to one side, sweeping past on its own business, with a
+    // long enough life that it is still in flight at the end of the horizon.
+    field.build(0, 0, 0, rank(6, -6, 14), { ...OPTIONS, reachTiles: 6 });
+    expect(field.escapeTiles).toBe(0);
+  });
+
   // In a crossfire there is no across, so claiming a width for one would be
   // claiming to know the shape of something that has none.
   it('has no answer when the shots do not agree on a direction', () => {
@@ -1451,6 +1466,39 @@ describe('the distance to fight from', () => {
     expect(boss.standoffAt(0.5, 0, BAND)).toBeCloseTo(-0.5, 6);
   });
 
+  // **"Stay within your weapon's range" is a distance to something.** Measured
+  // to the nearest body it kept the player in reach of whatever wandered
+  // closest — a minion, a summon — while the thing they were actually shooting
+  // walked away and the damage stopped. What they are shooting is a question
+  // only auto-aim can answer, and it answers it.
+  it('measures the reach to what is being shot at, not to whatever is nearest', () => {
+    const minion = { objectId: 1, x: 2, y: 0 } as EntityView;
+    const boss = { objectId: 2, x: 9, y: 0 } as EntityView;
+
+    // With nobody named, the nearest body is what the band is about, and the
+    // player is comfortably inside range of it.
+    const nearest = new EnemyBodies();
+    nearest.collect([minion, boss], 0, 0, 20, ANY_BODY);
+    expect(nearest.standoffAt(0, 0, BAND)).toBe(0);
+
+    // Named, the boss two tiles past the weapon's reach is what counts.
+    const aimed = new EnemyBodies();
+    aimed.collect([minion, boss], 0, 0, 20, ANY_BODY, 2);
+    expect(aimed.standoffAt(0, 0, BAND)).toBeCloseTo(2, 6);
+  });
+
+  // The near edge is unchanged by any of that: being crowded is about whoever
+  // is crowding you, not about who you are shooting.
+  it('is still crowded by something it is not aiming at', () => {
+    const onTop = { objectId: 1, x: 1, y: 0 } as EntityView;
+    const boss = { objectId: 2, x: 5, y: 0 } as EntityView;
+
+    const bodies = new EnemyBodies();
+    bodies.collect([onTop, boss], 0, 0, 20, ANY_BODY, 2);
+
+    expect(bodies.standoffAt(0, 0, BAND)).toBeLessThan(0);
+  });
+
   // **Two edges that overlap are an instruction to oscillate.** A melee weapon
   // against something enormous puts the near edge past the far one, so a place
   // reads as too near *and* out of range — and a planner told both steps in and
@@ -1683,7 +1731,12 @@ describe('keeping the fight', () => {
     // Something four tiles across at the same place is on top of the player.
     const boss = at(sized(4));
     expect(boss.verdict).toBe('spacing');
-    expect(boss.dirY).toBeLessThan(0);
+    expect(boss.steer).toBe(true);
+    expect(boss.crowded).toBe(true);
+    // Any course that leaves the bubble will do — a sidestep out of it is as
+    // good as a retreat, and better if it keeps the range. What is asserted is
+    // that it does not walk further in.
+    expect(boss.dirY).toBeLessThanOrEqual(0);
   });
 });
 
@@ -1908,6 +1961,8 @@ describe('when the plugin decides', () => {
     map: {
       canStandAt?: (x: number, y: number, clearanceTiles?: number) => boolean;
       damagingAt?: (x: number, y: number) => boolean;
+      /** What the world says is standing about, for the spacing band. */
+      enemies?: readonly EntityView[];
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -1926,7 +1981,7 @@ describe('when the plugin decides', () => {
         gameTimeMs,
         projectiles: () => [shot],
         blasts: () => [],
-        enemies: () => [],
+        enemies: () => map.enemies ?? [],
         canStandAt: map.canStandAt ?? ((): boolean => true),
         tileAt: (x: number, y: number) => ({
           type: 0,
@@ -1958,6 +2013,7 @@ describe('when the plugin decides', () => {
         isObstacle: () => false,
         isInvincible: () => false,
         bodyTiles: () => undefined,
+        aimTarget: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);
@@ -2108,6 +2164,26 @@ describe('when the plugin decides', () => {
     // a fight that is not happening.
     expect(showPicture.mock.calls[1]?.[0]).toEqual([]);
     expect(showPicture.mock.calls[1]?.[1]).toEqual([]);
+  });
+
+  // **The live report: "I cannot get through there."** A wall in this game is an
+  // object with hit points and the enemy flag, and a brazier is `<Enemy/>` with
+  // no health bar at all — so a three-tile no-go circle went round every
+  // decoration in the room. The rule that answers it is the one auto-aim already
+  // uses to decide what is worth shooting: the two lists are the same list.
+  it('keeps its distance from monsters and not from the scenery', () => {
+    const decoration = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 0 } as EntityView;
+    const monster = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 4000 } as EntityView;
+
+    // Nothing in the air at all, so the only thing that could move the player
+    // is the spacing band. Standing right next to a torch is not a mistake.
+    const past = underFire(0, { enemies: [decoration] });
+    past.plan();
+    expect(past.moveTo).not.toHaveBeenCalled();
+
+    const crowded = underFire(0, { enemies: [monster] });
+    crowded.plan();
+    expect(crowded.moveTo).toHaveBeenCalled();
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
@@ -2360,6 +2436,7 @@ describe('the hit redirect', () => {
         isObstacle: () => false,
         isInvincible: () => false,
         bodyTiles: () => undefined,
+        aimTarget: () => undefined,
       }),
     );
     host.setEnabled('auto-dodge', true);

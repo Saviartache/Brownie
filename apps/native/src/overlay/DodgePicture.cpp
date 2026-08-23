@@ -7,8 +7,8 @@ namespace brownie::overlay {
 namespace {
 
 constexpr std::string_view kBeginKind = "dodge-begin";
-constexpr std::string_view kTrailKind = "trail";
-constexpr std::string_view kMarkKind = "mark";
+constexpr std::string_view kTrailKind = "trails";
+constexpr std::string_view kMarkKind = "marks";
 constexpr std::string_view kEndKind = "dodge-end";
 
 /// Hundredths of a tile, as every other position on this link travels.
@@ -23,8 +23,10 @@ constexpr float kPermille = 1000.0F;
 /// path, it is a record that should be refused.
 constexpr std::size_t kMaxPoints = 64;
 
-/// The same, for the circles. The runtime's own cap is well under it.
+/// The same, for the circles and the paths. The runtime's own caps are well
+/// under both; what these bound is one malformed or hostile record.
 constexpr std::size_t kMaxMarks = 256;
+constexpr std::size_t kMaxTrails = 256;
 
 /// Larger than any circle worth drawing, in tiles.
 ///
@@ -33,17 +35,31 @@ constexpr std::size_t kMaxMarks = 256;
 /// is a white screen.
 constexpr float kMaxRadiusTiles = 64.0F;
 
-/// The next `|`-separated field, and what is left after it.
-[[nodiscard]] std::string_view TakeField(std::string_view& rest) noexcept {
-    const std::size_t bar = rest.find('|');
-    if (bar == std::string_view::npos) {
+/// The next field up to `separator`, and what is left after it.
+///
+/// **Two levels, because a picture is a list of lists.** Fields are separated by
+/// bars as everywhere else on this link; the numbers *inside* one — a path's
+/// points, a circle's five figures — are separated by commas. One record per
+/// kind rather than one per thing is what keeps a busy screen from being two
+/// thousand messages a second; see `Application.showPicture`.
+[[nodiscard]] std::string_view Take(std::string_view& rest, char separator) noexcept {
+    const std::size_t at = rest.find(separator);
+    if (at == std::string_view::npos) {
         const std::string_view last = rest;
         rest = {};
         return last;
     }
-    const std::string_view field = rest.substr(0, bar);
-    rest.remove_prefix(bar + 1);
+    const std::string_view field = rest.substr(0, at);
+    rest.remove_prefix(at + 1);
     return field;
+}
+
+[[nodiscard]] std::string_view TakeField(std::string_view& rest) noexcept {
+    return Take(rest, '|');
+}
+
+[[nodiscard]] std::string_view TakeNumber(std::string_view& rest) noexcept {
+    return Take(rest, ',');
 }
 
 /// A whole number, or nothing. Anything the runtime did not mean to send fails
@@ -97,66 +113,87 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
         return true;
     }
 
+    // One field per thing, whichever kind this record carries. A field that does
+    // not parse is dropped on its own rather than taking the record with it: a
+    // picture missing one circle is still a picture.
     if (kind == kMarkKind) {
-        int mark_kind = 0;
-        int x = 0;
-        int y = 0;
-        int radius = 0;
-        int ahead = 0;
-        if (!ParseInt(TakeField(rest), mark_kind) || !ParseInt(TakeField(rest), x) ||
-            !ParseInt(TakeField(rest), y) || !ParseInt(TakeField(rest), radius) ||
-            !ParseInt(TakeField(rest), ahead)) {
-            return true;
+        for (;;) {
+            std::string_view field = TakeField(rest);
+            if (field.empty()) {
+                break;
+            }
+            if (staged_marks_.size() >= kMaxMarks) {
+                return true;
+            }
+            int mark_kind = 0;
+            int x = 0;
+            int y = 0;
+            int radius = 0;
+            int ahead = 0;
+            if (!ParseInt(TakeNumber(field), mark_kind) || !ParseInt(TakeNumber(field), x) ||
+                !ParseInt(TakeNumber(field), y) || !ParseInt(TakeNumber(field), radius) ||
+                !ParseInt(TakeNumber(field), ahead)) {
+                continue;
+            }
+            // A kind from a newer runtime, or a radius nobody meant. Dropped
+            // rather than drawn as something else: a debug view that invents a
+            // circle is worse than one missing a circle.
+            if (mark_kind < 0 || mark_kind > kMaxMarkKind || radius < 0) {
+                continue;
+            }
+            const float radius_tiles = static_cast<float>(radius) / kHundredths;
+            if (radius_tiles > kMaxRadiusTiles) {
+                continue;
+            }
+            DodgeMark mark;
+            mark.kind = static_cast<MarkKind>(mark_kind);
+            mark.centre =
+                TilePoint{static_cast<float>(x) / kHundredths, static_cast<float>(y) / kHundredths};
+            mark.radius_tiles = radius_tiles;
+            const float fraction = static_cast<float>(ahead) / kPermille;
+            mark.ahead = fraction < 0.0F ? 0.0F : (fraction > 1.0F ? 1.0F : fraction);
+            staged_marks_.push_back(mark);
         }
-        // A kind from a newer runtime, or a radius nobody meant. Dropped rather
-        // than drawn as something else: a debug view that invents a circle is
-        // worse than one missing a circle.
-        if (mark_kind < 0 || mark_kind > kMaxMarkKind || radius < 0) {
-            return true;
-        }
-        const float radius_tiles = static_cast<float>(radius) / kHundredths;
-        if (radius_tiles > kMaxRadiusTiles || staged_marks_.size() >= kMaxMarks) {
-            return true;
-        }
-        DodgeMark mark;
-        mark.kind = static_cast<MarkKind>(mark_kind);
-        mark.centre = TilePoint{static_cast<float>(x) / kHundredths,
-                                static_cast<float>(y) / kHundredths};
-        mark.radius_tiles = radius_tiles;
-        const float fraction = static_cast<float>(ahead) / kPermille;
-        mark.ahead = fraction < 0.0F ? 0.0F : (fraction > 1.0F ? 1.0F : fraction);
-        staged_marks_.push_back(mark);
         return true;
     }
 
-    int life_permille = 0;
-    if (!ParseInt(TakeField(rest), life_permille)) {
-        return true;
-    }
-
-    ShotTrail trail;
-    trail.life = static_cast<float>(life_permille) / kPermille;
     for (;;) {
-        const std::string_view x_field = TakeField(rest);
-        if (x_field.empty()) {
+        std::string_view field = TakeField(rest);
+        if (field.empty()) {
             break;
         }
-        int x = 0;
-        int y = 0;
-        // Both or neither: half a point is a point somewhere else.
-        if (!ParseInt(x_field, x) || !ParseInt(TakeField(rest), y)) {
+        if (staged_trails_.size() >= kMaxTrails) {
             return true;
         }
-        if (trail.points.size() >= kMaxPoints) {
-            return true;
+        int life_permille = 0;
+        if (!ParseInt(TakeNumber(field), life_permille)) {
+            continue;
         }
-        trail.points.push_back(
-            TilePoint{static_cast<float>(x) / kHundredths, static_cast<float>(y) / kHundredths});
-    }
 
-    // A path needs two ends to be a path.
-    if (trail.points.size() >= 2) {
-        staged_trails_.push_back(std::move(trail));
+        ShotTrail trail;
+        trail.life = static_cast<float>(life_permille) / kPermille;
+        bool malformed = false;
+        for (;;) {
+            const std::string_view x_number = TakeNumber(field);
+            if (x_number.empty()) {
+                break;
+            }
+            int x = 0;
+            int y = 0;
+            // Both or neither: half a point is a point somewhere else.
+            if (!ParseInt(x_number, x) || !ParseInt(TakeNumber(field), y) ||
+                trail.points.size() >= kMaxPoints) {
+                malformed = true;
+                break;
+            }
+            trail.points.push_back(TilePoint{static_cast<float>(x) / kHundredths,
+                                             static_cast<float>(y) / kHundredths});
+        }
+
+        // A path needs two ends to be a path.
+        if (!malformed && trail.points.size() >= 2) {
+            staged_trails_.push_back(std::move(trail));
+        }
     }
     return true;
 }

@@ -344,8 +344,8 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
-| `trail` | life‰, x·100, y·100, … (pairs)                    | one shot's remaining path, from where it is now to where it stops existing                            |
-| `mark`  | kind, x·100, y·100, radius·100, ahead‰            | one circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, the weapon's reach, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has |
+| `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
+| `marks` | one field per circle: `kind,x·100,y·100,radius·100,ahead‰` | every circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, the weapon's reach, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has |
 
 `weapon` carries one field of text — the item's own id — so unlike its
 neighbours it is percent-encoded and the module reads it with the same splitter
@@ -500,6 +500,14 @@ the module can do that. Putting the prediction on the map beside the shots it
 claims to describe is the only way to see whether it is right — a drawn line
 that runs where the shot actually goes says the model holds, and one that veers
 off says it does not, in the half second it takes to look.
+
+**They are also the only records that pack, and they have to.** One field per
+thing rather than one record per thing: fifty paths and sixty circles, twenty
+times a second, is two thousand messages a second as a record apiece — and the
+module reads one bufferful per turn of its loop, so it fell behind, the picture
+arrived too late to count as fresh, and it blinked out until the box was
+unticked and ticked again. The numbers inside a field are comma-separated; the
+fields are bar-separated as everywhere else here.
 
 **And the circles answer the question the paths cannot**: not "is the prediction
 right" but "is the decision right". Every complaint this feature has had was

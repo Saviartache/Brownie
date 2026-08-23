@@ -10,11 +10,14 @@ namespace {
 
 /// How much one pipe read may take at once.
 ///
-/// Large enough that a burst — an overlay sync is a hundred-odd frames the
-/// runtime writes in one go — is drained in one read rather than in a dozen,
-/// and small enough to be an unremarkable resident allocation in someone
-/// else's game.
-constexpr std::size_t kReceiveBytes = 16u * 1024u;
+/// **Matched to what the runtime writes in one go**, which is what makes a burst
+/// one read rather than a dozen. Anything left over waits for the next turn of
+/// the loop, so a reader smaller than the writer's batch turns a steady stream
+/// into a growing lag: the dodge picture — fifty shot paths and sixty circles,
+/// twenty times a second — arrived late enough to be stale and blinked out. Sixty
+/// four kilobytes is the runtime's own batch ceiling and an unremarkable resident
+/// allocation in someone else's game.
+constexpr std::size_t kReceiveBytes = 64u * 1024u;
 
 /// Telemetry, packed. Binary because it goes out on every game frame.
 constexpr std::size_t kTelemetryBytes = 24;

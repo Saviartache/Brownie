@@ -147,6 +147,14 @@ export class Application {
   /// walk-to-cursor chord walks to it.
   readonly #cursor = new CursorTracker();
 
+  /// Which enemy auto-aim has settled on, for the dodge to keep in range of.
+  ///
+  /// **The one place two plugins meet, and it is one number.** Neither can read
+  /// the other and neither should: what auto-aim knows is which monster the
+  /// shots are going to, and what the dodge does with it is measure a distance.
+  /// Restated on every aim decision, including the ones that decide on nothing.
+  #aimTarget: number | undefined = undefined;
+
   /// Whether the module says that chord is held down.
   ///
   /// An edge, not a poll: the module reports the press and the release and
@@ -461,24 +469,40 @@ export class Application {
           // halves of the picture go inside one bracket because they describe
           // one plan, and a frame showing this plan's shots against the last
           // plan's circles would be a picture of a moment that never happened.
+          //
+          // **One record per kind, not one per thing.** A picture is fifty
+          // shot paths and sixty circles, twenty times a second; as a record
+          // apiece that is two thousand messages a second, each framed and
+          // sequenced separately, against a reader that takes sixteen kilobytes
+          // per turn of its loop. The module fell behind, the picture arrived
+          // late enough to go stale, and it blinked out until the box was
+          // unticked and ticked again. Packed — one field per thing, its numbers
+          // comma-separated — the same picture is a handful of records.
           showPicture: (paths, marks) => {
             this.#native.publishRecord('dodge-begin');
-            for (const path of paths) {
-              const fields: (string | number)[] = ['trail', path.lifePermille];
-              for (const coordinate of path.points) fields.push(Math.round(coordinate * 100));
+            if (paths.length > 0) {
+              const fields: string[] = ['trails'];
+              for (const path of paths) {
+                const numbers: number[] = [path.lifePermille];
+                for (const coordinate of path.points) numbers.push(Math.round(coordinate * 100));
+                fields.push(numbers.join(','));
+              }
               this.#native.publishRecord(fields.join('|'));
             }
-            for (const mark of marks) {
-              this.#native.publishRecord(
-                [
-                  'mark',
-                  mark.kind,
-                  Math.round(mark.x * 100),
-                  Math.round(mark.y * 100),
-                  Math.round(mark.radiusTiles * 100),
-                  mark.permille,
-                ].join('|'),
-              );
+            if (marks.length > 0) {
+              const fields: string[] = ['marks'];
+              for (const mark of marks) {
+                fields.push(
+                  [
+                    mark.kind,
+                    Math.round(mark.x * 100),
+                    Math.round(mark.y * 100),
+                    Math.round(mark.radiusTiles * 100),
+                    mark.permille,
+                  ].join(','),
+                );
+              }
+              this.#native.publishRecord(fields.join('|'));
             }
             this.#native.publishRecord('dodge-end');
           },
@@ -499,6 +523,11 @@ export class Application {
         // And whether anybody is looking at the result. Nothing is predicted
         // for the picture while the box is unticked.
         view: { wanted: () => this.#dodgeView },
+        // What auto-aim has settled on, which is what the range half of the
+        // spacing band is measured against. `undefined` while it is aiming at
+        // nothing, or while it is switched off — and then the band falls back
+        // to the nearest monster, which is the best guess available.
+        aimTarget: () => this.#aimTarget,
         // How far the equipped weapon reaches, which is the distance the
         // planner tries not to drift past. Same catalog and same reason as
         // auto-aim's `weapon`: it is in `objects.xml` and nowhere on the wire.
@@ -549,6 +578,14 @@ export class Application {
             this.#native.publishRecord(
               ['aim', Math.round(x * 100), Math.round(y * 100), Math.round(holdMs)].join('|'),
             );
+          },
+          // Nothing on the link: this one is for the dodge, which keeps the
+          // player inside their weapon's reach *of the thing they are shooting*
+          // rather than of whatever happens to be nearest. Held here because
+          // one plugin cannot read another, and the composition root is where
+          // two of them are allowed to meet.
+          lockedOn: (objectId) => {
+            this.#aimTarget = objectId;
           },
         },
         // Resolved once per weapon and read through `this`, so a session that
