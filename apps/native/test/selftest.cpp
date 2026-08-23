@@ -1845,6 +1845,43 @@ void AStepIsBoundedByTheFrameAndByTheCap() {
     Check(brownie::app::StepBudget(0, 7.0F) == 0.0F, "no time is no travel");
 }
 
+void AStepGivesWayToTheirOwnWalking() {
+    constexpr float kBudget = 0.12F;
+
+    Check(std::fabs(brownie::app::RoomToStep(kBudget, 0.0F, 0.0F, 1.0F, 0.0F) - kBudget) < 0.001F,
+          "a player standing still leaves the whole frame to the step");
+
+    // The complaint this exists for: the step is added to the game's own
+    // movement, so a player walking the way they are being steered travels at
+    // both speeds at once — and the server takes that back.
+    Check(brownie::app::RoomToStep(kBudget, kBudget, 0.0F, 1.0F, 0.0F) == 0.0F,
+          "a player already spending the whole limit that way leaves nothing");
+    Check(std::fabs(brownie::app::RoomToStep(kBudget, kBudget / 2.0F, 0.0F, 3.0F, 0.0F) -
+                    kBudget / 2.0F) < 0.001F,
+          "and half of it leaves half");
+
+    // Across their walking rather than along it, which is the ordinary dodge:
+    // what is left is what keeps the two together inside the limit.
+    const float across = brownie::app::RoomToStep(kBudget, kBudget / 2.0F, 0.0F, 0.0F, 1.0F);
+    Check(std::fabs(std::sqrt((kBudget / 2.0F) * (kBudget / 2.0F) + across * across) - kBudget) <
+              0.001F,
+          "a step across their walking is left exactly the room to stay inside the limit");
+
+    // Never *more* than the frame allows, however much of it they are walking
+    // off: a correction is allowed to be partial and is never a snap-back.
+    Check(brownie::app::RoomToStep(kBudget, -kBudget, 0.0F, 1.0F, 0.0F) == kBudget,
+          "walking against the step buys no extra travel");
+
+    // A knockback, a correction or a portal moves them further than they could
+    // walk. There is nothing left to spend either way round.
+    Check(brownie::app::RoomToStep(kBudget, 5.0F, 5.0F, 1.0F, 0.0F) == 0.0F,
+          "a player thrown further than the limit leaves nothing at all");
+
+    Check(brownie::app::RoomToStep(kBudget, 0.0F, 0.0F, 0.0F, 0.0F) == 0.0F,
+          "nowhere to step is no step");
+    Check(brownie::app::RoomToStep(0.0F, 0.0F, 0.0F, 1.0F, 0.0F) == 0.0F, "no budget is no step");
+}
+
 /// The classes the real player queries name, with the fields they ask for.
 ///
 /// Built from `PlayerFieldQueries()` rather than spelled out, so that a rename
@@ -1951,6 +1988,7 @@ int main() {
     RecordsBecomeTargetsThatExpire();
     AProjectionInvertsItself();
     AStepIsBoundedByTheFrameAndByTheCap();
+    AStepGivesWayToTheirOwnWalking();
     HooksDivertAndRestore();
     RemovingAHookIsScopeExit();
     TwoEnginesAreRefused();

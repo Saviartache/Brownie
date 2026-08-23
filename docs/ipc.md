@@ -397,6 +397,22 @@ the player can actually travel this frame — commanding past reach is what the
 server snaps back." A distant point does not make the player walk there; it
 makes them appear there, and then be put back.
 
+**And the player's own walking is counted against that cap**, because the step
+is applied on top of the game's own movement rather than in place of it. A
+player holding a key the way the runtime is steering them was travelling at both
+speeds at once, which the server takes back exactly as it takes back a step past
+reach — live report: "if the vectors agree, the speeds add up and it teleports
+us." The runtime cancels the input it knows about, but it knows about it from a
+position a server tick old and from a belief about which keys are down; the
+ground that actually appeared under the character is neither, and only the
+module can see it. So the module measures what the position moved since the last
+frame, subtracts whatever it asked for itself, and spends only what is left of
+`speed × frame time` on the sum — nought when the player is already spending the
+whole of it, and never more than the frame allows when they are walking the
+other way. A frame with nothing to compare against — the first after a stretch
+with nothing to do — issues no step at all, for the same reason it issues none
+after a gap.
+
 **And it can be measured from the character rather than from the map**, which is
 what `fromPlayer` says. The runtime learns where the player is from `MOVE` and
 `NEWTICK` — five times a second — while the character walks at the frame rate,

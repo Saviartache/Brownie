@@ -22,6 +22,14 @@ export interface DodgeOutput {
    * back. `holdMs` is how long the target stands if nothing replaces it, which
    * is what makes "no fresh plan" mean "stop".
    *
+   * **The player's own walking is counted against that cap**, and by the module
+   * rather than here: the step lands on top of the game's own movement, so the
+   * two agreeing about a direction used to travel at both speeds at once. What
+   * they actually covered is the ground that appeared under them, which only
+   * the frame can see — see `PlayerControl::RoomToStep`. So a command is a
+   * ceiling on the *sum*, and asking for more of it than they have left over
+   * simply moves them less.
+   *
    * **For the chord, and for nothing else.** A place is what the player names
    * when they point at one; see {@link moveBy} for why a plan is not a place.
    */

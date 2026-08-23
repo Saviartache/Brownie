@@ -31,6 +31,33 @@ float StepBudget(std::uint64_t elapsed_ms, float speed) noexcept {
     return budget > kMaxStepTiles ? kMaxStepTiles : budget;
 }
 
+float RoomToStep(float budget, float own_x, float own_y, float toward_x, float toward_y) noexcept {
+    if (!(budget > 0.0F)) {
+        return 0.0F;
+    }
+    const float length = std::sqrt(toward_x * toward_x + toward_y * toward_y);
+    if (!(length > 0.0F)) {
+        return 0.0F;
+    }
+
+    // The near intersection of the step's ray with the circle of everything the
+    // frame may reach. `along` is how much of their walking is already going
+    // the way the step points — it is what makes agreeing directions cost the
+    // step everything and opposing ones cost it nothing.
+    const float along = (own_x * toward_x + own_y * toward_y) / length;
+    const float spent = own_x * own_x + own_y * own_y;
+    const float reach = along * along + budget * budget - spent;
+    if (!(reach > 0.0F)) {
+        return 0.0F;
+    }
+
+    const float room = std::sqrt(reach) - along;
+    if (!(room > 0.0F)) {
+        return 0.0F;
+    }
+    return room > budget ? budget : room;
+}
+
 void PlayerControl::Bind(const game::Il2CppRuntime& game,
                          const game::PlayerRoute& route) noexcept {
     game_ = &game;
@@ -74,6 +101,7 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     last_frame_at_ms_ = now_ms;
 
     if (!ready_.load(std::memory_order_acquire)) {
+        player_seen_ = false;
         return;
     }
 
@@ -93,6 +121,10 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         // own aim back on the next shot, not on the next frame that happens to
         // check.
         aim_.Clear();
+        // Nothing was read this frame, so there is no position to measure the
+        // next one against — a walk that starts after a quiet stretch would
+        // otherwise be charged for every frame of it.
+        player_seen_ = false;
         return;
     }
 
@@ -105,8 +137,41 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         // No player right now — between realms, at the login screen, during a
         // map rebuild. Nothing to aim from, so nothing is aimed.
         aim_.Clear();
+        player_seen_ = false;
         return;
     }
+
+    // **What the player is spending of the speed limit themselves.** Everything
+    // the position moved since the last frame, less whatever this module asked
+    // for then: the remainder is theirs, and it does not matter whether it came
+    // from the keys, a knockback or the server putting them back. See
+    // `RoomToStep` for why it is the sum that has to be bounded.
+    //
+    // **Unmeasured means no step**, exactly as the first frame after a gap
+    // issues none and for the same reason. A frame that had nothing to do
+    // skipped the position read, so the frame that takes the wheel after one
+    // has nothing to compare against — and the only guess available there errs
+    // in the single direction the server punishes.
+    float own_x = 0.0F;
+    float own_y = 0.0F;
+    bool measured = false;
+    if (player_seen_) {
+        const float moved_x = player.x - last_player_x_ - last_step_x_;
+        const float moved_y = player.y - last_player_y_ - last_step_y_;
+        // A position read out of an object the game has since given back can be
+        // anything at all, and a step sized from one that is not a number is
+        // not a number either.
+        if (std::isfinite(moved_x) && std::isfinite(moved_y)) {
+            own_x = moved_x;
+            own_y = moved_y;
+            measured = true;
+        }
+    }
+    player_seen_ = true;
+    last_player_x_ = player.x;
+    last_player_y_ = player.y;
+    last_step_x_ = 0.0F;
+    last_step_y_ = 0.0F;
 
     if (walking) {
         // **An offset is resolved here and nowhere else.** The runtime cannot
@@ -116,8 +181,22 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         frame_walk_x_ = frame_target_.from_player ? player.x + frame_target_.x : frame_target_.x;
         frame_walk_y_ = frame_target_.from_player ? player.y + frame_target_.y : frame_target_.y;
         frame_walking_ = true;
-        (void)mover_.StepTowards(player, frame_walk_x_, frame_walk_y_,
-                                 StepBudget(now_ms - previous, frame_target_.speed));
+
+        const float toward_x = frame_walk_x_ - player.x;
+        const float toward_y = frame_walk_y_ - player.y;
+        const float distance = std::sqrt(toward_x * toward_x + toward_y * toward_y);
+        const float room =
+            measured ? RoomToStep(StepBudget(now_ms - previous, frame_target_.speed), own_x, own_y,
+                                  toward_x, toward_y)
+                     : 0.0F;
+        if (mover_.StepTowards(player, frame_walk_x_, frame_walk_y_, room) && distance > 0.0F) {
+            // Remembered so the next frame reads back their walking and not
+            // ours. What the mover was asked for, which is the direction at
+            // whichever of the two lengths is shorter — see `StepTowards`.
+            const float carried = distance < room ? distance : room;
+            last_step_x_ = (toward_x / distance) * carried;
+            last_step_y_ = (toward_y / distance) * carried;
+        }
     }
 
     if (aiming) {

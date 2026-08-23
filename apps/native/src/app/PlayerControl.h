@@ -101,6 +101,30 @@ inline constexpr float kMaxStepTiles = 0.7F;
 /// cannot command more than `kMaxStepTiles`.
 [[nodiscard]] float StepBudget(std::uint64_t elapsed_ms, float speed) noexcept;
 
+/// How much of that budget is left once the player's own walking is counted.
+///
+/// **The step is added to the game's own movement, not put in its place.** A
+/// player holding a key the way the runtime is steering them therefore travels
+/// at both speeds at once, which is the one thing the server does take back —
+/// live report: "if the vectors agree, the speeds add up and it teleports us."
+/// Cancelling the input on the runtime's side answers the ordinary case, but it
+/// answers it from a position that is up to a server tick old and from a belief
+/// about which keys are down. The ground that actually appeared under the
+/// character is neither, and it is only knowable here.
+///
+/// So the limit is on the *sum*: this is the largest step along `toward` that
+/// keeps the frame's whole travel — theirs plus ours — inside `budget`, which
+/// is `t` where `|own + t·û| = budget`. Nought when they are already spending
+/// the limit themselves, whatever direction they are spending it in, and never
+/// more than `budget`, because a correction is allowed to be partial and is
+/// never allowed to be a snap-back of its own.
+///
+/// @param own What the player covered under their own power since the last
+///   frame, in tiles. Zero when there is nothing to go on.
+/// @param toward Where the step points, of any length. Nought for no direction.
+[[nodiscard]] float RoomToStep(float budget, float own_x, float own_y, float toward_x,
+                               float toward_y) noexcept;
+
 class PlayerControl {
   public:
     PlayerControl() noexcept = default;
@@ -228,6 +252,16 @@ class PlayerControl {
     float frame_walk_y_ = 0.0F;
     AimTarget frame_aim_;
     std::uint64_t frame_aim_version_ = 0;
+    /// Where the player was when the last frame acted, and what this module
+    /// asked the game to add to it — the two together are what the next frame
+    /// subtracts to be left with the walking they did themselves. False
+    /// whenever the position was not read, because a delta measured across
+    /// frames nobody looked at is not one frame's worth of anything.
+    bool player_seen_ = false;
+    float last_player_x_ = 0.0F;
+    float last_player_y_ = 0.0F;
+    float last_step_x_ = 0.0F;
+    float last_step_y_ = 0.0F;
     /// When the last frame ran, for sizing this one's step. Zero until the
     /// first, which therefore issues nothing — a step needs two frames.
     std::uint64_t last_frame_at_ms_ = 0;
