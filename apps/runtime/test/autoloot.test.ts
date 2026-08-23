@@ -15,8 +15,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { StatType } from '../src/constants/StatType.js';
 import { createAutoLootPlugin } from '../src/features/autoloot/autoLootPlugin.js';
 import { enlargeBags } from '../src/features/autoloot/bigBags.js';
-import { BIG_BAG_SIZE, PENDING_TIMEOUT_MS } from '../src/features/autoloot/constants.js';
-import { findBeltDestination, findFreeSlot } from '../src/features/autoloot/destination.js';
+import {
+  BIG_BAG_SIZE,
+  PENDING_TIMEOUT_MS,
+  REFUSED_PAUSE_MAX_MS,
+  REFUSED_PAUSE_MS,
+} from '../src/features/autoloot/constants.js';
+import { findBeltDestination, freeSlots } from '../src/features/autoloot/destination.js';
 import { enchantCount, UNIQUE_DATA_STAT } from '../src/features/autoloot/enchants.js';
 import { Claims, LootSession } from '../src/features/autoloot/LootSession.js';
 import {
@@ -47,6 +52,8 @@ const DYE = 4000;
 
 const LOOT_BAG = 1280;
 const SOULBOUND_BAG = 1283;
+/** What a stat that is not an item slot at all reads as: a count of something. */
+const QUEST_COUNT = 7;
 
 function facts(over: Partial<ItemFacts> = {}): ItemFacts {
   return {
@@ -247,8 +254,8 @@ describe('counting a bag slot"s enchants', () => {
 });
 
 describe('choosing where a looted item goes', () => {
-  /** Nothing has refused anything yet. */
-  const never = (): boolean => false;
+  /** The game's own data, which is what says a stat is an item slot at all. */
+  const isItem = (objectType: number): boolean => ITEMS.has(objectType);
 
   function inventoryOf(options: {
     carried?: ItemSlotView[];
@@ -267,7 +274,11 @@ describe('choosing where a looted item goes', () => {
     };
   }
 
-  it('takes the first free carried slot, in slot order', () => {
+  /** Every free slot's id, which is the order they would be filled in. */
+  const freeIds = (inventory: InventoryView, useBackpack = true, backpackFirst = false): number[] =>
+    freeSlots(inventory, { useBackpack, backpackFirst, isItem }).map((slot) => slot.slotId);
+
+  it('lists the free carried slots in slot order, and the full ones not at all', () => {
     const inventory = inventoryOf({
       carried: [
         { slotId: 4, objectType: T13_BOW, quantity: 0 },
@@ -275,7 +286,10 @@ describe('choosing where a looted item goes', () => {
         { slotId: 6, objectType: -1, quantity: 0 },
       ],
     });
-    expect(findFreeSlot(inventory, true, false, never)).toEqual({ slotId: 5, objectType: -1 });
+    expect(freeSlots(inventory, { useBackpack: true, backpackFirst: false, isItem })).toEqual([
+      { slotId: 5, objectType: -1 },
+      { slotId: 6, objectType: -1 },
+    ]);
   });
 
   it('uses the backpack only when allowed, and first when asked', () => {
@@ -283,25 +297,28 @@ describe('choosing where a looted item goes', () => {
       carried: [{ slotId: 4, objectType: -1, quantity: 0 }],
       backpack: [{ slotId: 12, objectType: -1, quantity: 0 }],
     });
-    expect(findFreeSlot(inventory, false, false, never)?.slotId).toBe(4);
-    expect(findFreeSlot(inventory, true, true, never)?.slotId).toBe(12);
+    expect(freeIds(inventory, false)).toEqual([4]);
+    expect(freeIds(inventory, true, false)).toEqual([4, 12]);
+    expect(freeIds(inventory, true, true)).toEqual([12, 4]);
   });
 
   it('has nowhere to put anything when the server has stated no slots', () => {
-    expect(findFreeSlot(inventoryOf({}), true, false, never)).toBeUndefined();
+    expect(freeIds(inventoryOf({}))).toEqual([]);
   });
 
-  it('moves along the inventory when a slot has already refused an item', () => {
+  // Which stats carry a group is a fact about a game build, and a wrong guess
+  // points at exalt totals and quest counts. Those read as numbers, and the -1s
+  // beside them are not empty slots — which is what a swap aimed at one of them
+  // was refused over and over for finding out.
+  it('leaves a group alone when what the server states in it is not items', () => {
     const inventory = inventoryOf({
-      carried: [
-        { slotId: 4, objectType: -1, quantity: 0 },
-        { slotId: 5, objectType: -1, quantity: 0 },
+      carried: [{ slotId: 4, objectType: -1, quantity: 0 }],
+      backpack: [
+        { slotId: 12, objectType: -1, quantity: 0 },
+        { slotId: 13, objectType: QUEST_COUNT, quantity: 0 },
       ],
-      backpack: [{ slotId: 12, objectType: -1, quantity: 0 }],
     });
-    expect(findFreeSlot(inventory, true, false, (slotId) => slotId === 4)?.slotId).toBe(5);
-    expect(findFreeSlot(inventory, true, false, (slotId) => slotId !== 12)?.slotId).toBe(12);
-    expect(findFreeSlot(inventory, true, false, () => true)).toBeUndefined();
+    expect(freeIds(inventory)).toEqual([4]);
   });
 
   // The belt is a separate question with its own answer; a free *slot* is never
@@ -313,8 +330,8 @@ describe('choosing where a looted item goes', () => {
         { slotId: SlotRange.BeltFirst + 1, objectType: HEALTH_POTION, quantity: 2 },
       ],
     });
-    expect(findFreeSlot(inventory, true, false, never)).toBeUndefined();
-    expect(findFreeSlot(inventory, true, true, never)).toBeUndefined();
+    expect(freeIds(inventory)).toEqual([]);
+    expect(freeIds(inventory, true, true)).toEqual([]);
   });
 
   describe('the potion belt', () => {
@@ -326,7 +343,7 @@ describe('choosing where a looted item goes', () => {
 
     it('adds to a stack that has room', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 3)] });
-      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toEqual({
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, isItem)).toEqual({
         slotId: SlotRange.BeltFirst,
         objectType: HEALTH_POTION,
         expectedQuantity: 4,
@@ -337,7 +354,7 @@ describe('choosing where a looted item goes', () => {
     // the character has it — so being reported is the answer.
     it('takes an empty slot the server has stated', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0), beltSlot(1, -1, 0)] });
-      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toEqual({
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, isItem)).toEqual({
         slotId: SlotRange.BeltFirst,
         objectType: -1,
         expectedQuantity: 1,
@@ -345,39 +362,37 @@ describe('choosing where a looted item goes', () => {
     });
 
     it('has nothing to offer for a belt the server has not stated', () => {
-      expect(findBeltDestination(inventoryOf({}), HEALTH_POTION, 6, never)).toBeUndefined();
+      expect(findBeltDestination(inventoryOf({}), HEALTH_POTION, 6, isItem)).toBeUndefined();
     });
 
     it('joins the stack rather than taking the empty slot beside it', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0), beltSlot(1, HEALTH_POTION, 1)] });
-      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)?.slotId).toBe(
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, isItem)?.slotId).toBe(
         SlotRange.BeltFirst + 1,
       );
     });
 
     it('refuses to start a second stack of the same potion when the first is full', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 6), beltSlot(1, -1, 0)] });
-      expect(findBeltDestination(inventory, HEALTH_POTION, 6, never)).toBeUndefined();
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, isItem)).toBeUndefined();
     });
 
     it('does not put a different potion on the stack', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, HEALTH_POTION, 2)] });
-      expect(findBeltDestination(inventory, ATTACK_POTION, 6, never)).toBeUndefined();
+      expect(findBeltDestination(inventory, ATTACK_POTION, 6, isItem)).toBeUndefined();
     });
 
     it('leaves the belt alone for an item the belt refuses', () => {
       const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0)] });
-      expect(findBeltDestination(inventory, T13_BOW, 0, never)).toBeUndefined();
+      expect(findBeltDestination(inventory, T13_BOW, 0, isItem)).toBeUndefined();
     });
 
-    it('skips a stack that has already refused an item', () => {
-      const inventory = inventoryOf({
-        belt: [beltSlot(0, HEALTH_POTION, 1), beltSlot(1, HEALTH_POTION, 1)],
-      });
-      const refused = (slotId: number): boolean => slotId === SlotRange.BeltFirst;
-      expect(findBeltDestination(inventory, HEALTH_POTION, 6, refused)?.slotId).toBe(
-        SlotRange.BeltFirst + 1,
-      );
+    // The belt's stats are the other half of the question `ItemSlots.ts` cannot
+    // settle from disk, and a swap aimed at one that was not a belt slot ended
+    // a session outright.
+    it('leaves the belt alone when what the server states in it is not items', () => {
+      const inventory = inventoryOf({ belt: [beltSlot(0, -1, 0), beltSlot(1, QUEST_COUNT, 0)] });
+      expect(findBeltDestination(inventory, HEALTH_POTION, 6, isItem)).toBeUndefined();
     });
   });
 });
@@ -500,6 +515,37 @@ describe('what one connection remembers', () => {
     // The server's only answer to a refused swap is silence, so this is it.
     expect(state.resolvePending(empty, emptied, PENDING_TIMEOUT_MS)?.slotId).toBe(12);
     expect(state.pending).toBeUndefined();
+  });
+
+  it('waits longer after each refusal, up to a limit, and forgets them all on a landing', () => {
+    const state = new LootSession();
+    const move = {
+      slotId: 4,
+      expectedQuantity: undefined,
+      source: SOURCE,
+      sinceMs: 0,
+      potion: false,
+    };
+
+    state.standDown(0);
+    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MS);
+    state.standDown(0);
+    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MS * 2);
+
+    // However many follow, the wait stops growing.
+    for (let refusal = 0; refusal < 100; refusal += 1) state.standDown(0);
+    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MAX_MS);
+
+    // A move that lands says the guessing is over, so the next refusal starts
+    // again from one rather than from a hundred.
+    state.startPending(move);
+    state.resolvePending(
+      inventoryWith({ slotId: 4, objectType: T13_BOW, quantity: 0 }),
+      emptied,
+      1,
+    );
+    state.standDown(100_000);
+    expect(state.pauseUntilMs).toBe(100_000 + REFUSED_PAUSE_MS);
   });
 
   it('counts ticks spent standing still, and forgets them on any real movement', () => {
@@ -757,8 +803,13 @@ describe('the auto-loot plugin', () => {
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
 
-    // Past the timeout, the move is assumed lost and the next one goes.
+    // Past the timeout the move is assumed lost — and giving up on one is not
+    // a reason to send another, so the next waits out the stand-down.
     advance(h, PENDING_TIMEOUT_MS);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    advance(h, REFUSED_PAUSE_MS);
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(2);
   });
@@ -818,25 +869,41 @@ describe('the auto-loot plugin', () => {
   });
 
   // Straight from a live log: the same two items, into the same slot, once a
-  // second, for as long as the player stood on the bag. The slot was one the
-  // server would not take an item into, and nothing noticed.
-  it('stops aiming at a slot that will not take an item', () => {
+  // second, for as long as the player stood on the bag. Nothing ever arrived,
+  // which is the only answer the server gives to a move it will not carry out.
+  it('stands down after a move that never arrives, for longer each time', () => {
     const h = harness();
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW, UT_BOW], { x: 10, y: 10 }));
 
-    // Two free slots, two attempts — and then nothing, because neither ever
-    // filled. The inventory here never changes, which is what a refusal looks
-    // like from the outside.
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      tick(h);
-      advance(h, PENDING_TIMEOUT_MS);
-    }
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    // The move is given up on here, and nothing goes out in its place.
+    advance(h, PENDING_TIMEOUT_MS);
+    tick(h);
+    advance(h, REFUSED_PAUSE_MS - 1);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+
+    advance(h, 1);
+    tick(h);
     expect(h.sent).toHaveBeenCalledTimes(2);
+
+    // A second refusal buys twice the wait, so a mistake nothing here can name
+    // costs a packet a minute rather than a packet a second.
+    advance(h, PENDING_TIMEOUT_MS);
+    tick(h);
+    advance(h, REFUSED_PAUSE_MS);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(2);
+
+    // And both went to the slot the server had stated empty. A refusal says
+    // nothing about where to aim next, so nothing walks along the inventory.
     expect(
       h.sent.mock.calls.map(
         (call) => (call[1] as { slotObject2: { slotId: number } }).slotObject2.slotId,
       ),
-    ).toEqual([4, 5]);
+    ).toEqual([4, 4]);
   });
 
   // Straight from a live log, and the shape of every disconnect this feature

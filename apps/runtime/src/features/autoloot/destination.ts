@@ -13,13 +13,37 @@
  * unlock and the server reports it exactly when the character has it, so being
  * reported is itself the answer.
  *
+ * **And a group whose contents are not items is not an inventory group at all.**
+ * Which stats carry the backpack and the belt is a fact about a game build, and
+ * the two tables in this repository disagree about it — see `state/ItemSlots.ts`
+ * for the sessions that cost. Under the wrong one those ids report exalt totals
+ * and quest counts, so a group is read against the game's own item data before
+ * anything is aimed into it: every stated slot must hold either nothing or
+ * something `objects.xml` describes as an item, and a group holding anything
+ * else is left alone entirely.
+ *
+ * That check is the whole point of this file. The alternative is asking the
+ * server one swap at a time which of its slots are real, which costs a packet
+ * per guess — and the server answers a swap it will not carry out with silence,
+ * so the guessing never ends.
+ *
  * Pure, and testable as a table.
  */
 
 import type { InventoryView, ItemSlotView } from '@brownie/plugin-api';
 
-/** Whether a slot has already refused an item and should be left alone. */
-export type SlotRefused = (slotId: number) => boolean;
+/** What an empty slot reads as. */
+const EMPTY = -1;
+
+/** Whether the game's own data describes an object type as an item. */
+export type IsItem = (objectType: number) => boolean;
+
+/** Which slots a looted item is allowed into, and how to tell one. */
+export interface AllowedSlots {
+  readonly useBackpack: boolean;
+  readonly backpackFirst: boolean;
+  readonly isItem: IsItem;
+}
 
 /** A slot an item can be moved into, named the way `INVENTORYSWAP` names it. */
 export interface Destination {
@@ -59,50 +83,65 @@ export function findBeltDestination(
   inventory: InventoryView,
   objectType: number,
   beltStack: number,
-  refused: SlotRefused,
+  isItem: IsItem,
 ): Destination | undefined {
   if (beltStack <= 0) return undefined;
 
+  const belt = inventory.belt();
+  if (!holdsItems(belt, isItem)) return undefined;
+
   let firstEmpty: ItemSlotView | undefined;
-  for (const slot of inventory.belt()) {
-    if (refused(slot.slotId)) continue;
+  for (const slot of belt) {
     if (slot.objectType === objectType) {
       // A count is what says the game stacks this slot at all.
       if (slot.quantity <= 0 || slot.quantity >= beltStack) return undefined;
       return { slotId: slot.slotId, objectType, expectedQuantity: slot.quantity + 1 };
     }
-    if (slot.objectType === -1 && firstEmpty === undefined) firstEmpty = slot;
+    if (slot.objectType === EMPTY && firstEmpty === undefined) firstEmpty = slot;
   }
 
   return firstEmpty === undefined
     ? undefined
-    : { slotId: firstEmpty.slotId, objectType: -1, expectedQuantity: 1 };
+    : { slotId: firstEmpty.slotId, objectType: EMPTY, expectedQuantity: 1 };
 }
 
 /**
- * The first free slot the player has allowed, or `undefined` when full.
+ * Every ordinary slot that is free, in the order they should be filled.
  *
- * `refused` is what makes a mistake here self-limiting rather than endless: a
- * slot the server would not take an item into is skipped from then on, so the
- * search moves along the inventory instead of retrying the same refusal.
+ * The whole answer rather than the first of it, because it is asked before a
+ * pickup is decided on and not after one has failed: an empty list is "there is
+ * nowhere to put anything", which is a reason to send nothing at all.
  */
-export function findFreeSlot(
-  inventory: InventoryView,
-  useBackpack: boolean,
-  backpackFirst: boolean,
-  refused: SlotRefused,
-): Destination | undefined {
-  const carried = (): Destination | undefined => firstEmpty(inventory.carried(), refused);
-  const backpack = (): Destination | undefined =>
-    useBackpack ? firstEmpty(inventory.backpack(), refused) : undefined;
+export function freeSlots(inventory: InventoryView, allowed: AllowedSlots): Destination[] {
+  const carried = freeIn(inventory.carried(), allowed.isItem);
+  if (!allowed.useBackpack) return carried;
 
-  return backpackFirst ? (backpack() ?? carried()) : (carried() ?? backpack());
+  const backpack = freeIn(inventory.backpack(), allowed.isItem);
+  return allowed.backpackFirst ? backpack.concat(carried) : carried.concat(backpack);
 }
 
-function firstEmpty(slots: readonly ItemSlotView[], refused: SlotRefused): Destination | undefined {
+/** The empty slots of one group, and none at all for a group that is not one. */
+function freeIn(slots: readonly ItemSlotView[], isItem: IsItem): Destination[] {
+  if (!holdsItems(slots, isItem)) return [];
+
+  const free: Destination[] = [];
   for (const slot of slots) {
-    if (slot.objectType !== -1 || refused(slot.slotId)) continue;
-    return { slotId: slot.slotId, objectType: -1, expectedQuantity: undefined };
+    if (slot.objectType !== EMPTY) continue;
+    free.push({ slotId: slot.slotId, objectType: EMPTY, expectedQuantity: undefined });
   }
-  return undefined;
+  return free;
+}
+
+/**
+ * Whether every stated slot of a group holds nothing or an item.
+ *
+ * Anything else — an exalt total, a quest count — says these stats are not the
+ * group's slots, and the ones beside them that do read as empty are not empty
+ * slots either.
+ */
+function holdsItems(slots: readonly ItemSlotView[], isItem: IsItem): boolean {
+  for (const slot of slots) {
+    if (slot.objectType !== EMPTY && !isItem(slot.objectType)) return false;
+  }
+  return true;
 }

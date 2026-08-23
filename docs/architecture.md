@@ -291,7 +291,7 @@ over and over. Under the capture 139 is backpack slot **8**, so the packet named
 a slot four places earlier than the one that was free — a swap into an occupied
 slot, which is what the server refuses.
 
-Three rules keep a future disagreement from costing anything:
+Four rules keep a future disagreement from costing anything:
 
 * **Only a slot the server has stated is ever named.** "Empty" has to be
   something the server said about that slot, not the absence of anything being
@@ -299,14 +299,23 @@ Three rules keep a future disagreement from costing anything:
   than an array with gaps. Being reported is also what says the third potion-belt
   slot exists: it is an unlock, and the server states it exactly when the
   character has it.
+* **What is free is worked out in full before anything is sent**, and a group
+  holding something that is not an item is not the group it was taken for. Every
+  stated slot of the backpack and the belt must read either empty or an object
+  type `objects.xml` describes as an item; one exalt total or quest count among
+  them and the whole group is left alone, because the `-1`s beside it are not
+  empty slots either. A four-slot shift puts such a number inside the group, so
+  this is what the session above would have cost nothing —
+  `features/autoloot/destination.ts`.
 * **A move is confirmed at both ends before another goes out.** The destination
   filling says the item arrived; the *source* bag slot emptying says the server
   has told us about the bag it came out of. Acting on the first alone aims the
   next swap with a picture of the bag from before the last one.
-* **A destination that refuses an item is dropped, not retried.** A move that
-  never arrives is the only answer the server gives to a refusal, and it is
-  treated as one — which turns a wrong slot map into a pickup that quietly does
-  not happen instead of a packet a second saying so.
+* **A refusal says nothing about where to aim next.** A move that never arrives
+  is the only answer the server gives, and it names neither the slot nor the
+  reason — so walking on to the next slot is another guess costing another
+  packet. Auto-loot stops instead, for five seconds and for longer each time one
+  refusal follows another, up to a minute; a move that lands clears the count.
 
 ### A shot is gone the moment its flight ends
 

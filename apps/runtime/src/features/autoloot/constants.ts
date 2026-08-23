@@ -66,12 +66,18 @@ export const PENDING_TIMEOUT_MS = 1200;
 export const SHARED_BAG_DELAY_MS = 2000;
 
 /**
- * How long a destination slot is left alone after it refuses an item.
+ * How long auto-loot stands down after a move the server did not carry out.
  *
- * Long enough that a full inventory is not re-tested on every bag, short enough
- * that a slot emptied by hand comes back into use without a map change.
+ * A refusal is answered with silence, so what it was about is not knowable from
+ * the wire: the slot aimed at, the distance, the spacing between packets. What
+ * is knowable is that sending the next move immediately — at another slot, or
+ * at the same one — is guessing, and each guess costs a packet. So it waits,
+ * and waits longer each time it happens again.
  */
-export const REFUSED_SLOT_MS = 30_000;
+export const REFUSED_PAUSE_MS = 5000;
+
+/** The longest that stand-down grows to, however many refusals follow. */
+export const REFUSED_PAUSE_MAX_MS = 60_000;
 
 /** Ticks of standing still before an idle player stops looting. */
 export const STATIONARY_TICK_LIMIT = 100;

@@ -18,12 +18,17 @@
  * exist**, and three guards keep it that way — each of them bought with a live
  * session. The state layer reports a slot only when the server has said what is
  * in it, so a build that moved the backpack's stat ids means the backpack goes
- * unused rather than mis-addressed. The `objectType` the swap carries is
- * checked by the server against its own view, so a mistaken "this slot is
- * empty" is refused rather than acted on. And a destination that *is* refused —
- * seen as a move that never arrives — is dropped for a while instead of retried
- * once a second forever, which is what the second of those sessions looked
- * like from the log.
+ * unused rather than mis-addressed. What is free is then worked out in full
+ * *before* a bag is looked at, against the game's own item data, so a group of
+ * stats that is not the inventory is recognised as such instead of being aimed
+ * into to find out — see `destination.ts`. And the `objectType` the swap
+ * carries is checked by the server against its own view, so a mistaken "this
+ * slot is empty" is refused rather than acted on.
+ *
+ * **A refusal is not a hint about where to aim next.** It is silence, and the
+ * only thing it says is that guessing is not working; walking on to the next
+ * slot is another guess and costs another packet. So a move that never arrives
+ * stops the looting for a while, and for longer each time one follows another.
  */
 
 import {
@@ -47,12 +52,11 @@ import {
   NOTIFY_RADIUS_TILES,
   ON_TOP_TILES,
   PICKUP_INTERVAL_MS,
-  REFUSED_SLOT_MS,
   RETRY_ITEM_AFTER_MS,
   SHARED_BAG_DELAY_MS,
   STATIONARY_TICK_LIMIT,
 } from './constants.js';
-import { findBeltDestination, findFreeSlot, type Destination } from './destination.js';
+import { findBeltDestination, freeSlots, type Destination } from './destination.js';
 import { enchantCount, UNIQUE_DATA_STAT } from './enchants.js';
 import { LootSession, bagSlotKey } from './LootSession.js';
 import { parseItemList, shouldLoot, type LootPreferences } from './lootRules.js';
@@ -301,6 +305,8 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
       const isPotion = (objectType: number): boolean =>
         inputs.item(objectType)?.potion !== undefined;
+      /** What tells an inventory slot from a stat that is not one at all. */
+      const isItem = (objectType: number): boolean => inputs.item(objectType) !== undefined;
 
       // ── Taking things ────────────────────────────────────────────────────
 
@@ -316,11 +322,17 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         return ceiling > 0 && session.self.permanentStats[raises] >= ceiling;
       };
 
-      /** @returns true once something has been sent, so the tick stops there. */
+      /**
+       * @param free The slots already known to be free, nearest to being
+       *   filled first — worked out before any of this, which is what keeps a
+       *   pickup from being the thing that finds out whether a slot was free.
+       * @returns true once something has been sent, so the tick stops there.
+       */
       const takeFrom = (
         session: SessionView,
         state: LootSession,
         bag: NearbyBag,
+        free: readonly Destination[],
         nowMs: number,
       ): boolean => {
         const uniqueData = bag.entity.text(UNIQUE_DATA_STAT);
@@ -355,14 +367,13 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
           const kind = facts?.potion?.kind;
           const quaffable = kind === PotionKind.Heal || kind === PotionKind.Magic;
-          const refused = (slotId: number): boolean => state.refusedSlots.held(slotId, nowMs);
 
           // The belt first for a quaff potion: one belt slot holds six, so it
           // is six inventory slots the player keeps, and it is where they are
           // reached for from.
           const belt =
             quaffable && facts !== undefined
-              ? findBeltDestination(session.self.inventory, objectType, facts.beltStack, refused)
+              ? findBeltDestination(session.self.inventory, objectType, facts.beltStack, isItem)
               : undefined;
 
           // A potion the belt has no room for is a *spare*, and spares are a
@@ -372,9 +383,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           // the rest of the bag is still worth looking at.
           if (belt === undefined && quaffable && !sparePotions.get()) continue;
 
-          const destination =
-            belt ??
-            findFreeSlot(session.self.inventory, useBackpack.get(), backpackFirst.get(), refused);
+          const destination = belt ?? free[0];
           // Nowhere to put it is a fact about the whole inventory, not about
           // this slot, so there is nothing further in this bag to try.
           if (destination === undefined) return false;
@@ -495,13 +504,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         state.trackMovement(self.x, self.y);
         state.expire(nowMs);
 
-        // A move that was never seen to arrive is one the server refused, and
-        // the slot it named is not the empty slot we took it for. Stop aiming
-        // at it rather than sending the same refusal once a second.
+        // A move that was never seen to arrive is one the server did not carry
+        // out, and it never says why. Sending the next one at another slot is
+        // guessing with packets, so it waits instead — and longer each time.
         const abandoned = state.resolvePending(self.inventory, sourceCleared(session), nowMs);
-        if (abandoned !== undefined) {
-          state.refusedSlots.hold(abandoned.slotId, nowMs + REFUSED_SLOT_MS);
-        }
+        if (abandoned !== undefined) state.standDown(nowMs);
 
         const bags = findBags(session.world, self, inputs.container, NOTIFY_RADIUS_TILES);
         for (const bag of bags) {
@@ -526,15 +533,27 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         // server hangs up on. See `PICKUP_INTERVAL_MS`.
         if (nowMs - state.lastActionAtMs < pickupIntervalMs.get()) return;
 
+        // Nearest first, so nothing is in reach once the nearest is not.
+        const nearest = bags[0];
+        if (nearest === undefined || nearest.distanceTiles > ON_TOP_TILES) return;
+
+        // **What is free is settled here, before a bag is read.** A pickup is
+        // then aimed at a slot that is already known to be free rather than
+        // being the thing that finds out whether it was.
+        const free = freeSlots(self.inventory, {
+          useBackpack: useBackpack.get(),
+          backpackFirst: backpackFirst.get(),
+          isItem,
+        });
+
         for (const bag of bags) {
-          // Nearest first, so the first one out of reach ends the search.
           if (bag.distanceTiles > ON_TOP_TILES) break;
 
           if (waitOnSharedBags.get() && bag.facts.shared) {
             const seenAtMs = state.bagSeenAtMs.get(bag.entity.objectId) ?? nowMs;
             if (nowMs - seenAtMs < SHARED_BAG_DELAY_MS) continue;
           }
-          if (takeFrom(session, state, bag, nowMs)) return;
+          if (takeFrom(session, state, bag, free, nowMs)) return;
         }
       });
 
