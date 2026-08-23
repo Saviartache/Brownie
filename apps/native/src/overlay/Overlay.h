@@ -152,7 +152,7 @@ class Overlay {
 
     /// Published by the render thread, read by the window thread. One frame
     /// stale by construction — see `InputQueue.h`.
-    std::atomic<int> toggle_key_{VK_INSERT};
+    std::atomic<int> toggle_key_{VK_F1};
     std::atomic<bool> visible_{false};
     std::atomic<bool> wants_mouse_{false};
     std::atomic<bool> wants_keyboard_{false};
