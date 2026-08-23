@@ -124,27 +124,48 @@
           "type": "byte"
         },
         {
+          "name": "presentFields",
+          "type": "byte"
+        },
+        {
           "name": "targetObjectId",
-          "type": "int32"
+          "type": "compressedInt",
+          "presentWhen": { "field": "presentFields", "bit": 64 }
         },
         {
-          "name": "position",
-          "type": "Location"
+          "name": "positionX",
+          "type": "float",
+          "presentWhen": { "field": "presentFields", "bit": 2 }
         },
         {
-          "name": "targetPosition",
-          "type": "Location",
-          "optional": true
+          "name": "positionY",
+          "type": "float",
+          "presentWhen": { "field": "presentFields", "bit": 4 }
+        },
+        {
+          "name": "targetPositionX",
+          "type": "float",
+          "presentWhen": { "field": "presentFields", "bit": 8 }
+        },
+        {
+          "name": "targetPositionY",
+          "type": "float",
+          "presentWhen": { "field": "presentFields", "bit": 16 }
         },
         {
           "name": "color",
           "type": "int32",
-          "optional": true
+          "presentWhen": { "field": "presentFields", "bit": 1 }
         },
         {
           "name": "duration",
           "type": "float",
-          "optional": true
+          "presentWhen": { "field": "presentFields", "bit": 32 }
+        },
+        {
+          "name": "unknown",
+          "type": "byte",
+          "presentWhen": { "field": "presentFields", "bit": 128 }
         }
       ]
     },

@@ -70,6 +70,15 @@ export function isBlastEffect(effectType: number): boolean {
 export const MAX_TELEGRAPH_MS = 8000;
 export const DEFAULT_TELEGRAPH_MS = 600;
 
+/**
+ * What a telegraph that states no duration lasts, in seconds.
+ *
+ * The game's own default rather than ours: `SHOWEFFECT` omits every field it
+ * does not need, and the client fills an absent duration with one second. A
+ * packet that says nothing is not a packet with no delay.
+ */
+export const DEFAULT_EFFECT_SECONDS = 1;
+
 /** What a telegraph carries. See {@link BlastStore.announce}. */
 export interface BlastTelegraph {
   /** Where it will land. */

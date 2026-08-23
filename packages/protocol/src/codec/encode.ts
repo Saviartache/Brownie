@@ -1,5 +1,6 @@
 import { ByteWriter } from '../binary/ByteWriter.js';
 import { EncodeError } from '../errors.js';
+import { present } from './decode.js';
 import type { PacketRegistry } from '../registry/PacketRegistry.js';
 import type {
   FieldSchema,
@@ -88,6 +89,10 @@ function writeFieldList(
     // nothing after it can be written either. `undefined` means "not on the
     // wire", which is exactly what the decoder records.
     if (field.optional && value === undefined) return;
+    // A conditional field is written exactly when the mask in this same packet
+    // says it is there — so a body read and written back reproduces its bytes,
+    // and a stage that means to add one sets the bit as well as the value.
+    if (field.presentWhen !== undefined && !present(field.presentWhen, values)) continue;
 
     if (field.value.kind === 'statValue') {
       writeStatValue(registry, writer, values, value, fieldPath);

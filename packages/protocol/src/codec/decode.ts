@@ -7,6 +7,7 @@ import type {
   FieldValue,
   PacketFields,
   PacketSchema,
+  PresenceBit,
   ValueSchema,
 } from '../schema/types.js';
 import type { DecodedPacket } from './DecodedPacket.js';
@@ -155,12 +156,30 @@ function readFields(
     // Optional fields are trailing (enforced by the schema loader), so "the
     // packet ended" is the only way one can be absent.
     if (field.optional && reader.exhausted) continue;
+    // A conditional field is absent because a mask said so, which is a fact
+    // stated on the wire rather than inferred from what is left — so it may sit
+    // anywhere, and skipping it reads no bytes at all.
+    if (field.presentWhen !== undefined && !present(field.presentWhen, values)) continue;
     path.enter(field.name);
     values[field.name] = readValue(registry, reader, field.value, path, values);
     path.leave();
   }
 
   return values;
+}
+
+/**
+ * Whether the mask says this field is here.
+ *
+ * A mask that is missing or not a number reads as "nothing is here", which is
+ * the safe answer: the alternative is reading bytes the packet does not have
+ * and failing the whole body. The loader has already established that the field
+ * exists, is an integer and is unconditional, so this is unreachable in
+ * practice and is a floor rather than a check.
+ */
+export function present(bit: PresenceBit, values: PacketFields): boolean {
+  const mask = values[bit.field];
+  return typeof mask === 'number' && (mask & bit.bit) !== 0;
 }
 
 function readValue(

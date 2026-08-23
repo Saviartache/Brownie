@@ -19,6 +19,13 @@ import {
  */
 const registry: PacketRegistry = createBundledRegistry();
 
+/** One float, big-endian, as every position on this wire travels. */
+function floatBytes(value: number): Buffer {
+  const bytes = Buffer.alloc(4);
+  bytes.writeFloatBE(value, 0);
+  return bytes;
+}
+
 /** Small deterministic PRNG — reproducible failures matter more than entropy. */
 function makeRandom(seed: number): () => number {
   let state = seed >>> 0 || 1;
@@ -31,6 +38,13 @@ function makeRandom(seed: number): () => number {
 function generateFields(fields: readonly FieldSchema[], rand: () => number): PacketFields {
   const values: PacketFields = {};
   for (const field of fields) {
+    // A field the mask says is absent has to be absent here too, or the round
+    // trip compares a value that was never written against one that was never
+    // read. `undefined` means "not on the wire" on both sides of the codec.
+    if (field.presentWhen !== undefined) {
+      const mask = values[field.presentWhen.field];
+      if (typeof mask !== 'number' || (mask & field.presentWhen.bit) === 0) continue;
+    }
     values[field.name] = generateValue(field.value, rand, values);
   }
   return values;
@@ -127,6 +141,52 @@ describe('bundled definitions', () => {
         );
       }
     }
+  });
+
+  // **The one packet whose body is a mask rather than a list**, and the one the
+  // definitions had wrong: read positionally, 206 of 273 captured SHOWEFFECT
+  // bodies failed outright and the rest read a landing spot out of the middle of
+  // somebody else's float. The bytes below are the layout the game actually
+  // sends, in the order it sends them, so a definition that drifts back fails
+  // here rather than as a dodge that walks out of its own party's abilities.
+  it('reads a SHOWEFFECT body the way the game writes one', () => {
+    const HAS_COLOR = 1;
+    const HAS_POSITION_X = 2;
+    const HAS_POSITION_Y = 4;
+    const HAS_TARGET_ID = 64;
+
+    const body = Buffer.concat([
+      Buffer.from([
+        4, // a throw
+        HAS_TARGET_ID | HAS_POSITION_X | HAS_POSITION_Y | HAS_COLOR,
+        // 524 as the game's variable-length integer: six low bits and a
+        // continuation, then the rest.
+        0x8c,
+        0x08,
+      ]),
+      floatBytes(12.5),
+      floatBytes(9.25),
+      Buffer.from([0x00, 0xff, 0x00, 0x7f]),
+    ]);
+    const frame = Buffer.alloc(5 + body.length);
+    frame.writeInt32BE(frame.length, 0);
+    frame.writeUInt8(registry.idOf('SHOWEFFECT')!, 4);
+    body.copy(frame, 5);
+
+    const decoded = decodeFrame(registry, frame);
+
+    expect(isOpaque(decoded), decoded.error?.message ?? '').toBe(false);
+    expect(decoded.fields['effectType']).toBe(4);
+    expect(decoded.fields['targetObjectId']).toBe(524);
+    expect(decoded.fields['positionX']).toBe(12.5);
+    expect(decoded.fields['positionY']).toBe(9.25);
+    expect(decoded.fields['color']).toBe(0x00ff007f);
+    // The mask said nothing about these, so they are not on the wire — which is
+    // different from being nought, and is what the reader has to say.
+    expect(decoded.fields['targetPositionX']).toBeUndefined();
+    expect(decoded.fields['duration']).toBeUndefined();
+    expect(decoded.trailing).toHaveLength(0);
+    expect(encodePacket(registry, decoded).equals(frame)).toBe(true);
   });
 
   it('never throws on hostile input for any id', () => {

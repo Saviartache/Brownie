@@ -537,8 +537,9 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // point that travels — and it is read from the telegraph the game sends
       // before it lands, because the packet that reports the blast itself
       // arrives after the damage. Its own switch because it rests on a packet
-      // body recovered from the game's metadata rather than one the game states,
-      // so there is a way to turn it off if a patch moves it.
+      // body worked out rather than stated — a mask byte and nine conditional
+      // fields, see `docs/protocol.md` — so there is a way to turn it off if a
+      // patch moves it.
       const avoidBlasts = context.settings.boolean('avoidBlasts', {
         label: 'Dodge thrown bombs and area effects',
         group: 'Safety',
@@ -1211,12 +1212,15 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         if (effectType === undefined || seenEffects.has(effectType)) return;
         seenEffects.add(effectType);
         // Whether the body carried a landing spot as well as a source is half
-        // of what tells a telegraph from decoration, and it is the half the
-        // decode was getting wrong.
-        const aimed = packet.get('targetPosition') !== undefined;
+        // of what tells a telegraph from decoration — and whether it named a
+        // thrower is what decides whose it is, so a type that never does is a
+        // type this feature can only ever refuse.
+        const aimed = packet.number('targetPositionX') !== undefined;
+        const owned = packet.number('targetObjectId') !== undefined;
         const verdict = isBlastEffect(effectType) ? 'dodged' : 'ignored';
         const body = aimed ? 'carries a landing spot' : 'position only';
-        context.log.info(`showeffect type ${String(effectType)}: ${verdict}, ${body}`);
+        const owner = owned ? 'names a thrower' : 'anchored to nothing';
+        context.log.info(`showeffect type ${String(effectType)}: ${verdict}, ${body}, ${owner}`);
       });
     },
   });

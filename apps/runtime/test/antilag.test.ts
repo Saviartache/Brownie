@@ -288,11 +288,18 @@ describe('the anti-lag plugin', () => {
     status: statusOf(objectId),
   });
 
+  /** The bit that says a target id follows. See `packet-definitions.json`. */
+  const HAS_TARGET_ID = 64;
+
   const showEffect = (effectType: number, targetId: number): MutablePacket => {
-    const body = Buffer.alloc(5);
-    body.writeUInt8(effectType, 0);
-    body.writeInt32BE(targetId, 1);
-    return new MutablePacket(decodeFrame(registry, frameOf(SHOWEFFECT_ID, body)));
+    const packet = createPacket(registry, 'SHOWEFFECT');
+    // Nought means an effect anchored to nothing, which the packet says by
+    // leaving the bit clear rather than by carrying a zero.
+    packet.fields =
+      targetId > 0
+        ? { effectType, presentFields: HAS_TARGET_ID, targetObjectId: targetId }
+        : { effectType, presentFields: 0 };
+    return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
   };
 
   /** The size the packet ends up carrying for one status, if any. */
@@ -493,30 +500,31 @@ describe('the anti-lag plugin', () => {
     expect(heal.verdict).toBe('forward');
   });
 
-  it('drops a teammate’s effects only once the body layout is known', () => {
+  // **The id is read off the schema now that there is one.** This body used to
+  // be undescribed, and the id was found by trying twelve offsets until one of
+  // them kept naming live objects — which meant nothing was dropped until the
+  // guess had settled, and the guess it settled on was two bytes off the real
+  // field. See `TargetIdProbe`, which still does that for `NOTIFICATION`.
+  it('drops a teammate’s effects and leaves an enemy’s telegraph alone', () => {
     const { host, settings } = loadEnabled();
     settings.apply('allyEffects', AllyEffectMode.All);
 
     const { session, world } = fakeSession();
     world.entities.set(524, entityView(524));
 
-    // While the layout is being learned nothing is dropped, so a wrong guess
-    // could never have eaten a boss telegraph.
-    for (let i = 0; i < 4; i++) {
-      const learning = showEffect(7, 524);
-      host.dispatchPacket(learning, session);
-      expect(learning.verdict).toBe('forward');
-    }
-
     const dropped = showEffect(7, 524);
     host.dispatchPacket(dropped, session);
     expect(dropped.verdict).toBe('drop');
 
-    // An enemy at the same offset is not a teammate, so its telegraph stays.
     world.entities.set(900, entityView(900, { isPlayer: false, isEnemy: true, objectType: 9 }));
     const enemyTelegraph = showEffect(7, 900);
     host.dispatchPacket(enemyTelegraph, session);
     expect(enemyTelegraph.verdict).toBe('forward');
+
+    // An effect the packet anchored to nothing has no owner to judge.
+    const anchorless = showEffect(7, 0);
+    host.dispatchPacket(anchorless, session);
+    expect(anchorless.verdict).toBe('forward');
   });
 
   it('survives a truncated effect body', () => {

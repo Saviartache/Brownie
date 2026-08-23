@@ -1,5 +1,9 @@
 import type { MutablePacket } from '@brownie/plugin-api';
-import { isBlastEffect, THROW_EFFECT, UNKNOWN_ORIGIN_TYPE } from '../../state/blasts/BlastStore.js';
+import {
+  DEFAULT_EFFECT_SECONDS,
+  isBlastEffect,
+  THROW_EFFECT,
+} from '../../state/blasts/BlastStore.js';
 import type { WorldState } from '../../state/WorldState.js';
 import { readStats } from '../../state/stats.js';
 import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketPipeline.js';
@@ -340,31 +344,40 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         // with the same effect type, and the planner walked out of both — which
         // is a dodge that runs away from its own party. The object the effect
         // hangs on is the thrower, and the catalog is what says what it is.
-        const thrower = world.entityStore.get(packet.number('targetObjectId') ?? -1);
-        if (
-          thrower !== undefined &&
-          (thrower.isPlayer || world.objects.isPet(thrower.objectType))
-        ) {
+        //
+        // **Unidentified is refused, not assumed hostile.** The id is one of the
+        // fields this packet may simply omit, and a player's own ability is the
+        // commonest thing on the screen that carries one of these effect types —
+        // so a blast nobody can be blamed for is far more often a friend's than
+        // a boss's. Missing the occasional telegraph costs a hit; walking out of
+        // every ability the party throws is a dodge nobody can play with.
+        const targetObjectId = packet.number('targetObjectId');
+        if (targetObjectId === undefined) return;
+        const thrower = world.entityStore.get(targetObjectId);
+        if (thrower === undefined || thrower.isPlayer || world.objects.isPet(thrower.objectType)) {
           return;
         }
 
         // A throw lands where it is aimed; everything else goes off where it
-        // was announced. The reference implementation drew the same line.
+        // was announced. The reference implementation drew the same line — see
+        // its `AoeTracking.cpp`, which reads `pos1` as the source of a throw and
+        // `pos2` as its landing spot, and `pos1` as the centre of everything
+        // else.
         //
-        // **Only the first position is always on the wire**, and a throw with
-        // no stated landing spot is not one this can place: falling back to
-        // where it was *thrown from* would pencil a bomb in on top of the
-        // monster that threw it and have the planner refuse the ground under
-        // it. Better to miss the telegraph than to invent one.
-        const source = pointOf(packet.get('position'));
-        const target = pointOf(packet.get('targetPosition'));
+        // **A throw with no stated landing spot is not one this can place**, and
+        // falling back to where it was *thrown from* would pencil a bomb in on
+        // top of the monster that threw it and have the planner refuse the
+        // ground under it. Better to miss the telegraph than to invent one.
+        const source = pointOf(packet.number('positionX'), packet.number('positionY'));
+        const target = pointOf(packet.number('targetPositionX'), packet.number('targetPositionY'));
         const at = effectType === THROW_EFFECT ? target : source;
         if (at === undefined) return;
 
         // The field is a float and the game is inconsistent about its unit, so
         // it is read the way the reference implementation read it: small
-        // numbers are seconds, large ones are already milliseconds.
-        const duration = packet.number('duration') ?? 0;
+        // numbers are seconds, large ones are already milliseconds. Absent means
+        // the game's own default of one second, which is what the client uses.
+        const duration = packet.number('duration') ?? DEFAULT_EFFECT_SECONDS;
         const armsInMs = duration > 0 && duration <= 120 ? duration * 1000 : duration;
         world.blastStore.announce(world.gameTimeMs, {
           x: at.x,
@@ -372,7 +385,7 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
           armsInMs,
           // What the measured radius is remembered against: the enemy, and the
           // colour of the ability it used. See `BlastRadiusTable`.
-          originType: thrower?.objectType ?? UNKNOWN_ORIGIN_TYPE,
+          originType: thrower.objectType,
           color: packet.number('color') ?? 0,
         });
       },
@@ -386,7 +399,7 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
       // around.
       'AOE',
       (packet, world) => {
-        const at = pointOf(packet.get('position'));
+        const at = locationOf(packet.get('position'));
         if (at === undefined) return;
         world.blastStore.landed(world.gameTimeMs, {
           x: at.x,
@@ -403,11 +416,23 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
 }
 
 /** A `Location` from the wire, when it is one. */
-function pointOf(value: unknown): { x: number; y: number } | undefined {
-  const record = asRecord(value);
-  const x = numberOf(record, 'x');
-  const y = numberOf(record, 'y');
+/**
+ * Two loose coordinates as a point, when both of them are on the wire.
+ *
+ * `SHOWEFFECT` gates each axis on its own bit, so half a position is a shape the
+ * packet can genuinely carry — and half a position is not a place.
+ */
+function pointOf(
+  x: number | undefined,
+  y: number | undefined,
+): { x: number; y: number } | undefined {
   return x === undefined || y === undefined ? undefined : { x, y };
+}
+
+/** The same, out of a `Location` object. */
+function locationOf(value: unknown): { x: number; y: number } | undefined {
+  const record = asRecord(value);
+  return pointOf(numberOf(record, 'x'), numberOf(record, 'y'));
 }
 
 // Packet fields are data we were handed, so every read is a check. These

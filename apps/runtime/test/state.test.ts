@@ -775,6 +775,17 @@ describe('blasts on their way down', () => {
     return built;
   }
 
+  // **The mask that says which of the nine fields follow.** This packet omits
+  // everything it does not need, and a schema that read it positionally failed
+  // on three quarters of a live capture — see `packet-definitions.json`.
+  const HAS_COLOR = 1;
+  const HAS_POSITION_X = 2;
+  const HAS_POSITION_Y = 4;
+  const HAS_TARGET_X = 8;
+  const HAS_TARGET_Y = 16;
+  const HAS_DURATION = 32;
+  const HAS_TARGET_ID = 64;
+
   function showEffect(
     effectType: number,
     from: { x: number; y: number },
@@ -785,9 +796,19 @@ describe('blasts on their way down', () => {
   ): MutablePacket {
     return packetOf('SHOWEFFECT', {
       effectType,
+      presentFields:
+        HAS_TARGET_ID |
+        HAS_POSITION_X |
+        HAS_POSITION_Y |
+        HAS_TARGET_X |
+        HAS_TARGET_Y |
+        HAS_COLOR |
+        HAS_DURATION,
       targetObjectId: thrower,
-      position: from,
-      targetPosition: to,
+      positionX: from.x,
+      positionY: from.y,
+      targetPositionX: to.x,
+      targetPositionY: to.y,
       color,
       duration,
     });
@@ -814,17 +835,19 @@ describe('blasts on their way down', () => {
   /**
    * The shape the wire actually carries most of the time.
    *
-   * A live session recorded 19 016 of these and 17 878 of them ended right
-   * where `targetPosition` would have begun — so the second position, the
-   * colour and the duration are not always sent, and reading them as though
-   * they were failed the *whole* decode. Nothing downstream can tell a packet
-   * that failed to decode from a packet that never came.
+   * A live session recorded 19 016 of these and 17 878 of them carried no
+   * second position, colour or duration at all — which is what the mask is for,
+   * and what the old positional schema could not describe: 206 of 273 captured
+   * SHOWEFFECT bodies failed to decode outright, and nothing downstream can
+   * tell a packet that failed to decode from a packet that never came.
    */
   function shortEffect(effectType: number, at: { x: number; y: number }): MutablePacket {
     return packetOf('SHOWEFFECT', {
       effectType,
+      presentFields: HAS_TARGET_ID | HAS_POSITION_X | HAS_POSITION_Y,
       targetObjectId: BOMBER_ID,
-      position: at,
+      positionX: at.x,
+      positionY: at.y,
     });
   }
 
@@ -855,8 +878,7 @@ describe('blasts on their way down', () => {
   });
 
   it('records a thrown bomb where it will land, not where it was thrown', () => {
-    const { world, feed } = harness();
-    world.markConnected();
+    const { world, feed } = thrown();
     feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6));
 
     const blasts = [...world.blasts()];
@@ -871,16 +893,14 @@ describe('blasts on their way down', () => {
   // A nova or a ground circle goes off where it is announced; only a throw has
   // somewhere else to be.
   it('records a nova where it was announced', () => {
-    const { world, feed } = harness();
-    world.markConnected();
+    const { world, feed } = thrown();
     feed(showEffect(NOVA_EFFECT, { x: 7, y: 7 }, { x: 0, y: 0 }, 0.5));
 
     expect([...world.blasts()][0]?.x).toBeCloseTo(7, 5);
   });
 
   it('ignores the effects that are only decoration', () => {
-    const { world, feed } = harness();
-    world.markConnected();
+    const { world, feed } = thrown();
     // A flash, a beam, a trail: reacting to these would have the dodge running
     // from light.
     for (const type of [1, 2, 3, 6, 7, 15]) {
@@ -898,6 +918,36 @@ describe('blasts on their way down', () => {
   it('ignores a throw an ally made', () => {
     const { world, feed } = thrown();
     feed(showEffect(THROW_EFFECT, { x: 4, y: 4 }, { x: 12, y: 9 }, 0.6, ALLY_ID));
+
+    expect(world.blastStore.size).toBe(0);
+  });
+
+  // **The live complaint: "we are still dodging an allied blast."** The id was
+  // being read out of the wrong bytes, so it never named anybody — and an
+  // unidentified thrower was treated as hostile, which meant every ability the
+  // party threw was walked out of. It is refused now: a player's own ability is
+  // by far the commonest thing on the screen carrying one of these effect types,
+  // so a blast nobody can be blamed for is more often a friend's than a boss's.
+  it('refuses a throw it cannot say who made', () => {
+    const { world, feed } = thrown();
+    feed(showEffect(THROW_EFFECT, { x: 3, y: 3 }, { x: 12, y: 9 }, 0.6, 999));
+
+    expect(world.blastStore.size).toBe(0);
+  });
+
+  // And the same for one that names nobody at all, which the mask allows.
+  it('refuses a throw anchored to nothing', () => {
+    const { world, feed } = thrown();
+    feed(
+      packetOf('SHOWEFFECT', {
+        effectType: THROW_EFFECT,
+        presentFields: HAS_POSITION_X | HAS_POSITION_Y | HAS_TARGET_X | HAS_TARGET_Y,
+        positionX: 3,
+        positionY: 3,
+        targetPositionX: 12,
+        targetPositionY: 9,
+      }),
+    );
 
     expect(world.blastStore.size).toBe(0);
   });

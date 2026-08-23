@@ -1,12 +1,18 @@
 /**
  * Where the target object id sits in a body no schema describes.
  *
- * `SHOWEFFECT` and `NOTIFICATION` are defined with empty field lists — the
- * project has never worked out their layouts, and the reference implementation
- * did not either (see `docs/protocol.md`). Rather than hardcode an offset the
- * repository has no evidence for, each layout is *learned*: every candidate
- * that decodes to an object id the world currently holds gets a vote, and a
- * candidate is only used once it has won {@link CONFIDENCE} times.
+ * `NOTIFICATION` carries an object id in a body no schema describes, and the
+ * layout differs per notification type. Rather than hardcode an offset the
+ * repository has no evidence for, it is *learned*: every candidate that decodes
+ * to an object id the world currently holds gets a vote, and a candidate is only
+ * used once it has won {@link CONFIDENCE} times.
+ *
+ * **`SHOWEFFECT` used this and no longer does.** Its body turned out to be a
+ * bitmask rather than a fixed list, and the probe — which asks only "does this
+ * offset keep naming live objects" — settled two bytes off the real field while
+ * agreeing with it often enough to look right. That is the failure mode of
+ * learning a layout instead of reading one, and it is why the schema is the
+ * authority wherever there is a schema. See `docs/protocol.md`.
  *
  * **Until then nothing is reported, so nothing is dropped.** A wrong guess can
  * never eat a boss telegraph; it leaves the filter idle. And after a lock the

@@ -131,9 +131,9 @@ export class WorldStatusStage implements PipelineStage {
       this.#world.shots.noOwner,
       this.#world.shots.noDefinition,
       // **The telegraph decode checking its own homework.** Where a thrown bomb
-      // will land is read from a `SHOWEFFECT` body whose layout was recovered
-      // from the game's own metadata rather than stated by it, so the only
-      // honest confirmation is the detonation that follows: a prediction the
+      // will land is read from a `SHOWEFFECT` body whose layout was worked out
+      // rather than stated by the game, so the only honest confirmation is the
+      // detonation that follows: a prediction the
       // `AOE` lands on is one the decode got right. A patch that moves the
       // layout shows up here as confirmations stopping and unmatched climbing,
       // instead of as a dodge that quietly stopped avoiding bombs.

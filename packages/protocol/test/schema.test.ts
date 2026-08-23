@@ -51,6 +51,100 @@ describe('loadDefinitions', () => {
       ).toThrow(/optional fields must be trailing/);
     });
 
+    // A mask naming a field that is not there, or one that is not an integer,
+    // is a typo in a data file. Caught at load, it is a startup error; caught on
+    // a live connection it is a packet stream reading the wrong bytes.
+    it('a presence bit pointing at a field that does not exist', () => {
+      expect(() =>
+        load({
+          packets: {
+            '0': {
+              name: 'A',
+              direction: 'client',
+              fields: [
+                { name: 'mask', type: 'byte' },
+                { name: 'a', type: 'byte', presentWhen: { field: 'nope', bit: 1 } },
+              ],
+            },
+          },
+          dataObjects: {},
+        }),
+      ).toThrow(/no earlier field named "nope"/);
+    });
+
+    it('a presence bit pointing at a field that comes later', () => {
+      expect(() =>
+        load({
+          packets: {
+            '0': {
+              name: 'A',
+              direction: 'client',
+              fields: [
+                { name: 'a', type: 'byte', presentWhen: { field: 'mask', bit: 1 } },
+                { name: 'mask', type: 'byte' },
+              ],
+            },
+          },
+          dataObjects: {},
+        }),
+      ).toThrow(/no earlier field named "mask"/);
+    });
+
+    it('a presence bit read out of a string', () => {
+      expect(() =>
+        load({
+          packets: {
+            '0': {
+              name: 'A',
+              direction: 'client',
+              fields: [
+                { name: 'mask', type: 'string' },
+                { name: 'a', type: 'byte', presentWhen: { field: 'mask', bit: 1 } },
+              ],
+            },
+          },
+          dataObjects: {},
+        }),
+      ).toThrow(/cannot carry a mask/);
+    });
+
+    it('a presence bit read out of a field that may itself be absent', () => {
+      expect(() =>
+        load({
+          packets: {
+            '0': {
+              name: 'A',
+              direction: 'client',
+              fields: [
+                { name: 'gate', type: 'byte' },
+                { name: 'mask', type: 'byte', presentWhen: { field: 'gate', bit: 1 } },
+                { name: 'a', type: 'byte', presentWhen: { field: 'mask', bit: 1 } },
+              ],
+            },
+          },
+          dataObjects: {},
+        }),
+      ).toThrow(/may itself be absent/);
+    });
+
+    it('a presence bit that is more than one bit', () => {
+      expect(() =>
+        load({
+          packets: {
+            '0': {
+              name: 'A',
+              direction: 'client',
+              fields: [
+                { name: 'mask', type: 'byte' },
+                { name: 'a', type: 'byte', presentWhen: { field: 'mask', bit: 3 } },
+              ],
+            },
+          },
+          dataObjects: {},
+        }),
+      ).toThrow(/is not a single bit/);
+    });
+
     it('an optional field inside a data object', () => {
       expect(() =>
         load({

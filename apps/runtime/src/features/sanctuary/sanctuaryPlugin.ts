@@ -18,10 +18,12 @@
  * ## The treasure shuffle is off by default, and that is deliberate
  *
  * One of the three artifacts is the one to hit; the others punish. The game
- * says which by flashing it, through `SHOWEFFECT` — and no definition in
- * `packages/protocol` describes that packet's body, so nothing here can tell
- * them apart. Switching the rule on therefore withholds hits on **all three**,
- * including the right one, which is a real cost and not a safety margin. It is
+ * says which by flashing it, through `SHOWEFFECT` — whose body is described now,
+ * so the object it names is readable; what nobody here has established is which
+ * effect type on which object marks the safe one, and that is a question about
+ * the mechanic rather than about the packet. Until somebody watches one,
+ * switching the rule on withholds hits on **all three**, including the right
+ * one, which is a real cost and not a safety margin. It is
  * offered because avoiding the penalty is sometimes worth it, and defaulted off
  * because a switch that quietly stops the player damaging the mechanic is not
  * something to turn on for them.

@@ -216,29 +216,60 @@ The field list came from the client's own metadata, not from guesswork:
   the extractor also publishes has the class's field-name strings in declaration
   order, and the name between pos2 and duration is the colour.
 
-Six fields, and as wire types they come to **29 bytes** — but the game does not
-always send all six, and reading it as though it did is how the telegraph came
-to be decoded for six per cent of the packets that carry it.
+Six fields — and **memory offsets are not a wire format**, which is where the
+first reading of this packet went wrong. Those offsets say how the managed object
+is laid out once it has been built; they say nothing about how many bytes travel,
+in what order, or whether they travel at all. Read positionally, in that order,
+as a fixed body with three trailing optionals, the definition was wrong in every
+one of those three ways.
 
-**The three after `position` are optional, and our own capture is what says so.**
-A live session recorded 19 016 `SHOWEFFECT`s from the server and **17 878 of them
-failed to decode**, every one with the same reason: `need 4 byte(s), have 0
-(@18)`. The reader window starts at `HEADER_BYTES`, so that is body offset 13 —
-which is exactly where `targetPosition` begins, `1 + 4 + 8`. The body ends
-there. So the shape the wire actually carries is `effectType`, `targetObjectId`
-and one position, with the second position, the colour and the duration present
-only sometimes; they are declared `optional` and the schema loader's rule that
-optionals must be trailing is what makes that decodable.
+**The body is a bitmask, and three separate sources say so.**
 
-A failed decode is not a dropped packet — the bytes forward untouched — but it
-leaves every field unreadable, so the whole area-effect feature was quietly
-starved rather than wrong. The counters below are what it should have been read
-off, and were not.
+- Our own capture: 273 `SHOWEFFECT`s from the server and **206 of them failed to
+  decode**, all with `need 4 byte(s), have 0 (@22)`. A shape that fails three
+  times in four is not a shape with optional fields on the end.
+- Anti-lag's `TargetIdProbe` — which learns where an object id sits by trying
+  twelve candidates and keeping the one that repeatedly names live objects —
+  settled on **offset 2, compressed**. The positional definition put a four-byte
+  `targetObjectId` at offset 1.
+- `RealmShark`'s `ShowEffectPacket`, an independent reader of the same protocol,
+  deserialises a **mask byte** after the type byte whose bits name which of nine
+  fields follow.
 
-Bodies longer than 29 bytes have also been seen, up to 57. Those bytes are kept
-as `trailing` and re-emitted verbatim, exactly as the table above promises, and
-what they mean is not yet known — see item 2 of `docs/migration/newfeatures.md`,
-which is the same question as which effect types are telegraphs at all.
+All three agree, and the layout in `packet-definitions.json` is now that one:
+
+| offset | field | present when |
+| ------ | ----- | ------------ |
+| 0 | `effectType` (byte) | always |
+| 1 | `presentFields` (byte) | always |
+| — | `targetObjectId` (compressed int) | bit 64 |
+| — | `positionX`, `positionY` (float) | bits 2 and 4 |
+| — | `targetPositionX`, `targetPositionY` (float) | bits 8 and 16 |
+| — | `color` (int32) | bit 1 |
+| — | `duration` (float) | bit 32 |
+| — | `unknown` (byte) | bit 128 |
+
+Each axis of a position is gated on its own bit, so half a position is a shape
+the packet can genuinely carry — and half a position is not a place, which is
+why the reader refuses one. An absent duration is one second, which is the
+client's own default; an absent `targetObjectId` is an effect anchored to
+nothing.
+
+**A schema feature exists for this and for nothing else so far.** A field may
+declare `presentWhen: { field, bit }`, naming an earlier integer field and a
+single bit of it; the loader checks the reference, the type and the bit at load
+time, and the codec reads and writes the field only when that bit is set. It is
+not the same thing as `optional`, which means *trailing* and is inferred from the
+packet ending — a conditional field may sit anywhere, because whether it is there
+is stated rather than guessed.
+
+**What the wrong reading cost, and how it showed up.** A failed decode is not a
+dropped packet — the bytes forward untouched — so three quarters of every
+telegraph was simply invisible. The quarter that had enough bytes to parse
+decoded garbage: `targetObjectId` read across the mask and into a float, so it
+never named anybody, and every blast was therefore treated as hostile. Live
+report: "we are still dodging an allied blast", and, of an enemy's throw drawn on
+the map, "it stayed right under him — the landing point is wrong."
 
 **The decode checks itself against the game.** Where a telegraph says a bomb will
 land is a claim; the `AOE` that follows is the answer sheet. `BlastStore` counts
@@ -247,12 +278,20 @@ World tab shows both. A layout that drifts after a patch therefore shows up as
 confirmations stopping and unmatched climbing — a number to look at, rather than
 a dodge that quietly stopped avoiding bombs.
 
-**Two of the six fields decide whether a telegraph is a threat at all.**
+**Two of the fields decide whether a telegraph is a threat at all.**
 `targetObjectId` is the object the effect hangs on, which is the thrower: a
 teammate's ability and a monster's bomb are otherwise the same packet with the
 same effect type, and the planner walked out of both. The catalog is what tells
-them apart — `<Player/>` and `<Pet/>` in `objects.xml` — so with no game data
-loaded every telegraph is treated as dangerous, which is the safe direction.
+them apart — `<Player/>` and `<Pet/>` in `objects.xml`.
+
+**A thrower that cannot be identified is refused, not assumed hostile.** The id
+is one of the fields this packet may omit, and a player's own ability is by far
+the commonest thing on the screen carrying one of these effect types — so a
+telegraph nobody can be blamed for is more often a friend's than a boss's.
+Missing the occasional real one costs a hit; walking out of every ability the
+party throws is a dodge nobody can play with. It also means the area-effect
+half of the feature does nothing at all with no game data loaded, which is the
+honest behaviour: it cannot tell friend from foe, so it does not guess.
 `color` is not used to make that decision: it names the ability rather than the
 side, and a colour table would have to be maintained against a game that adds
 abilities. What it is used for is remembering how wide the blast turned out to

@@ -49,6 +49,25 @@ export type ValueSchema =
    */
   | { readonly kind: 'statValue' };
 
+/**
+ * A bit in an earlier field that says whether this one is on the wire.
+ *
+ * **The game omits what it does not need, and says so in a mask.** `SHOWEFFECT`
+ * carries a byte whose bits name which of its nine fields follow; a packet
+ * announcing a nova with no colour and no duration is four bytes shorter than
+ * one that has them. A positional schema cannot describe that, and describing
+ * it as "optional" — which means *trailing* — is worse than not describing it
+ * at all: three quarters of the SHOWEFFECT packets in a capture failed to
+ * decode, and the quarter that succeeded read a landing spot out of the middle
+ * of somebody else's float.
+ */
+export interface PresenceBit {
+  /** The field carrying the mask. Always an integer, always earlier. */
+  readonly field: string;
+  /** The single bit that names this field. */
+  readonly bit: number;
+}
+
 export interface FieldSchema {
   readonly name: string;
   readonly value: ValueSchema;
@@ -58,6 +77,13 @@ export interface FieldSchema {
    * absent field in the middle would silently shift every field after it.
    */
   readonly optional: boolean;
+  /**
+   * Or absent because a mask said so, which needs no such rule.
+   *
+   * A conditional field may sit anywhere, because whether it is there is
+   * *stated* rather than inferred from what is left. See {@link PresenceBit}.
+   */
+  readonly presentWhen: PresenceBit | undefined;
   /** Value to use when an optional field is absent. */
   readonly defaultValue: FieldValue | undefined;
 }

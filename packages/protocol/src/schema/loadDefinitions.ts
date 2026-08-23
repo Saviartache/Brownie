@@ -6,6 +6,7 @@ import {
   type LengthType,
   type ObjectSchema,
   type PacketSchema,
+  type PresenceBit,
   type PrimitiveType,
   type ValueSchema,
 } from './types.js';
@@ -133,15 +134,85 @@ function parseFields(
     }
     if (optional) sawOptional = true;
 
+    const value = parseValue(record, fieldPath, objectNames);
+    const presentWhen = parsePresence(record['presentWhen'], fieldPath, fields);
     fields.push({
       name,
-      value: parseValue(record, fieldPath, objectNames),
+      value,
       optional,
-      defaultValue: optional ? parseDefault(record['default'], fieldPath) : undefined,
+      presentWhen,
+      defaultValue:
+        optional || presentWhen !== undefined
+          ? parseDefault(record['default'], fieldPath)
+          : undefined,
     });
   });
 
   return fields;
+}
+
+/** Integer types a presence mask may be carried in. */
+const MASK_TYPES: ReadonlySet<string> = new Set([
+  'byte',
+  'sbyte',
+  'int16',
+  'uint16',
+  'int32',
+  'uint32',
+  'compressedInt',
+]);
+
+/**
+ * The bit that says whether a field is on the wire. See {@link PresenceBit}.
+ *
+ * **Every part of it is checked here rather than at decode time**, because a
+ * mask naming a field that does not exist, or one that is a string, is a typo
+ * in a data file — and the difference between catching that at load and
+ * catching it on a live connection is the difference between a startup error
+ * and a packet stream that silently reads the wrong bytes.
+ */
+function parsePresence(
+  raw: unknown,
+  path: string,
+  earlier: readonly FieldSchema[],
+): PresenceBit | undefined {
+  if (raw === undefined) return undefined;
+  const record = asRecord(raw, `${path}.presentWhen`);
+  const field = asString(record['field'], `${path}.presentWhen.field`);
+
+  // Earlier, because the mask has to have been read before it can be consulted
+  // — and in *this* list, because a nested object is read on its own.
+  const carrier = earlier.find((candidate) => candidate.name === field);
+  if (carrier === undefined) {
+    throw new SchemaError(
+      `${path}.presentWhen.field: no earlier field named "${field}" to read the mask from`,
+    );
+  }
+  if (carrier.value.kind !== 'primitive' || !MASK_TYPES.has(carrier.value.type)) {
+    throw new SchemaError(
+      `${path}.presentWhen.field: "${field}" is not an integer, so it cannot carry a mask`,
+    );
+  }
+  // A mask that is itself conditional is a mask that may not be there, and a
+  // field whose presence cannot be decided is a field that cannot be read.
+  if (carrier.optional || carrier.presentWhen !== undefined) {
+    throw new SchemaError(
+      `${path}.presentWhen.field: "${field}" may itself be absent, so it cannot decide anything`,
+    );
+  }
+
+  const bit = record['bit'];
+  if (typeof bit !== 'number' || !Number.isInteger(bit) || bit <= 0 || bit > 0x7fff_ffff) {
+    throw new SchemaError(
+      `${path}.presentWhen.bit: expected a positive integer, got ${String(bit)}`,
+    );
+  }
+  // One bit, not a mask of several: two fields sharing a bit is a layout this
+  // cannot describe, and a "bit" of 3 is nearly always a typo for 2 or 4.
+  if ((bit & (bit - 1)) !== 0) {
+    throw new SchemaError(`${path}.presentWhen.bit: ${String(bit)} is not a single bit`);
+  }
+  return { field, bit };
 }
 
 function parseValue(

@@ -356,9 +356,6 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
 
       // ── Effects and popups ───────────────────────────────────────────────
 
-      const showEffectProbe = new TargetIdProbe((layout) => {
-        context.log.info(`SHOWEFFECT target id layout learned: ${layout}`);
-      });
       /** One probe per notification type: their payloads differ per type. */
       const notificationProbes = new Map<number, TargetIdProbe>();
 
@@ -379,10 +376,14 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
         const policy = policyFor(state);
         if (!policy.filtersEffects) return;
 
-        const frame = packet.frame;
-        // The type byte, and at least one byte of whatever follows it.
-        if (frame.length < HEADER_BYTES + 2) return;
-        const effectType = frame[HEADER_BYTES] ?? 0;
+        // **Read off the schema now that there is one.** This body used to be
+        // undescribed, and the id was found by trying twelve offsets until one
+        // of them kept naming live objects — see `TargetIdProbe`, which still
+        // does that for `NOTIFICATION`. The layout is known: a mask byte says
+        // which of the nine fields follow, and the id is one of them.
+        if (packet.opaque) return;
+        const effectType = packet.number('effectType');
+        if (effectType === undefined) return;
 
         const blocked = policy.blockedEffects;
         if (blocked !== undefined && blocks(blocked, effectType)) {
@@ -391,8 +392,10 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
         }
         if (policy.allyEffects === AllyEffectMode.Off) return;
 
-        const targetId = showEffectProbe.read(frame, HEADER_BYTES, state.isLive);
-        if (targetId === undefined) return;
+        // Absent whenever the mask says so, which is an effect anchored to
+        // nothing — there is no owner to judge and nothing to hide it with.
+        const targetId = packet.number('targetObjectId');
+        if (targetId === undefined || !state.isLive(targetId)) return;
 
         // An effect anchored to an object we removed has nothing to attach to.
         if (state.isHidden(targetId)) {
