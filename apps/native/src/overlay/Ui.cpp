@@ -367,7 +367,7 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
     // that does not work alone. What is left to show is whether it arrived and
     // whether it is doing anything.
     if (model.walk_gates == 0) {
-        StatusLine(column, kNoclipStatus, "waiting for the world manager - enter a map");
+        StatusLine(column, kNoclipStatus, "no local player right now");
     } else if (!model.walk_noclip_wanted) {
         StatusLine(column, kNoclipStatus, "off from the runtime, %d gate(s) watched",
                    static_cast<int>(model.walk_gates));
