@@ -26,6 +26,38 @@ export interface SettingHandle<T extends SettingValue> {
   onChange(listener: (value: T) => void): Unsubscribe;
 }
 
+/**
+ * A many-of-N choice — the handle a {@link SettingsApi.multiSelect} returns.
+ *
+ * Deliberately **not** a {@link SettingHandle}. Its value is a *set* of chosen
+ * option keys, and {@link SettingValue} is scalar on purpose — the persistence
+ * and overlay layers carry one value per setting as a boolean, a number or a
+ * string, and nothing else. So the set is stored as a single string of its keys
+ * joined by {@link MULTI_SELECT_DELIMITER}, and this handle is the one place a
+ * plugin reads it back as an array instead of having to split it.
+ */
+export interface MultiSelectHandle<T extends string> {
+  readonly key: string;
+  /** The chosen keys, in the order the options were declared. */
+  get(): readonly T[];
+  /** Whether one option is chosen. */
+  has(value: T): boolean;
+  /** Replaces the chosen set. Unknown keys are dropped, as on any other write. */
+  set(values: readonly T[]): void;
+  onChange(listener: (values: readonly T[]) => void): Unsubscribe;
+}
+
+/**
+ * The separator between a multi-select's chosen keys on the wire and on disk.
+ *
+ * A comma, because option keys are identifiers and do not contain one — the
+ * runtime drops any key that is not a declared option anyway, so a key that did
+ * contain the delimiter would simply never match rather than corrupt the set.
+ * The native overlay hard-codes the same character; it is a cross-language
+ * contract, so it lives here where both a plugin and a test can name it.
+ */
+export const MULTI_SELECT_DELIMITER = ',';
+
 /** Shared by every setting kind. */
 export interface SettingCommon {
   /** Shown next to the control. Defaults to a humanised key. */
@@ -61,6 +93,13 @@ export interface SelectSettingOptions<T extends string> extends SettingCommon {
   readonly options: ReadonlyArray<readonly [T, string]>;
 }
 
+export interface MultiSelectSettingOptions<T extends string> extends SettingCommon {
+  /** The keys chosen by default. Each must be one of {@link options}. */
+  readonly default: readonly T[];
+  /** Value → label, in the order the overlay should show them. */
+  readonly options: ReadonlyArray<readonly [T, string]>;
+}
+
 export interface TextSettingOptions extends SettingCommon {
   readonly default: string;
   readonly maxLength?: number;
@@ -88,6 +127,11 @@ export interface SettingsApi {
     options: NumberSettingOptions & { readonly min: number; readonly max: number },
   ): SettingHandle<number>;
   select<T extends string>(key: string, options: SelectSettingOptions<T>): SettingHandle<T>;
+  /** A many-of-N choice, drawn as a list of checkboxes. */
+  multiSelect<T extends string>(
+    key: string,
+    options: MultiSelectSettingOptions<T>,
+  ): MultiSelectHandle<T>;
   text(key: string, options: TextSettingOptions): SettingHandle<string>;
   /** A control with no value: pressing it calls `onPress`. */
   button(key: string, options: ButtonOptions): void;
@@ -98,6 +142,7 @@ export type SettingDescriptor =
   | ({ readonly kind: 'boolean'; readonly key: string } & BooleanSettingOptions)
   | ({ readonly kind: 'number' | 'range'; readonly key: string } & NumberSettingOptions)
   | ({ readonly kind: 'select'; readonly key: string } & SelectSettingOptions<string>)
+  | ({ readonly kind: 'multiSelect'; readonly key: string } & MultiSelectSettingOptions<string>)
   | ({ readonly kind: 'text'; readonly key: string } & TextSettingOptions)
   | ({ readonly kind: 'button'; readonly key: string } & ButtonOptions);
 

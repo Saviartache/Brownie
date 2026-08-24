@@ -83,7 +83,7 @@ One plugin's mistake never reaches another plugin, the proxy, or the game.
 |---|---|
 | `ctx.packets` | `on`, `onFirst`, `onAny` — packet subscriptions |
 | `ctx.commands` | chat commands, consumed only if the handler succeeds |
-| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `text`, `button` |
+| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `text`, `button` |
 | `ctx.sessions` | the current session, and connect/disconnect events |
 | `ctx.native` | `setFeature`, and whether the native module is connected |
 | `ctx.timers` | timers the host cancels with the plugin |
@@ -119,6 +119,26 @@ const radius = ctx.settings.range('radius', {
 One declaration is the source of truth for three things at once: the value the
 plugin reads, the control the overlay draws, and the key the config store
 persists.
+
+`multiSelect` is a many-of-N choice, drawn as a list of checkboxes. Its handle
+reads back a `readonly string[]`, but the value is stored and sent as a single
+string of the chosen keys joined by `MULTI_SELECT_DELIMITER` — the persistence
+and overlay layers carry one scalar value per setting, and a set that rode along
+as an array would need every one of them to learn a new shape. Unknown keys are
+dropped on write, and the stored string is always the chosen keys in the order
+the options were declared, so the same set never reads as a change.
+
+```ts
+const dungeons = ctx.settings.multiSelect('portals', {
+  label: 'Dungeons to enter',
+  default: [],
+  options: [
+    ['1818', 'Snake Pit Portal'],
+    ['1817', 'Undead Lair Portal'],
+  ],
+});
+// dungeons.get() -> readonly string[];  dungeons.has('1817') -> boolean
+```
 
 `visibleWhen` hides rather than disables — against the overlay's usual rule,
 because a plugin with one knob per planner would otherwise show several sets of

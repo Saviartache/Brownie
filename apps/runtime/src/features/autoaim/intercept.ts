@@ -8,8 +8,8 @@
  * **Aiming at where the target is now is not aiming.** A shot takes time to
  * cross the distance, and everything in this game moves while it does. So the
  * question is not "which way is the enemy" but "which way will the enemy and
- * the shot be in the same place", and that is a quadratic rather than an
- * `atan2`.
+ * the shot be in the same place". Straight motion has an exact quadratic
+ * answer; turning motion is followed along its measured arc.
  */
 
 export interface InterceptRequest {
@@ -20,6 +20,8 @@ export interface InterceptRequest {
   /** Tiles per millisecond. Zero is a target that is not known to be moving. */
   readonly targetVelocityX: number;
   readonly targetVelocityY: number;
+  /** Radians per millisecond. Zero keeps the target on a straight line. */
+  readonly targetAngularVelocityPerMs: number;
   /** Tiles per millisecond, as the game's own projectile data states it. */
   readonly bulletSpeedTilesPerMs: number;
   /** The shot's lifetime. A solution beyond it is a shot that expires first. */
@@ -38,10 +40,10 @@ export interface Intercept {
  * Solves for the meeting point, or reports that there is not one.
  *
  * `undefined` rather than a best effort, in three cases that are genuinely
- * different from a bad answer: the shot has no speed to give, the target is
- * moving away faster than the shot travels, and the meeting happens after the
- * shot has expired. Each of those is "do not fire at this", and a plugin that
- * received a plausible angle instead would fire at nothing.
+ * different from a bad answer: the shot has no speed to give, the target has no
+ * reachable meeting point, and the meeting happens after the shot has expired.
+ * Each of those is "do not fire at this", and a plugin that received a
+ * plausible angle instead would fire at nothing.
  */
 export function solveIntercept(request: InterceptRequest): Intercept | undefined {
   const speed = request.bulletSpeedTilesPerMs;
@@ -57,14 +59,80 @@ export function solveIntercept(request: InterceptRequest): Intercept | undefined
   const b = dx * vx + dy * vy;
   const c = dx * dx + dy * dy;
 
-  const flightMs = solveFlightTime(a, b, c);
+  const flightMs =
+    request.targetAngularVelocityPerMs === 0
+      ? solveFlightTime(a, b, c)
+      : solveTurningFlightTime(request, dx, dy);
   if (flightMs === undefined || flightMs > request.maxFlightMs) return undefined;
 
+  const target = targetAt(request, flightMs);
+
   return {
-    x: request.targetX + vx * flightMs,
-    y: request.targetY + vy * flightMs,
+    x: target.x,
+    y: target.y,
     flightMs,
   };
+}
+
+function targetAt(request: InterceptRequest, flightMs: number): { x: number; y: number } {
+  const angular = request.targetAngularVelocityPerMs;
+  if (angular === 0) {
+    return {
+      x: request.targetX + request.targetVelocityX * flightMs,
+      y: request.targetY + request.targetVelocityY * flightMs,
+    };
+  }
+
+  const turn = angular * flightMs;
+  const sin = Math.sin(turn);
+  const cos = Math.cos(turn);
+  return {
+    x:
+      request.targetX +
+      (request.targetVelocityX * sin - request.targetVelocityY * (1 - cos)) / angular,
+    y:
+      request.targetY +
+      (request.targetVelocityY * sin + request.targetVelocityX * (1 - cos)) / angular,
+  };
+}
+
+/** Finds the first meeting with a target following a constant-turn arc. */
+function solveTurningFlightTime(
+  request: InterceptRequest,
+  initialDx: number,
+  initialDy: number,
+): number | undefined {
+  if (initialDx === 0 && initialDy === 0) return 0;
+
+  const residual = (flightMs: number): number => {
+    const target = targetAt(request, flightMs);
+    return (
+      Math.hypot(target.x - request.shooterX, target.y - request.shooterY) -
+      request.bulletSpeedTilesPerMs * flightMs
+    );
+  };
+
+  // Sample densely enough that even a fast turn advances by at most 11.25°.
+  const turnSteps = Math.ceil(
+    (Math.abs(request.targetAngularVelocityPerMs) * request.maxFlightMs * 16) / Math.PI,
+  );
+  const steps = Math.min(Math.max(turnSteps, 32), 512);
+  let low = 0;
+  for (let step = 1; step <= steps; step += 1) {
+    const high = (request.maxFlightMs * step) / steps;
+    if (residual(high) <= 0) {
+      let left = low;
+      let right = high;
+      for (let iteration = 0; iteration < 24; iteration += 1) {
+        const middle = (left + right) / 2;
+        if (residual(middle) <= 0) right = middle;
+        else left = middle;
+      }
+      return right;
+    }
+    low = high;
+  }
+  return undefined;
 }
 
 /**

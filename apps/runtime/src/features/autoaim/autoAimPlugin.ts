@@ -304,6 +304,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             targetY: motion.y,
             targetVelocityX: motion.velocityX * lead,
             targetVelocityY: motion.velocityY * lead,
+            targetAngularVelocityPerMs: (motion.angularVelocityPerMs ?? 0) * lead,
             bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
             maxFlightMs: projectile.lifetimeMs,
           });

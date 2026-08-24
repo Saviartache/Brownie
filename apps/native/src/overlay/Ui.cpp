@@ -663,6 +663,66 @@ void DrawSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t ve
     ImGui::EndCombo();
 }
 
+/// The chosen keys of a multi-select, split from its comma-joined value.
+std::vector<std::string> SplitChosen(const std::string& value) {
+    std::vector<std::string> chosen;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t comma = value.find(',', start);
+        const std::size_t end = comma == std::string::npos ? value.size() : comma;
+        if (end > start) chosen.push_back(value.substr(start, end - start));
+        if (comma == std::string::npos) return chosen;
+        start = comma + 1;
+    }
+}
+
+/// A many-of-N choice, drawn as a list of checkboxes.
+///
+/// The value is the chosen keys joined by commas, and the runtime treats one
+/// spelling as canonical: the keys in the order the options were declared. So a
+/// toggle rebuilds the string by walking `row.options` in order and keeping the
+/// ones now chosen — the same order this list is drawn in — rather than by
+/// editing the string in place.
+void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                     PendingEdit& edit, const ActionSink& emit) {
+    const std::string current =
+        edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
+    std::vector<std::string> chosen = SplitChosen(current);
+    const auto is_chosen = [&chosen](const std::string& value) {
+        return std::find(chosen.begin(), chosen.end(), value) != chosen.end();
+    };
+
+    ImGui::TextUnformatted(row.label.c_str());
+    // A bounded, scrolling box so a long dungeon list does not push everything
+    // below it off the panel. Sized to the options, capped at eight rows.
+    const auto visible = static_cast<float>(std::min<std::size_t>(row.options.size(), 8));
+    const ImVec2 box(0.0F, visible * ImGui::GetTextLineHeightWithSpacing() +
+                               ImGui::GetStyle().FramePadding.y * 2.0F);
+    if (ImGui::BeginChild("options", box, true)) {
+        for (std::size_t i = 0; i < row.options.size(); ++i) {
+            const SettingOption& option = row.options[i];
+            bool on = is_chosen(option.value);
+            ImGui::PushID(static_cast<int>(i));
+            const bool clicked = ImGui::Checkbox(option.label.c_str(), &on);
+            ImGui::PopID();
+            if (!clicked) continue;
+
+            std::string joined;
+            for (const SettingOption& candidate : row.options) {
+                const bool keep = candidate.value == option.value ? on : is_chosen(candidate.value);
+                if (!keep) continue;
+                if (!joined.empty()) joined.push_back(',');
+                joined += candidate.value;
+            }
+            edit.Hold(plugin.id, row.key);
+            edit.SetText(joined);
+            SendSetting(plugin, row, joined, emit);
+            edit.Sent(version);
+        }
+    }
+    ImGui::EndChild();
+}
+
 void DrawText(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
               PendingEdit& edit, const ActionSink& emit) {
     // Seeded from the model every frame, and from the pending edit while one is
@@ -699,6 +759,9 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
             break;
         case SettingKind::kSelect:
             DrawSelect(plugin, row, version, edit, emit);
+            break;
+        case SettingKind::kMultiSelect:
+            DrawMultiSelect(plugin, row, version, edit, emit);
             break;
         case SettingKind::kText:
             DrawText(plugin, row, version, edit, emit);

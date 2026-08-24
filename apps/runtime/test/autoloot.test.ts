@@ -15,12 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { StatType } from '../src/constants/StatType.js';
 import { createAutoLootPlugin } from '../src/features/autoloot/autoLootPlugin.js';
 import { enlargeBags } from '../src/features/autoloot/bigBags.js';
-import {
-  BIG_BAG_SIZE,
-  PENDING_TIMEOUT_MS,
-  REFUSED_PAUSE_MAX_MS,
-  REFUSED_PAUSE_MS,
-} from '../src/features/autoloot/constants.js';
+import { BIG_BAG_SIZE, PENDING_TIMEOUT_MS } from '../src/features/autoloot/constants.js';
 import { findBeltDestination, freeSlots } from '../src/features/autoloot/destination.js';
 import { enchantCount, UNIQUE_DATA_STAT } from '../src/features/autoloot/enchants.js';
 import { Claims, LootSession } from '../src/features/autoloot/LootSession.js';
@@ -31,6 +26,7 @@ import {
   GearCategory,
   type LootPreferences,
 } from '../src/features/autoloot/lootRules.js';
+import { droppedObjectType } from '../src/features/autoloot/droppedItems.js';
 import { shouldWithhold, touchesPotions } from '../src/features/autoloot/manualGuard.js';
 import { PotionKind, type ContainerFacts, type ItemFacts } from '../src/gamedata/items.js';
 import { isBeltSlot, SlotRange } from '../src/state/ItemSlots.js';
@@ -275,8 +271,8 @@ describe('choosing where a looted item goes', () => {
   }
 
   /** Every free slot's id, which is the order they would be filled in. */
-  const freeIds = (inventory: InventoryView, useBackpack = true, backpackFirst = false): number[] =>
-    freeSlots(inventory, { useBackpack, backpackFirst, isItem }).map((slot) => slot.slotId);
+  const freeIds = (inventory: InventoryView, useBackpack = true): number[] =>
+    freeSlots(inventory, { useBackpack, isItem }).map((slot) => slot.slotId);
 
   it('lists the free carried slots in slot order, and the full ones not at all', () => {
     const inventory = inventoryOf({
@@ -286,20 +282,21 @@ describe('choosing where a looted item goes', () => {
         { slotId: 6, objectType: -1, quantity: 0 },
       ],
     });
-    expect(freeSlots(inventory, { useBackpack: true, backpackFirst: false, isItem })).toEqual([
+    expect(freeSlots(inventory, { useBackpack: true, isItem })).toEqual([
       { slotId: 5, objectType: -1 },
       { slotId: 6, objectType: -1 },
     ]);
   });
 
-  it('uses the backpack only when allowed, and first when asked', () => {
+  // "Use the backpack" means both, main first and the backpack behind it — never
+  // the backpack on its own. Off, only the main inventory is offered.
+  it('adds the backpack behind the main inventory only when allowed', () => {
     const inventory = inventoryOf({
       carried: [{ slotId: 4, objectType: -1, quantity: 0 }],
       backpack: [{ slotId: 12, objectType: -1, quantity: 0 }],
     });
     expect(freeIds(inventory, false)).toEqual([4]);
-    expect(freeIds(inventory, true, false)).toEqual([4, 12]);
-    expect(freeIds(inventory, true, true)).toEqual([12, 4]);
+    expect(freeIds(inventory, true)).toEqual([4, 12]);
   });
 
   it('has nowhere to put anything when the server has stated no slots', () => {
@@ -331,7 +328,6 @@ describe('choosing where a looted item goes', () => {
       ],
     });
     expect(freeIds(inventory)).toEqual([]);
-    expect(freeIds(inventory, true, true)).toEqual([]);
   });
 
   describe('the potion belt', () => {
@@ -517,37 +513,6 @@ describe('what one connection remembers', () => {
     expect(state.pending).toBeUndefined();
   });
 
-  it('waits longer after each refusal, up to a limit, and forgets them all on a landing', () => {
-    const state = new LootSession();
-    const move = {
-      slotId: 4,
-      expectedQuantity: undefined,
-      source: SOURCE,
-      sinceMs: 0,
-      potion: false,
-    };
-
-    state.standDown(0);
-    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MS);
-    state.standDown(0);
-    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MS * 2);
-
-    // However many follow, the wait stops growing.
-    for (let refusal = 0; refusal < 100; refusal += 1) state.standDown(0);
-    expect(state.pauseUntilMs).toBe(REFUSED_PAUSE_MAX_MS);
-
-    // A move that lands says the guessing is over, so the next refusal starts
-    // again from one rather than from a hundred.
-    state.startPending(move);
-    state.resolvePending(
-      inventoryWith({ slotId: 4, objectType: T13_BOW, quantity: 0 }),
-      emptied,
-      1,
-    );
-    state.standDown(100_000);
-    expect(state.pauseUntilMs).toBe(100_000 + REFUSED_PAUSE_MS);
-  });
-
   it('counts ticks spent standing still, and forgets them on any real movement', () => {
     const state = new LootSession();
     state.trackMovement(10, 10);
@@ -575,6 +540,65 @@ describe('getting out of the player"s way', () => {
     // A manual quaff is never swallowed — that is a way to die for a tidy
     // inventory, and the reference implementation swallowed it.
     expect(shouldWithhold('USEITEM', true, true)).toBe(false);
+  });
+});
+
+describe('noticing what the player drops', () => {
+  const SELF = 7;
+  const BAG = 99;
+
+  type Slot = { objectId: number; slotId: number; objectType: number };
+
+  const drop = (slotObject: Slot): MutablePacket =>
+    packetOf('INVDROP', { slotObject, unknownByte: 0 });
+
+  const swap = (slotObject1: Slot, slotObject2: Slot): MutablePacket =>
+    packetOf('INVENTORYSWAP', {
+      time: 0,
+      position: { x: 0, y: 0 },
+      slotObject1,
+      slotObject2,
+      tickId: 0,
+    });
+
+  it('reads the type the player drops on the ground', () => {
+    expect(droppedObjectType(drop({ objectId: SELF, slotId: 4, objectType: T13_BOW }), SELF)).toBe(
+      T13_BOW,
+    );
+  });
+
+  it('reads the type the player dumps into a bag, whichever slot is named first', () => {
+    const mine: Slot = { objectId: SELF, slotId: 4, objectType: T13_BOW };
+    const theBag: Slot = { objectId: BAG, slotId: 0, objectType: -1 };
+    expect(droppedObjectType(swap(mine, theBag), SELF)).toBe(T13_BOW);
+    expect(droppedObjectType(swap(theBag, mine), SELF)).toBe(T13_BOW);
+  });
+
+  it('says nothing for a withdrawal, a rearrangement, or an empty hand', () => {
+    // Bag → player is a manual pickup: the item is entering the inventory.
+    expect(
+      droppedObjectType(
+        swap(
+          { objectId: BAG, slotId: 0, objectType: T13_BOW },
+          { objectId: SELF, slotId: 4, objectType: -1 },
+        ),
+        SELF,
+      ),
+    ).toBeUndefined();
+    // Player → player is a rearrangement: nothing has left the inventory.
+    expect(
+      droppedObjectType(
+        swap(
+          { objectId: SELF, slotId: 4, objectType: T13_BOW },
+          { objectId: SELF, slotId: 5, objectType: -1 },
+        ),
+        SELF,
+      ),
+    ).toBeUndefined();
+    // An empty player slot has nothing to drop.
+    expect(
+      droppedObjectType(drop({ objectId: SELF, slotId: 4, objectType: -1 }), SELF),
+    ).toBeUndefined();
   });
 });
 
@@ -798,18 +822,14 @@ describe('the auto-loot plugin', () => {
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
 
-    // Still pending, and the destination has not filled.
+    // Still pending, and the destination has not filled: nothing new goes out.
     advance(h, 500);
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
 
-    // Past the timeout the move is assumed lost — and giving up on one is not
-    // a reason to send another, so the next waits out the stand-down.
+    // Past the timeout the move is assumed lost — and the item is free to be
+    // tried again, so the next attempt goes out once the spacing allows.
     advance(h, PENDING_TIMEOUT_MS);
-    tick(h);
-    expect(h.sent).toHaveBeenCalledTimes(1);
-
-    advance(h, REFUSED_PAUSE_MS);
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(2);
   });
@@ -868,42 +888,32 @@ describe('the auto-loot plugin', () => {
     expect(h.sent).toHaveBeenCalledTimes(2);
   });
 
-  // Straight from a live log: the same two items, into the same slot, once a
-  // second, for as long as the player stood on the bag. Nothing ever arrived,
-  // which is the only answer the server gives to a move it will not carry out.
-  it('stands down after a move that never arrives, for longer each time', () => {
+  // The bug this fixes: one lost move used to stand auto-loot down for longer
+  // and longer until it never tried again. A refusal and a bag that is merely
+  // slow to answer look identical, so a single miss must not be a verdict — the
+  // item is tried again, paced only by the spacing floor.
+  it('keeps retrying after a move that never arrives', () => {
     const h = harness();
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW, UT_BOW], { x: 10, y: 10 }));
 
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
 
-    // The move is given up on here, and nothing goes out in its place.
-    advance(h, PENDING_TIMEOUT_MS);
-    tick(h);
-    advance(h, REFUSED_PAUSE_MS - 1);
-    tick(h);
-    expect(h.sent).toHaveBeenCalledTimes(1);
+    // Nothing ever fills, so every move times out — and every time, another
+    // goes out once the timeout and the spacing have passed.
+    for (let attempt = 2; attempt <= 4; attempt += 1) {
+      advance(h, PENDING_TIMEOUT_MS);
+      tick(h);
+      expect(h.sent).toHaveBeenCalledTimes(attempt);
+    }
 
-    advance(h, 1);
-    tick(h);
-    expect(h.sent).toHaveBeenCalledTimes(2);
-
-    // A second refusal buys twice the wait, so a mistake nothing here can name
-    // costs a packet a minute rather than a packet a second.
-    advance(h, PENDING_TIMEOUT_MS);
-    tick(h);
-    advance(h, REFUSED_PAUSE_MS);
-    tick(h);
-    expect(h.sent).toHaveBeenCalledTimes(2);
-
-    // And both went to the slot the server had stated empty. A refusal says
-    // nothing about where to aim next, so nothing walks along the inventory.
+    // And every retry still aims at a slot the server stated empty. A lost move
+    // says nothing about where to aim next, so nothing walks along the inventory.
     expect(
       h.sent.mock.calls.map(
         (call) => (call[1] as { slotObject2: { slotId: number } }).slotObject2.slotId,
       ),
-    ).toEqual([4, 4]);
+    ).toEqual([4, 4, 4, 4]);
   });
 
   // Straight from a live log, and the shape of every disconnect this feature
@@ -935,14 +945,13 @@ describe('the auto-loot plugin', () => {
     expect(h.sent).toHaveBeenCalledTimes(2);
   });
 
-  it('gives everybody else a moment on a shared bag', () => {
+  // A shared bag is looted as promptly as any other: the only thing spacing the
+  // first grab is the cross-bag interval floor, which is the safety margin and
+  // is left alone. The courtesy wait that used to sit on top of it is gone.
+  it('loots a shared bag on the first tick without waiting', () => {
     const h = harness();
     h.bags.set(1, bag(1, LOOT_BAG, [T13_BOW], { x: 10, y: 10 }));
 
-    tick(h);
-    expect(h.sent).not.toHaveBeenCalled();
-
-    advance(h, 2000);
     tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
   });
@@ -1046,6 +1055,21 @@ describe('the auto-loot plugin', () => {
     });
   });
 
+  // A permanent life/mana potion never sits on the belt, so it always fills the
+  // inventory — which makes it a spare like any other. It used to ignore the
+  // spare switch and land in the inventory whatever it said.
+  it('leaves a permanent life/mana potion until spares are asked for', () => {
+    const h = harness();
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [LIFE_POTION], { x: 10, y: 10 }));
+    tick(h);
+    expect(h.sent).not.toHaveBeenCalled();
+
+    h.settings.apply('sparePotions', true);
+    advance(h);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+  });
+
   it('goes on looking through the bag past a potion it will not take', () => {
     // A full belt is a fact about the potion, not about the bag.
     const h = harness({
@@ -1089,6 +1113,37 @@ describe('the auto-loot plugin', () => {
 
     tick(h);
     expect(h.sent).not.toHaveBeenCalled();
+  });
+
+  // The tug-of-war: the player dumps a bow back into the bag and auto-loot used
+  // to grab it straight out again. Once dropped, its type is left where it is.
+  it('leaves an item alone after the player drops it back', () => {
+    const h = harness();
+    h.host.dispatchPacket(dumpIntoBag(T13_BOW, 1), h.session);
+
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+    tick(h);
+    expect(h.sent).not.toHaveBeenCalled();
+  });
+
+  it('still takes a dropped item when that guard is switched off', () => {
+    const h = harness();
+    h.settings.apply('skipDropped', false);
+    h.host.dispatchPacket(dumpIntoBag(T13_BOW, 1), h.session);
+
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets what was dropped when it leaves the map', () => {
+    const h = harness();
+    h.host.dispatchPacket(dumpIntoBag(T13_BOW, 1), h.session);
+    h.host.dispatchPacket(mapinfo(), h.session);
+
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
   });
 
   it('forgets everything it knew about a map when it leaves one', () => {
@@ -1139,6 +1194,17 @@ function inventorySwap(slotId: number, objectType: number): MutablePacket {
     position: { x: 0, y: 0 },
     slotObject1: { objectId: 7, slotId, objectType },
     slotObject2: { objectId: 7, slotId: 4, objectType: -1 },
+    tickId: 0,
+  });
+}
+
+/** The player pushing an item out of their inventory into a bag. */
+function dumpIntoBag(objectType: number, bagId: number): MutablePacket {
+  return packetOf('INVENTORYSWAP', {
+    time: 0,
+    position: { x: 0, y: 0 },
+    slotObject1: { objectId: 7, slotId: 4, objectType },
+    slotObject2: { objectId: bagId, slotId: 0, objectType: -1 },
     tickId: 0,
   });
 }

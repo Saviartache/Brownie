@@ -38,6 +38,7 @@ describe('solveIntercept', () => {
     shooterY: 0,
     targetVelocityX: 0,
     targetVelocityY: 0,
+    targetAngularVelocityPerMs: 0,
     bulletSpeedTilesPerMs: 0.01,
     maxFlightMs: 1500,
   };
@@ -68,6 +69,24 @@ describe('solveIntercept', () => {
     );
     // And it is genuinely ahead of the target, not at it.
     expect(solution?.y).toBeGreaterThan(0);
+  });
+
+  it('follows a turning target around its circle instead of past it', () => {
+    const solution = solveIntercept({
+      ...still,
+      targetX: 3,
+      targetY: 0,
+      targetVelocityX: 0,
+      targetVelocityY: 0.006,
+      targetAngularVelocityPerMs: 0.002,
+      bulletSpeedTilesPerMs: 0.008,
+    });
+
+    // The target stays three tiles from the shooter, so the shot takes 375 ms.
+    // Linear prediction would put it more than three tiles ahead on the tangent.
+    expect(solution?.flightMs).toBeCloseTo(375, 2);
+    expect(solution?.x).toBeCloseTo(3 * Math.cos(0.75), 4);
+    expect(solution?.y).toBeCloseTo(3 * Math.sin(0.75), 4);
   });
 
   it('refuses a target running away faster than the shot travels', () => {
@@ -131,6 +150,23 @@ describe('MotionTracker', () => {
     const velocity = tracker.motionAt(1, 400)?.velocityX ?? 0;
     expect(velocity).toBeGreaterThan(0);
     expect(velocity).toBeLessThan(0.01);
+  });
+
+  it('recognises a steady turn and reports the tangent at the latest sighting', () => {
+    const tracker = new MotionTracker();
+    const radius = 3;
+    const observeAt = (angle: number, atMs: number): void => {
+      tracker.observe(1, radius * Math.cos(angle), radius * Math.sin(angle), atMs);
+    };
+
+    observeAt(0, 0);
+    observeAt(0.4, 200);
+    observeAt(0.8, 400);
+
+    const motion = tracker.motionAt(1, 400);
+    expect(motion?.angularVelocityPerMs).toBeCloseTo(0.002, 6);
+    expect(motion?.velocityX).toBeCloseTo(-0.006 * Math.sin(0.8), 6);
+    expect(motion?.velocityY).toBeCloseTo(0.006 * Math.cos(0.8), 6);
   });
 
   it('restarts rather than averaging over a gap it did not watch', () => {

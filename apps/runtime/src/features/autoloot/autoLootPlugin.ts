@@ -25,10 +25,13 @@
  * carries is checked by the server against its own view, so a mistaken "this
  * slot is empty" is refused rather than acted on.
  *
- * **A refusal is not a hint about where to aim next.** It is silence, and the
- * only thing it says is that guessing is not working; walking on to the next
- * slot is another guess and costs another packet. So a move that never arrives
- * stops the looting for a while, and for longer each time one follows another.
+ * **A refusal is not held against the item.** Silence is all a refused move
+ * ever gets, and a bag that merely answered slowly gives exactly the same
+ * silence — so treating one lost move as a verdict on the item is how a bag
+ * that was perfectly takeable ends up abandoned after a single miss. A move
+ * that never arrives is given up on and the item left free to be tried again,
+ * paced only by its own retry cooldown and the never-reset spacing floor, which
+ * are what keep the retries from becoming a packet a second.
  */
 
 import {
@@ -53,10 +56,10 @@ import {
   ON_TOP_TILES,
   PICKUP_INTERVAL_MS,
   RETRY_ITEM_AFTER_MS,
-  SHARED_BAG_DELAY_MS,
   STATIONARY_TICK_LIMIT,
 } from './constants.js';
 import { findBeltDestination, freeSlots, type Destination } from './destination.js';
+import { droppedObjectType } from './droppedItems.js';
 import { enchantCount, UNIQUE_DATA_STAT } from './enchants.js';
 import { LootSession, bagSlotKey } from './LootSession.js';
 import { parseItemList, shouldLoot, type LootPreferences } from './lootRules.js';
@@ -141,7 +144,9 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
       // Topping the belt up and hoarding spares are different wants, and the
       // reference implementation had one switch for both — so anybody who
       // wanted their belt kept full got their inventory filled with the
-      // overflow as well.
+      // overflow as well. This governs every heal/mana potion that would land
+      // in the inventory rather than on the belt: a quaff potion the belt has
+      // no room for, and a permanent life/mana potion, which never belts.
       const sparePotions = context.settings.boolean('sparePotions', {
         label: 'Also take spare potions into the inventory',
         group: taking,
@@ -189,19 +194,10 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         maxLength: 4096,
       });
 
+      // On, the backpack is overflow behind the main inventory — both fill, main
+      // first. Off, only the main inventory is used.
       const useBackpack = context.settings.boolean('useBackpack', {
         label: 'Use the backpack',
-        group: behaviour,
-        default: true,
-      });
-      const backpackFirst = context.settings.boolean('backpackFirst', {
-        label: 'Fill the backpack first',
-        group: behaviour,
-        advanced: true,
-        default: false,
-      });
-      const waitOnSharedBags = context.settings.boolean('waitOnSharedBags', {
-        label: 'Give others a moment on shared bags',
         group: behaviour,
         default: true,
       });
@@ -232,6 +228,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         label: 'Stand down when you move a potion yourself',
         group: behaviour,
         advanced: true,
+        default: true,
+      });
+      const skipDropped = context.settings.boolean('skipDropped', {
+        label: "Leave an item alone once you've dropped it",
+        group: behaviour,
         default: true,
       });
       const announceBags = context.settings.boolean('announceBags', {
@@ -343,6 +344,9 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
           const key = bagSlotKey(bag.entity.objectId, slot, objectType);
           if (state.attempts.held(key, nowMs)) continue;
+          // Something the player has dropped or dumped back is left where they
+          // put it — grabbing it again is the tug-of-war this avoids.
+          if (skipDropped.get() && state.droppedTypes.has(objectType)) continue;
 
           const facts = inputs.item(objectType);
 
@@ -367,6 +371,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
           const kind = facts?.potion?.kind;
           const quaffable = kind === PotionKind.Heal || kind === PotionKind.Magic;
+          // Every heal/mana potion, whether or not it sits on the belt. A
+          // permanent life/mana one never has a belt slot, so it is always a
+          // spare — and the same switch that keeps quaff spares out of the
+          // inventory is meant to keep these out of it too.
+          const healOrMana = quaffable || kind === PotionKind.LifeOrMana;
 
           // The belt first for a quaff potion: one belt slot holds six, so it
           // is six inventory slots the player keeps, and it is where they are
@@ -376,12 +385,12 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
               ? findBeltDestination(session.self.inventory, objectType, facts.beltStack, isItem)
               : undefined;
 
-          // A potion the belt has no room for is a *spare*, and spares are a
-          // separate question from topping the belt up: filling the inventory
-          // with them is what most players do not want, so it is asked for
-          // rather than assumed. This is about the item, not about the bag, so
-          // the rest of the bag is still worth looking at.
-          if (belt === undefined && quaffable && !sparePotions.get()) continue;
+          // A heal/mana potion with nowhere on the belt to go is a *spare*, and
+          // spares are a separate question from topping the belt up: filling the
+          // inventory with them is what most players do not want, so it is asked
+          // for rather than assumed. This is about the item, not about the bag,
+          // so the rest of the bag is still worth looking at.
+          if (belt === undefined && healOrMana && !sparePotions.get()) continue;
 
           const destination = belt ?? free[0];
           // Nowhere to put it is a fact about the whole inventory, not about
@@ -486,9 +495,6 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
       /** Drops what is remembered about bags that are no longer in the world. */
       const forgetGoneBags = (session: SessionView, state: LootSession): void => {
-        for (const objectId of state.bagSeenAtMs.keys()) {
-          if (session.world.entity(objectId) === undefined) state.bagSeenAtMs.delete(objectId);
-        }
         for (const objectId of state.announced) {
           if (session.world.entity(objectId) === undefined) state.announced.delete(objectId);
         }
@@ -505,20 +511,13 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         state.expire(nowMs);
 
         // A move that was never seen to arrive is one the server did not carry
-        // out, and it never says why. Sending the next one at another slot is
-        // guessing with packets, so it waits instead — and longer each time.
-        const abandoned = state.resolvePending(self.inventory, sourceCleared(session), nowMs);
-        if (abandoned !== undefined) state.standDown(nowMs);
+        // out, and it never says why. Clearing it frees the item to be tried
+        // again: a refusal is not held against it, because a bag that is only
+        // slow to answer looks exactly like one that refused, and the spacing
+        // floor plus the per-item cooldown already keep the retries safe.
+        state.resolvePending(self.inventory, sourceCleared(session), nowMs);
 
         const bags = findBags(session.world, self, inputs.container, NOTIFY_RADIUS_TILES);
-        for (const bag of bags) {
-          // First seen when it *appeared*, not when it was stepped on — which
-          // is what makes the shared-bag delay a moment for whoever else is in
-          // the room rather than a moment after arriving.
-          if (!state.bagSeenAtMs.has(bag.entity.objectId)) {
-            state.bagSeenAtMs.set(bag.entity.objectId, nowMs);
-          }
-        }
         if (announceBags.get()) announce(session, state, bags);
         forgetGoneBags(session, state);
 
@@ -542,17 +541,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         // being the thing that finds out whether it was.
         const free = freeSlots(self.inventory, {
           useBackpack: useBackpack.get(),
-          backpackFirst: backpackFirst.get(),
           isItem,
         });
 
         for (const bag of bags) {
           if (bag.distanceTiles > ON_TOP_TILES) break;
-
-          if (waitOnSharedBags.get() && bag.facts.shared) {
-            const seenAtMs = state.bagSeenAtMs.get(bag.entity.objectId) ?? nowMs;
-            if (nowMs - seenAtMs < SHARED_BAG_DELAY_MS) continue;
-          }
           if (takeFrom(session, state, bag, free, nowMs)) return;
         }
       });
@@ -578,6 +571,17 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
             state.attempts.clear();
           }
           state.pauseUntilMs = Math.max(state.pauseUntilMs, nowMs + MANUAL_PAUSE_MS);
+        });
+      }
+
+      // An item the player pushes out of their inventory — dropped on the ground
+      // or dumped back into the bag — is one they do not want, so its type is
+      // remembered and left alone for the rest of the map.
+      for (const packetName of ['INVDROP', 'INVENTORYSWAP']) {
+        context.packets.on(packetName, (packet, session) => {
+          if (!skipDropped.get()) return;
+          const objectType = droppedObjectType(packet, session.self.objectId);
+          if (objectType !== undefined) stateFor(session).droppedTypes.add(objectType);
         });
       }
 

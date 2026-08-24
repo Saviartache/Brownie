@@ -2,6 +2,13 @@ import type { ContainerFacts, ItemFacts } from '../gamedata/items.js';
 import type { PermanentStatMaxima } from '../gamedata/playerClasses.js';
 import type { ProjectileDefinition } from '../gamedata/projectiles.js';
 
+/** One key-opened dungeon portal, for building a chooser of them. */
+export interface DungeonPortal {
+  readonly type: number;
+  /** The `objects.xml` id, e.g. "Undead Lair Portal". */
+  readonly name: string;
+}
+
 /**
  * What the game's own data says about an object type.
  *
@@ -82,6 +89,17 @@ export interface ObjectCatalog {
    */
   isScenery(objectType: number): boolean;
   /**
+   * Whether one of these is a key-opened dungeon portal.
+   *
+   * `<DungeonPortal/>` in `objects.xml`, which is narrower than the `Portal`
+   * class — it excludes realm, guild and event portals, leaving exactly the
+   * ones a key pops. Nothing on the wire says so, so anything reacting to a
+   * popped key has to ask the catalog.
+   */
+  isDungeonPortal(objectType: number): boolean;
+  /** Every dungeon portal the data file describes, for building a chooser. */
+  dungeonPortals(): readonly DungeonPortal[];
+  /**
    * How wide one of these is, in tiles.
    *
    * **A monster's body is not one tile, and treating every one as though it
@@ -151,6 +169,8 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isQuest: () => false,
   occupies: () => false,
   isScenery: () => false,
+  isDungeonPortal: () => false,
+  dungeonPortals: () => [],
   bodyTiles: () => undefined,
   displayName: () => undefined,
   projectile: () => undefined,

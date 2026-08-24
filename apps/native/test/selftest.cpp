@@ -998,6 +998,24 @@ void SelectOptionsAndVisibilityAreRead() {
           "and every value that reveals it");
 }
 
+void MultiSelectIsReadAsAChecklist() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|a|A|movement|1|enabled|"), "a plugin");
+    // Same shape as a select — a string value and an options list — but its own
+    // kind, so the overlay draws a checklist rather than a combo. The value is
+    // the chosen keys joined by commas.
+    Check(!mirror.Apply("setting|a|picks|Picks|multiSelect|s|b|0|0|0|0|0|0|A%3Da%3BB%3Db||"),
+          "a multi-select");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    const auto& row = mirror.plugins().front().settings.front();
+    Check(row.kind == brownie::overlay::SettingKind::kMultiSelect, "kept as a multi-select");
+    Check(row.value == "b", "with its chosen keys as the value");
+    Check(row.options.size() == 2 && row.options[1].label == "B" && row.options[1].value == "b",
+          "and every option to tick");
+}
+
 void ActionQueueHandsInteractionsOver() {
     brownie::overlay::ActionQueue queue;
     queue.Push("toggle|a|1");
@@ -2012,6 +2030,7 @@ int main() {
     AFailedSetupIsTheOnlyPluginPutOutOfReach();
     AControlRecordThatSaysTooLittleIsRefused();
     SelectOptionsAndVisibilityAreRead();
+    MultiSelectIsReadAsAChecklist();
     DodgePictureCommitsWholeSetsAndExpires();
     ActionQueueHandsInteractionsOver();
     ActionQueueKeepsTheNewestWhenFull();

@@ -1,8 +1,11 @@
 import {
   clampToBounds,
   humaniseKey,
+  MULTI_SELECT_DELIMITER,
   type BooleanSettingOptions,
   type ButtonOptions,
+  type MultiSelectHandle,
+  type MultiSelectSettingOptions,
   type NumberSettingOptions,
   type SelectSettingOptions,
   type SettingDescriptor,
@@ -126,6 +129,23 @@ export class SettingsRegistry implements SettingsApi {
     return this.#handle<T>(key);
   }
 
+  multiSelect<T extends string>(
+    key: string,
+    options: MultiSelectSettingOptions<T>,
+  ): MultiSelectHandle<T> {
+    const known = new Set<string>(options.options.map(([value]) => value));
+    for (const chosen of options.default) {
+      if (!known.has(chosen)) {
+        throw new TypeError(
+          `setting "${key}" defaults to "${chosen}", which is not one of its options`,
+        );
+      }
+    }
+    const descriptor = { kind: 'multiSelect' as const, key, ...withLabel(key, options) };
+    this.#declare(descriptor, canonicalSelection(descriptor, options.default));
+    return this.#multiHandle<T>(key);
+  }
+
   text(key: string, options: TextSettingOptions): SettingHandle<string> {
     this.#declare({ kind: 'text', key, ...withLabel(key, options) }, options.default);
     return this.#handle<string>(key);
@@ -182,6 +202,25 @@ export class SettingsRegistry implements SettingsApi {
     };
   }
 
+  // The array-facing view of a multi-select. The value is stored as a single
+  // delimited string like every other setting; this is where it is split for a
+  // plugin to read and joined for one to write.
+  #multiHandle<T extends string>(key: string): MultiSelectHandle<T> {
+    const inner = this.#handle<string>(key);
+    return {
+      key,
+      get: (): readonly T[] => splitSelection(inner.get()) as T[],
+      has: (value: T): boolean => splitSelection(inner.get()).includes(value),
+      set: (values: readonly T[]): void => {
+        inner.set(values.join(MULTI_SELECT_DELIMITER));
+      },
+      onChange: (listener: (values: readonly T[]) => void): Unsubscribe =>
+        inner.onChange((value) => {
+          listener(splitSelection(value) as T[]);
+        }),
+    };
+  }
+
   #commit(key: string, value: SettingValue): void {
     if (this.#values.get(key) === value) return;
     this.#values.set(key, value);
@@ -196,6 +235,28 @@ export class SettingsRegistry implements SettingsApi {
 
 function withLabel<T extends { label?: string }>(key: string, options: T): T & { label: string } {
   return { ...options, label: options.label ?? humaniseKey(key) };
+}
+
+/** The empty string is a real value here — no options chosen — not "not set". */
+function splitSelection(value: string): string[] {
+  return value === '' ? [] : value.split(MULTI_SELECT_DELIMITER);
+}
+
+/**
+ * The one spelling of a multi-select's set: its chosen keys in the order the
+ * options were declared, joined by the delimiter, with unknowns already dropped
+ * by the caller. Independent of the order the keys arrived in, so the same set
+ * always produces the same string.
+ */
+function canonicalSelection(
+  descriptor: MultiSelectSettingOptions<string>,
+  chosen: readonly string[],
+): string {
+  const wanted = new Set(chosen);
+  return descriptor.options
+    .filter(([value]) => wanted.has(value))
+    .map(([value]) => value)
+    .join(MULTI_SELECT_DELIMITER);
 }
 
 /**
@@ -222,6 +283,19 @@ function coerce(descriptor: SettingDescriptor, raw: unknown): SettingValue | und
     case 'select': {
       if (typeof raw !== 'string') return undefined;
       return descriptor.options.some(([value]) => value === raw) ? raw : undefined;
+    }
+    case 'multiSelect': {
+      // A string of keys from the overlay or an array from plugin code; either
+      // way, keep only keys that are still declared options, in declared order,
+      // and re-join into a canonical string. Canonical because `#commit`
+      // dedupes with `===`: two spellings of the same set must compare equal.
+      const raws = typeof raw === 'string' ? raw.split(MULTI_SELECT_DELIMITER) : raw;
+      if (!Array.isArray(raws)) return undefined;
+      const chosen = new Set(raws.map(String));
+      return canonicalSelection(
+        descriptor,
+        descriptor.options.filter(([value]) => chosen.has(value)).map(([value]) => value),
+      );
     }
     case 'text': {
       if (typeof raw !== 'string') return undefined;

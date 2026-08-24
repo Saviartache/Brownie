@@ -575,6 +575,59 @@ describe('settings', () => {
     );
   });
 
+  it('refuses a multi-select whose default is not among its options', () => {
+    const h = host();
+    h.host.load(
+      plugin('badmulti', (ctx) => {
+        ctx.settings.multiSelect('picks', { default: ['c'], options: [['a', 'A']] } as never);
+      }),
+    );
+    expect(h.host.status('badmulti')?.state).toBe(PluginState.Failed);
+  });
+
+  it('keeps a multi-select to its options and to one canonical spelling', () => {
+    const h = host();
+    let handle: ReturnType<PluginContext['settings']['multiSelect']> | undefined;
+    h.host.load(
+      plugin('multi', (ctx) => {
+        handle = ctx.settings.multiSelect('picks', {
+          default: ['b'],
+          options: [
+            ['a', 'A'],
+            ['b', 'B'],
+            ['c', 'C'],
+          ],
+        });
+      }),
+    );
+    const settings = h.host.settingsOf('multi')!;
+
+    // The default seeds the value, exposed to the plugin as an array.
+    expect(handle!.get()).toEqual(['b']);
+    expect(settings.values()['picks']).toBe('b');
+
+    // Order-independent: whatever order the keys arrive in, the stored string is
+    // the options' declared order — so the same set never looks like a change.
+    expect(settings.apply('picks', 'c,a')).toBe(true);
+    expect(settings.values()['picks']).toBe('a,c');
+    expect(handle!.get()).toEqual(['a', 'c']);
+    expect(handle!.has('a')).toBe(true);
+    expect(handle!.has('b')).toBe(false);
+
+    // Unknown keys are dropped, not refused: an older config naming a portal
+    // this build no longer lists keeps the rest of the choice.
+    expect(settings.apply('picks', 'a,zzz,b')).toBe(true);
+    expect(settings.values()['picks']).toBe('a,b');
+
+    // Empty is a real value — nothing chosen — not "unset".
+    expect(settings.apply('picks', '')).toBe(true);
+    expect(handle!.get()).toEqual([]);
+
+    // A write through the handle joins the array back to the canonical string.
+    handle!.set(['c', 'b']);
+    expect(settings.values()['picks']).toBe('b,c');
+  });
+
   it('runs a button and labels a setting that did not name itself', () => {
     const h = host();
     let pressed = 0;

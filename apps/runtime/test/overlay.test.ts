@@ -229,6 +229,49 @@ describe('OverlayControlPlane', () => {
     expect(radius?.[14]).toBe('planner=gradient'); // visibleWhen
   });
 
+  it('sends a multi-select as a string kind carrying its options', () => {
+    const h = harness();
+    h.host.load(
+      plugin('portal', (ctx) => {
+        ctx.settings.multiSelect('picks', {
+          default: ['b'],
+          options: [
+            ['a', 'A'],
+            ['b', 'B'],
+          ],
+        });
+      }),
+    );
+    h.plane.start();
+    h.flush();
+
+    const [picks] = h.overlay.of('setting');
+    // Kind is its own wire name; the value travels as a string, like a select.
+    expect(picks?.slice(0, 6)).toEqual(['portal', 'picks', 'Picks', 'multiSelect', 's', 'b']);
+    expect(picks?.[12]).toBe('A=a;B=b'); // options
+  });
+
+  it('applies a multi-select the overlay echoes back as a joined string', () => {
+    const h = harness();
+    h.host.load(
+      plugin('portal', (ctx) => {
+        ctx.settings.multiSelect('picks', {
+          default: [],
+          options: [
+            ['a', 'A'],
+            ['b', 'B'],
+          ],
+        });
+      }),
+    );
+    h.plane.start();
+
+    h.overlay.act('setting', 'portal', 'picks', 's', 'b,a');
+
+    // Stored in the options' declared order, whatever order the overlay sent.
+    expect(h.host.settingsOf('portal')?.values()['picks']).toBe('a,b');
+  });
+
   it('says nothing at all while the module is away', () => {
     const h = harness();
     h.host.load(plugin('p', () => undefined));

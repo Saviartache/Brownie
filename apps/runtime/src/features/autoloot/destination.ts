@@ -41,7 +41,6 @@ export type IsItem = (objectType: number) => boolean;
 /** Which slots a looted item is allowed into, and how to tell one. */
 export interface AllowedSlots {
   readonly useBackpack: boolean;
-  readonly backpackFirst: boolean;
   readonly isItem: IsItem;
 }
 
@@ -111,13 +110,16 @@ export function findBeltDestination(
  * The whole answer rather than the first of it, because it is asked before a
  * pickup is decided on and not after one has failed: an empty list is "there is
  * nowhere to put anything", which is a reason to send nothing at all.
+ *
+ * The main inventory comes first and the backpack is the overflow behind it, so
+ * "use the backpack" means both, filled in that order — never the backpack on
+ * its own. With it off the backpack is left out entirely.
  */
 export function freeSlots(inventory: InventoryView, allowed: AllowedSlots): Destination[] {
   const carried = freeIn(inventory.carried(), allowed.isItem);
   if (!allowed.useBackpack) return carried;
 
-  const backpack = freeIn(inventory.backpack(), allowed.isItem);
-  return allowed.backpackFirst ? backpack.concat(carried) : carried.concat(backpack);
+  return carried.concat(freeIn(inventory.backpack(), allowed.isItem));
 }
 
 /** The empty slots of one group, and none at all for a group that is not one. */

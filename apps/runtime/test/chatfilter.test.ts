@@ -156,6 +156,8 @@ describe('the spam signals', () => {
     ['hxxps://realm.shop', 'masked-scheme'],
     ['go to tinyurl for keys', 'link-shortener'],
     ['join us on telegram', 'off-game-platform'],
+    ['deals on discord.gg/shop', 'off-game-platform'],
+    ['add me Discord: shopbot', 'off-game-platform'],
     ['r.e.a.l.m.s.h.o.p', 'obfuscated-address'],
     ['buy keys realm dot com', 'obfuscated-address'],
     ['WTS pet, 10 def', 'trade-call'],
@@ -180,6 +182,8 @@ describe('the spam signals', () => {
     'back to the realm, shop later',
     'anyone else play this rpg? rip my streak',
     'the realm stock of pots is gone',
+    // A bare mention of the app is not a contact handle: the colon is.
+    'anyone on discord tonight?',
   ])('leave %j alone', (message) => {
     expect(reason(message)).toBeUndefined();
   });

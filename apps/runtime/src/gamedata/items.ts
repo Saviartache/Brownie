@@ -74,9 +74,8 @@ export interface ContainerFacts {
    *
    * A bag that accepts ordinary objects and not soulbound ones is the kind that
    * drops for the whole room — the white, brown and pink bags — so taking from
-   * one takes it from somebody else, which is the only reason a pickup would
-   * ever want to wait. A bag that accepts soulbound objects dropped for us
-   * alone and nobody is racing for it.
+   * one takes it from somebody else. A bag that accepts soulbound objects
+   * dropped for us alone and nobody is racing for it.
    */
   readonly shared: boolean;
 }

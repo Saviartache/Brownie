@@ -28,6 +28,7 @@ const WIRE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   number: 'number',
   range: 'range',
   select: 'select',
+  multiSelect: 'multiSelect',
   text: 'text',
   button: 'button',
 };
@@ -37,6 +38,8 @@ const VALUE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   number: 'n',
   range: 'n',
   select: 's',
+  // A set of keys, carried as one delimited string — see MULTI_SELECT_DELIMITER.
+  multiSelect: 's',
   text: 's',
   button: 'b',
 };
@@ -222,7 +225,7 @@ function settingRecord(pluginId: string, descriptor: SettingDescriptor, value: u
   const bounds =
     descriptor.kind === 'number' || descriptor.kind === 'range' ? descriptor : undefined;
   const options =
-    descriptor.kind === 'select'
+    descriptor.kind === 'select' || descriptor.kind === 'multiSelect'
       ? encodeOptions(descriptor.options.map(([v, label]) => [label, v] as const))
       : '';
   const visible = descriptor.visibleWhen;

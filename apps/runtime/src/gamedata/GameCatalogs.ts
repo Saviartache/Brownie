@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import type { ObjectCatalog } from '../state/ObjectCatalog.js';
+import type { DungeonPortal, ObjectCatalog } from '../state/ObjectCatalog.js';
 import type { TileCatalog } from '../state/TileMap.js';
 import { readContainerFacts, readItemFacts, type ContainerFacts, type ItemFacts } from './items.js';
 import { readPermanentStatMaxima, type PermanentStatMaxima } from './playerClasses.js';
@@ -28,6 +28,8 @@ export interface ObjectDefinition {
   readonly occupies: boolean;
   /** Whether one of these is part of the room rather than something that fights. */
   readonly isScenery: boolean;
+  /** Whether one of these is a key-opened dungeon portal — `<DungeonPortal/>`. */
+  readonly isDungeonPortal: boolean;
   /** How wide one of these is, in tiles. See {@link ObjectCatalog.bodyTiles}. */
   readonly bodyTiles: number;
   /** Indexed by `bulletType`, which is the index the game shoots them by. */
@@ -65,11 +67,16 @@ export interface TileDefinition {
  */
 export class GameObjectCatalog implements ObjectCatalog {
   readonly #byType: ReadonlyMap<number, ObjectDefinition>;
+  /** Built once: the option list a portal chooser needs is a fixed catalog fact. */
+  readonly #dungeonPortals: readonly DungeonPortal[];
 
   constructor(definitions: Iterable<ObjectDefinition>) {
     const byType = new Map<number, ObjectDefinition>();
     for (const definition of definitions) byType.set(definition.type, definition);
     this.#byType = byType;
+    this.#dungeonPortals = [...byType.values()]
+      .filter((definition) => definition.isDungeonPortal)
+      .map((definition) => ({ type: definition.type, name: definition.id }));
   }
 
   get size(): number {
@@ -106,6 +113,14 @@ export class GameObjectCatalog implements ObjectCatalog {
 
   isScenery(objectType: number): boolean {
     return this.#byType.get(objectType)?.isScenery ?? false;
+  }
+
+  isDungeonPortal(objectType: number): boolean {
+    return this.#byType.get(objectType)?.isDungeonPortal ?? false;
+  }
+
+  dungeonPortals(): readonly DungeonPortal[] {
+    return this.#dungeonPortals;
   }
 
   bodyTiles(objectType: number): number | undefined {
@@ -283,6 +298,10 @@ export async function readObjectDefinitions(
       // The game's own word for a thing that is part of the room, and the
       // absence of any shot to go with it. See {@link killsAsStructure}.
       isScenery: killsAsStructure(element) && projectiles.length === 0,
+      // `<DungeonPortal/>` is what a key opens — narrower than `<Class>Portal`,
+      // which also covers realm, guild and event portals. Auto-portal wants only
+      // the ones somebody pops a key for.
+      isDungeonPortal: hasChild(element, 'DungeonPortal'),
       bodyTiles: readBodyTiles(element),
       projectiles: new Map(projectiles.map((p) => [p.bulletType, p])),
       item: readItemFacts(element),

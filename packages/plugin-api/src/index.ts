@@ -17,8 +17,11 @@ export { MutablePacket, Verdict } from './packet.js';
 export {
   clampToBounds,
   humaniseKey,
+  MULTI_SELECT_DELIMITER,
   type BooleanSettingOptions,
   type ButtonOptions,
+  type MultiSelectHandle,
+  type MultiSelectSettingOptions,
   type NumberSettingOptions,
   type SelectSettingOptions,
   type SettingCommon,

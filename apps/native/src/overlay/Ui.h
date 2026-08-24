@@ -108,11 +108,12 @@ enum class SettingKind : std::uint8_t {
     kNumber,
     kRange,
     kSelect,
+    kMultiSelect,
     kText,
     kButton,
 };
 
-/// One choice of a select, as it is shown and as it is sent back.
+/// One choice of a select or multi-select, as it is shown and as it is sent back.
 struct SettingOption {
     std::string label;
     std::string value;

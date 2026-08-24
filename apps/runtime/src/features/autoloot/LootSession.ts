@@ -9,12 +9,7 @@
  */
 
 import type { InventoryView } from '@brownie/plugin-api';
-import {
-  MOVEMENT_EPSILON,
-  PENDING_TIMEOUT_MS,
-  REFUSED_PAUSE_MAX_MS,
-  REFUSED_PAUSE_MS,
-} from './constants.js';
+import { MOVEMENT_EPSILON, PENDING_TIMEOUT_MS } from './constants.js';
 
 /**
  * A set of keys held until a deadline.
@@ -78,10 +73,15 @@ export class LootSession {
   /** Items tried recently, so a refusal is retried rather than spun on. */
   readonly attempts = new Claims<string>();
 
-  /** When a bag was first seen, for the shared-bag delay. */
-  readonly bagSeenAtMs = new Map<number, number>();
   /** Bags already announced, so the notifier says each one once. */
   readonly announced = new Set<number>();
+
+  /**
+   * Object types the player has dropped or dumped back, so auto-loot does not
+   * put them straight back. Kept for the map — an item type is the same across
+   * maps, but the intent to leave one behind belongs to this run.
+   */
+  readonly droppedTypes = new Set<number>();
 
   /**
    * When the last item packet went out.
@@ -96,7 +96,6 @@ export class LootSession {
   pauseUntilMs = 0;
 
   #pending: PendingMove | undefined;
-  #refusals = 0;
   #lastX = Number.NaN;
   #lastY = Number.NaN;
   #stationaryTicks = 0;
@@ -129,10 +128,11 @@ export class LootSession {
    *   stale about.
    * @returns the move that was **abandoned** — sent, waited on, and never seen
    *   to arrive. Silence is the only answer a move the server will not carry
-   *   out ever gets, so this is it; what the caller does with it is
-   *   {@link standDown}, because the next move being sent immediately is what
-   *   turns one refusal into a packet a second for as long as the player stands
-   *   on the bag.
+   *   out ever gets, so this is it. It is not held against the item: once the
+   *   pending move is cleared the item is free to be tried again, paced by its
+   *   own retry cooldown and the never-reset spacing floor, which is what keeps
+   *   a refusal from turning into a packet a second while still letting a bag
+   *   that is simply slow to answer be looted in the end.
    */
   resolvePending(
     inventory: InventoryView,
@@ -143,26 +143,11 @@ export class LootSession {
     if (move === undefined) return undefined;
     if (landed(inventory, move) && sourceCleared(move)) {
       this.#pending = undefined;
-      this.#refusals = 0;
       return undefined;
     }
     if (nowMs - move.sinceMs < PENDING_TIMEOUT_MS) return undefined;
     this.#pending = undefined;
     return move;
-  }
-
-  /**
-   * Stops looting for a while after a move the server did not carry out, for
-   * longer each time one follows another.
-   *
-   * The counter is only reset by a move that lands, so a mistake nothing here
-   * can name — a slot that is not the slot we take it for, a spacing the server
-   * dislikes — costs a packet a minute rather than a packet a second.
-   */
-  standDown(nowMs: number): void {
-    this.#refusals += 1;
-    const forMs = Math.min(REFUSED_PAUSE_MS * this.#refusals, REFUSED_PAUSE_MAX_MS);
-    this.pauseUntilMs = Math.max(this.pauseUntilMs, nowMs + forMs);
   }
 
   /** Records where the player is, and how long they have been there. */
@@ -190,10 +175,9 @@ export class LootSession {
    */
   reset(): void {
     this.attempts.clear();
-    this.bagSeenAtMs.clear();
     this.announced.clear();
+    this.droppedTypes.clear();
     this.#pending = undefined;
-    this.#refusals = 0;
     this.lastActionAtMs = Number.NEGATIVE_INFINITY;
     this.#lastX = Number.NaN;
     this.#lastY = Number.NaN;

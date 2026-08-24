@@ -93,40 +93,6 @@ bool FlagFromEnvironment(const wchar_t* name) {
            value[0] == L'T';
 }
 
-/// Holds the module dormant until whoever is at the keyboard says to start.
-///
-/// **A gate, not a notice.** Injection happens when the game is launched, so
-/// without this the module hooks, binds and dials the moment the process
-/// starts — there is no other point in the run where it could be asked for.
-/// Waiting here hands that moment to the operator, and cancelling leaves the
-/// process with a working proxy and nothing else, which is the closest thing to
-/// "not injected" a loaded module can be.
-///
-/// This is the earliest place a modal window is allowed: the engine thread is
-/// off the loader lock. The same call in `DllMain` would hang the game before
-/// it drew a frame.
-///
-/// Only the game is asked. The test host reaches this path through
-/// `BROWNIE_NATIVE_ANY_HOST` and runs unattended, where a box nobody is there
-/// to press is a script that never finishes.
-bool OperatorStartsTheModule() {
-    if (!HostIsTheGame()) {
-        return true;
-    }
-
-    const int answer = ::MessageBoxW(nullptr,
-                                     L"Brownie is loaded and has done nothing yet.\r\n\r\n"
-                                     L"OK\tstart: hook the game and connect to the runtime.\r\n"
-                                     L"Cancel\tstay dormant for this run.",
-                                     L"Brownie",
-                                     MB_OKCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND);
-
-    // Anything but a press of OK — including the box failing to appear at all —
-    // leaves the module dormant. Starting is what needs consent, so it is the
-    // answer that has to be given rather than the one that is assumed.
-    return answer == IDOK;
-}
-
 /// Owned by the module, torn down on detach.
 ///
 /// A pointer rather than a static object: a static's destructor would run
@@ -135,10 +101,6 @@ bool OperatorStartsTheModule() {
 std::unique_ptr<brownie::app::Engine> g_engine;
 
 DWORD WINAPI StartEngine(LPVOID /*unused*/) {
-    if (!OperatorStartsTheModule()) {
-        return 0;
-    }
-
     // Nothing to configure but the pipe name, and its default is the one the
     // runtime uses. The shared secret is deliberately absent: it is read from
     // the file the runtime publishes, on every connection attempt, because a

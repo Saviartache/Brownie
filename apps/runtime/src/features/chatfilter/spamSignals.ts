@@ -214,7 +214,8 @@ const SHORTENERS =
   /\btinyurl\b|\bbit\s*[._-]*ly\b|\bis\.gd\b|\bclck\.ru\b|\btiny\.(?:cc|one)\b|\blnk\.bio\b|\blinktr\b/;
 
 /** Where the conversation is being moved to, which is never in the game. */
-const OFF_GAME_PLATFORMS = /\bt\.me\b|\btelegram\b|\bkick\s*\.\s*com\b/;
+const OFF_GAME_PLATFORMS =
+  /\bt\.me\b|\btelegram\b|\bkick\s*\.\s*com\b|\bdiscord\s*\.\s*gg\b|\bdiscord\s*:/;
 
 /**
  * An address written so that neither a person nor a word list reads it as one.

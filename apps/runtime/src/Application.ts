@@ -13,6 +13,7 @@ import { createAutoAimPlugin } from './features/autoaim/autoAimPlugin.js';
 import { createAutoDrinkPlugin } from './features/autodrink/autoDrinkPlugin.js';
 import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
+import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
 import { createColliderPlugin } from './features/collider/colliderPlugin.js';
 import { createDodgePlugin } from './features/dodge/dodgePlugin.js';
@@ -359,6 +360,8 @@ export class Application {
           isQuest: (type) => this.#objects.isQuest(type),
           occupies: (type) => this.#objects.occupies(type),
           isScenery: (type) => this.#objects.isScenery(type),
+          isDungeonPortal: (type) => this.#objects.isDungeonPortal(type),
+          dungeonPortals: () => this.#objects.dungeonPortals(),
           bodyTiles: (type) => this.#objects.bodyTiles(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
@@ -761,6 +764,29 @@ export class Application {
         container: (objectType) => this.#objects.container(objectType),
         statMaxima: (objectType) => this.#objects.statMaxima(objectType),
         displayName: (objectType) => this.#objects.displayName(objectType),
+      }),
+    );
+
+    // Built here for the same reason as the dodge: it walks the character, and
+    // walking is a native-only capability the plugin surface does not carry. It
+    // also needs the game's own portal data, which the composition root holds.
+    this.#plugins.load(
+      createAutoPortalPlugin({
+        output: {
+          moveTo: (x, y, speedTilesPerSecond, holdMs) => {
+            this.#native.publishRecord(moveRecord(x, y, speedTilesPerSecond, holdMs, FROM_MAP));
+          },
+          // An offset of nothing is the honest "stand still": the module walks
+          // towards a place it has by definition already reached. The shortest
+          // hold, because it is the end of a walk rather than one.
+          stop: (speedTilesPerSecond) => {
+            this.#native.publishRecord(moveRecord(0, 0, speedTilesPerSecond, 1, FROM_PLAYER));
+          },
+        },
+        isDungeonPortal: (objectType) => this.#objects.isDungeonPortal(objectType),
+        displayName: (objectType) => this.#objects.displayName(objectType),
+        dungeonPortals: () => this.#objects.dungeonPortals(),
+        steer: { direction: () => this.#steer.direction() },
       }),
     );
 
