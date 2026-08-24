@@ -1,4 +1,12 @@
-import type { NativeApi, SessionApi } from '@brownie/plugin-api';
+import {
+  MutablePacket,
+  Verdict,
+  type NativeApi,
+  type SessionApi,
+  type SessionView,
+} from '@brownie/plugin-api';
+import { createPacket, decodeFrame, encodePacket } from '@brownie/protocol';
+import { createBundledRegistry } from '@brownie/protocol/bundled';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createColliderPlugin } from '../src/features/collider/colliderPlugin.js';
@@ -7,6 +15,7 @@ import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
 import { testLogger } from './fakes.js';
 
 describe('the collider plugin', () => {
+  const registry = createBundledRegistry();
   const features: [string, boolean | number | string][] = [];
 
   const native: NativeApi = {
@@ -38,6 +47,15 @@ describe('the collider plugin', () => {
     return { host, settings };
   }
 
+  function areaAck(): MutablePacket {
+    const packet = createPacket(registry, 'AOEACK');
+    packet.fields['time'] = 100;
+    packet.fields['position'] = { x: 10, y: 20 };
+    return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
+  }
+
+  const session = { id: 's1' } as SessionView;
+
   beforeEach(() => {
     features.length = 0;
     vi.useFakeTimers();
@@ -54,6 +72,34 @@ describe('the collider plugin', () => {
     vi.advanceTimersByTime(5000);
 
     expect(features).toEqual([]);
+  });
+
+  it('withholds area-hit acknowledgements while protection is enabled', () => {
+    const { host } = load(true);
+    const packet = areaAck();
+
+    host.dispatchPacket(packet, session);
+
+    expect(packet.verdict).toBe(Verdict.Drop);
+  });
+
+  it('forwards area-hit acknowledgements when protection is disabled', () => {
+    const { host, settings } = load(true);
+    settings.apply('blockAreaDamage', false);
+    const packet = areaAck();
+
+    host.dispatchPacket(packet, session);
+
+    expect(packet.verdict).toBe(Verdict.Forward);
+  });
+
+  it('forwards area-hit acknowledgements while the plugin is switched off', () => {
+    const { host } = load(false);
+    const packet = areaAck();
+
+    host.dispatchPacket(packet, session);
+
+    expect(packet.verdict).toBe(Verdict.Forward);
   });
 
   it('restates the claim once a second, because it is a lease', () => {

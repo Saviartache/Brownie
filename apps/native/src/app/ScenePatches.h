@@ -49,8 +49,8 @@ struct ScenePatchWants {
     /// What colour to hold it at. Ignored while the tint is off.
     game::UiColor tint_colour = game::HealthBarTint::kDefaultColour;
     /// What to scale the local player's collision circle by, or nothing to
-    /// leave the game's own value alone — which is what area damage is decided
-    /// against, see `game/PlayerCollision.h`.
+    /// leave the game's own value alone. Area damage uses a separate protocol
+    /// path; see `game/PlayerCollision.h`.
     ///
     /// One value rather than a switch because there are two askers: the
     /// overlay's "no hitbox" is zero and the runtime's collider plugin is

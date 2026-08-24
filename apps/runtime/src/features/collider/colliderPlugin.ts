@@ -3,12 +3,12 @@
  *
  * **One number on one object, and the client does the rest.**
  * `collisionRadiusMultiplier` is what the client scales the player's collision
- * circle by, so a smaller value leaves every test the client makes against that
- * circle with less to hit — and the one people notice is area damage. Nothing
- * here reaches the server, and nothing here is a wall clip: the circle is what
- * the *client* decides its own hits against. The write itself is the module's,
- * in `apps/native/src/game/PlayerCollision.h`; this plugin owns the switch and
- * the number.
+ * circle by, so a smaller value leaves local collision tests with less to hit.
+ * Area damage has a separate protocol path: the client reports a landed effect
+ * with `AOEACK`, and the server applies damage from that report. The packet
+ * handler below withholds that acknowledgement when protection is enabled. The
+ * native write itself is in `apps/native/src/game/PlayerCollision.h`; this
+ * plugin owns both parts of the feature.
  *
  * **The claim expires, like player noclip's and for the same reason.** A plugin
  * can be disabled, can fail, can be unloaded, and the runtime behind it can be
@@ -73,11 +73,10 @@ export function createColliderPlugin(): Plugin {
     meta: {
       id: 'player-collider',
       name: 'Collider Manipulation',
-      // Filed by what it changes rather than by where the reference kept it:
-      // the circle is what the client decides damage against, and movement is
-      // not decided by it at all.
+      // Filed by what it protects against rather than where the native field is
+      // stored. Neither half changes movement or wall collision.
       category: PluginCategory.Combat,
-      description: "Shrinks the local player's collision circle, in this client only.",
+      description: 'Shrinks the local collider and blocks area-hit reports.',
     },
 
     setup(context) {
@@ -86,9 +85,8 @@ export function createColliderPlugin(): Plugin {
       // slider to zero" because it is the thing people actually want, and
       // because a slider left at zero reads as a slider nobody finished moving.
       //
-      // Named for what it does to the player rather than for the field it
-      // writes: what it stops is what the *client* decides against that circle,
-      // and the one people notice is area damage. It is not a wall clip.
+      // Named for what it does to the local circle. It is not a wall clip, and
+      // area-hit reports are handled separately below.
       const noHitbox = context.settings.boolean('noHitbox', {
         label: 'No hitbox',
         default: false,
@@ -103,6 +101,16 @@ export function createColliderPlugin(): Plugin {
         // the case it exists for: while the circle is gone entirely there is no
         // fraction of one to choose.
         visibleWhen: { key: 'noHitbox', equals: [false] },
+      });
+      const blockAreaDamage = context.settings.boolean('blockAreaDamage', {
+        label: 'Block throwable and area damage',
+        default: true,
+      });
+
+      // Collider scaling does not control the acknowledgement used for area
+      // damage. Withholding it covers thrown bombs as well as other area effects.
+      context.packets.on('AOEACK', (packet) => {
+        if (blockAreaDamage.get()) packet.drop();
       });
 
       /**

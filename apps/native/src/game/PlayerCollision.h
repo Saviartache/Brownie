@@ -19,13 +19,10 @@
 // freed between realms, and a value put back through a remembered address is a
 // float written into whatever the allocator put there next.
 //
-// **What that stops is whatever the client decides by the circle, and the
-// visible one is area damage.** HPBarMod's own operators report shots that
-// explode in a radius landing without doing anything — which is the effect
-// this is actually for, and is why calling it "no clip" would be wrong twice
-// over: it is not about walls, and the client keeps deciding everything else
-// about the player exactly as it did. Damage that is not decided by that circle
-// is unaffected, and nothing here makes the server think anything at all.
+// **This only changes the local collision circle.** Area effects use a separate
+// `AOEACK` protocol path and are handled by the runtime's collider plugin. That
+// is why calling this "no clip" would be wrong: it is not about walls, and
+// nothing in this class makes the server think anything at all.
 //
 // **It is written, not called, and that is the exception rather than the rule
 // here.** Movement goes through the game's own `MoveTo` precisely because a

@@ -536,16 +536,18 @@ process ends: `DllMain` may not tear anything down (loader lock), and
 
 `ScenePatches` owns what the module does through the scene itself: the local
 player's health bar held at one colour, the local player's collision radius
-scaled — which is what area damage is decided against, not what walls are — and
-a line of the game's own floating text shown over the player.
+scaled, and a line of the game's own floating text shown over the player. Area
+damage is not decided by that Unity field: the collider plugin handles its
+separate `AOEACK` protocol path in the runtime.
 
 **Every switch over any of it belongs to a plugin.** The overlay holds only the
 switches that *draw*, under **Visualisation**; anything that reaches into the
 game is a plugin, so it is configured in one place, persisted with everything
 else, and reachable by a chat command or another plugin rather than only by a
 mouse. The collision radius is `player-collider` — where "no hitbox" is that
-plugin asking for a multiplier of nought — and letting shots through walls is a
-setting of `auto-aim`. The floating text has no switch at all: it does nothing
+plugin asking for a multiplier of nought, and its area-damage protection
+withholds the client's `AOEACK` — and letting shots through walls is a setting
+of `auto-aim`. The floating text has no switch at all: it does nothing
 until the runtime sends a `text` record, which today is noclip's countdown.
 
 The health bar tint has no switch of its own either, and deliberately: it is a
