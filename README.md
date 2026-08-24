@@ -16,6 +16,13 @@ directly.
 | `tools/gamedata` | Extracts the game's own data files from the installed game. |
 | `tools/rotmg-extractor` | Go tool: IL2CPP metadata recovery and decryption, build diffs. |
 
+## Overlay
+
+The injected native module draws an ImGui overlay inside the game — the plugin
+list, grouped by category, with per-plugin toggles and settings:
+
+![The Brownie overlay menu](assets/image1.png)
+
 Read [`docs/architecture.md`](docs/architecture.md) before changing anything
 structural — it records why the boundaries are where they are.
 [`docs/protocol.md`](docs/protocol.md) and [`docs/ipc.md`](docs/ipc.md) are the
