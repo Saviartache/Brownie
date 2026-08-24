@@ -223,6 +223,7 @@ describe('the auto-nexus plugin', () => {
       damage: over.damage ?? 100,
       collisionHalfTiles: DEFAULT_PROJECTILE_HALF_TILES,
       motionModelled: true,
+      maxSpeedTilesPerSecond: 20,
       firedAtMs: 0,
       expiresAtMs: 2000,
       x: 6,

@@ -44,6 +44,34 @@ describe('positionAt', () => {
     expect(at?.y).toBeCloseTo(120);
   });
 
+  it('integrates acceleration after its delay and stops at the speed clamp', () => {
+    const accelerating = definition({
+      speed: 100,
+      lifetimeMs: 30_000,
+      acceleration: 100,
+      accelerationDelayMs: 1000,
+      speedClamp: 300,
+    });
+
+    expect(positionAt(accelerating, ORIGIN, 1000)?.x).toBeCloseTo(20);
+    expect(positionAt(accelerating, ORIGIN, 2000)?.x).toBeCloseTo(35);
+    expect(positionAt(accelerating, ORIGIN, 4000)?.x).toBeCloseTo(90);
+  });
+
+  it('integrates deceleration without moving past the speed clamp', () => {
+    const braking = definition({
+      speed: 300,
+      lifetimeMs: 30_000,
+      acceleration: -100,
+      accelerationDelayMs: 1000,
+      speedClamp: 100,
+    });
+
+    expect(positionAt(braking, ORIGIN, 2000)?.x).toBeCloseTo(65);
+    expect(positionAt(braking, ORIGIN, 4000)?.x).toBeCloseTo(90);
+    expect(positionAt(braking, ORIGIN, 20_000)?.x).toBeCloseTo(250);
+  });
+
   it('stops existing once its lifetime is over', () => {
     const straight = definition({ lifetimeMs: 1000 });
     expect(positionAt(straight, ORIGIN, 1000)).toBeDefined();
@@ -144,9 +172,17 @@ describe('flightEndMs', () => {
   it('leaves a shot whose curve is not modelled alone', () => {
     const turning = definition({ speed: 100, lifetimeMs: 1000, turnRate: 90 });
     expect(flightEndMs(turning, WEST_TO_EAST, wallAt(5))).toBe(1000);
+  });
 
-    const accelerating = definition({ speed: 100, lifetimeMs: 1000, acceleration: 200 });
-    expect(flightEndMs(accelerating, WEST_TO_EAST, wallAt(5))).toBe(1000);
+  it('does not let an accelerating shot skip a wall between samples', () => {
+    const accelerating = definition({
+      speed: 100,
+      lifetimeMs: 1000,
+      acceleration: 100,
+      speedClamp: 300,
+    });
+
+    expect(flightEndMs(accelerating, WEST_TO_EAST, wallAt(5))).toBeLessThan(1000);
   });
 
   // A boomerang turns round at the halfway point and retraces its path, so the
@@ -178,6 +214,7 @@ describe('ProjectileStore', () => {
     const [shot] = [...store.values(1000)];
     expect(shot?.ownerId).toBe(1);
     expect(shot?.damage).toBe(50);
+    expect(shot?.maxSpeedTilesPerSecond).toBe(1000);
     expect(shot?.positionAt(1500)).toEqual({ x: 500, y: 0 });
   });
 

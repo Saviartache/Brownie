@@ -231,12 +231,14 @@ export interface ProjectileView extends Position {
   /**
    * Whether {@link positionAt} describes this shot's whole path.
    *
-   * False for the ones that accelerate or turn — the spirals that curl as they
-   * travel — where the prediction is a straight line for something that is not
-   * one. Anything acting on a prediction should leave room around one of these
+   * False for the ones that turn — the spirals that curl as they travel — where
+   * the prediction is a straight line for something that is not one. Anything
+   * acting on a prediction should leave room around one of these
    * in proportion to how far ahead it asked, rather than believing it exactly.
    */
   readonly motionModelled: boolean;
+  /** Greatest speed this shot can reach, including its acceleration clamp. */
+  readonly maxSpeedTilesPerSecond: number;
   /**
    * When it was fired and when it stops existing, on the world's clock.
    *

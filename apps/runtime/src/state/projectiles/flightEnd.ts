@@ -38,8 +38,8 @@
  */
 
 import {
+  maxSpeedTilesPerSecond,
   motionModelled,
-  speedTilesPerMs,
   type ProjectileDefinition,
 } from '../../gamedata/projectiles.js';
 import { positionAt, type ShotOrigin } from './positionAt.js';
@@ -99,7 +99,7 @@ const PARAMETRIC_PATH_MULTIPLE = 6;
  * Two kinds of shot are handed back their full lifetime without being walked at
  * all. One passes through cover, which is what `PassesCover` means and the
  * whole reason `retire` asks which sort of hit it heard about. The other is the
- * shot whose curve is not modelled — the ones that accelerate or turn — where
+ * shot whose curve is not modelled — the ones that turn — where
  * the path this would walk is not the path the bullet takes, so a wall found
  * along it is a wall the shot was never going to reach. Believing a shot for
  * too long costs a dodge; deleting a live one costs the run.
@@ -157,5 +157,5 @@ function sampleCount(definition: ProjectileDefinition): number {
  */
 function pathTiles(definition: ProjectileDefinition): number {
   if (definition.parametric) return PARAMETRIC_PATH_MULTIPLE * definition.magnitude;
-  return speedTilesPerMs(definition) * definition.lifetimeMs;
+  return (maxSpeedTilesPerSecond(definition) * definition.lifetimeMs) / 1000;
 }

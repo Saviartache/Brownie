@@ -42,15 +42,7 @@ export interface ProjectileDefinition {
   readonly amplitude: number;
   readonly frequency: number;
   readonly magnitude: number;
-  /**
-   * Parsed but **not applied** by the motion model.
-   *
-   * The reference implementation's port of the game's `positionAt` ignores
-   * acceleration too, so a prediction for an accelerating shot is wrong in the
-   * same way theirs is. Kept here so that when the model learns about it the
-   * data is already available, and stated so that nothing builds on a
-   * prediction believing it is exact.
-   */
+  /** Speed units added per second after {@link accelerationDelayMs}. */
   readonly acceleration: number;
   readonly accelerationDelayMs: number;
   readonly speedClamp: number;
@@ -69,12 +61,11 @@ export interface ProjectileDefinition {
 /**
  * Whether the motion model describes this kind of shot's whole path.
  *
- * False for the ones that accelerate or turn. `positionAt` covers wavy,
- * parametric, boomerang and the lateral amplitude exactly — those are the
- * game's own formulae — and has no term at all for the other two.
+ * False for the ones that turn. `positionAt` covers acceleration, wavy,
+ * parametric, boomerang and the lateral amplitude, but has no term for turning.
  */
 export function motionModelled(definition: ProjectileDefinition): boolean {
-  return definition.acceleration === 0 && definition.turnRate === 0;
+  return definition.turnRate === 0;
 }
 
 /**
@@ -87,6 +78,11 @@ export function motionModelled(definition: ProjectileDefinition): boolean {
  */
 export function speedTilesPerMs(definition: ProjectileDefinition): number {
   return definition.speed / 10_000;
+}
+
+/** The greatest speed this definition can reach, including its acceleration clamp. */
+export function maxSpeedTilesPerSecond(definition: ProjectileDefinition): number {
+  return Math.max(Math.abs(definition.speed), Math.abs(definition.speedClamp)) / 10;
 }
 
 /**

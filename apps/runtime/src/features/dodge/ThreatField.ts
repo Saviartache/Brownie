@@ -19,7 +19,7 @@
  * accuracy to buy back something the arithmetic gives away.
  *
  * **What is not modelled is paid for by time, not ignored.** `positionAt` does
- * not apply acceleration, turn rate or the client's own clock jitter, so a
+ * does not apply turn rate or the client's own clock jitter, so a
  * prediction 600 ms out is worth less than one 60 ms out. `driftTilesPerSecond`
  * widens every shot in proportion to how far ahead it is being asked about,
  * which is the honest shape of that error: near-term decisions stay tight and
@@ -43,13 +43,14 @@ export interface DodgeShot {
   /**
    * Whether the motion model describes this shot's whole path.
    *
-   * False for the ones that accelerate or turn — a spiral that curls, a shot
-   * that speeds up — where `positionAt` gives a straight line for something that
-   * is not one. Those are not dropped; they are *distrusted*, which means room
-   * left around them that grows with how far ahead the prediction is. Omitted
-   * means the model is believed.
+   * False for the ones that turn — a spiral that curls, where `positionAt` gives
+   * a straight line for something that is not one. Those are not dropped; they
+   * are *distrusted*, which means room left around them that grows with how far
+   * ahead the prediction is. Omitted means the model is believed.
    */
   readonly motionModelled?: boolean;
+  /** Greatest possible speed, when known. Enables safe early distance culling. */
+  readonly maxSpeedTilesPerSecond?: number;
 }
 
 export interface ThreatFieldOptions {
@@ -189,16 +190,6 @@ export interface Sweep {
 const MAX_SAMPLES = 64;
 
 /**
- * Faster than anything in the game, in tiles per second.
- *
- * Used once, to decide whether a shot is far enough away that predicting it at
- * all is wasted work. Deliberately generous — the cost of being wrong here is
- * missing a threat, so it is set above every projectile speed in the data rather
- * than at the fastest one seen.
- */
-const IMPLAUSIBLE_SPEED_TILES_PER_SECOND = 25;
-
-/**
  * How much room is still worth measuring, in tiles.
  *
  * **A shot that misses by a lot and one that misses by a little are different
@@ -215,7 +206,7 @@ const CLEARANCE_INTEREST_TILES = 1.0;
 /**
  * How much less a shot the model does not fully describe is believed.
  *
- * A turning or accelerating shot is predicted as though it went straight, so the
+ * A turning shot is predicted as though it went straight, so the
  * error is not noise — it is a curve the prediction has no term for, and it
  * grows the further ahead it is asked. Three times the ordinary distrust is what
  * turns "this shot will be exactly there" into "somewhere around there", which
@@ -390,23 +381,20 @@ export class ThreatField {
     // neither going to hit them nor stand between them and anywhere they could
     // go, whatever direction it is travelling. See {@link escapeTiles}.
     const swathSquared = (Math.max(0, options.reachTiles) + SWATH_MARGIN_TILES) ** 2;
-    const skipBeyond =
-      reach +
-      (IMPLAUSIBLE_SPEED_TILES_PER_SECOND * horizonMs) / 1000 +
-      DEFAULT_PROJECTILE_HALF_TILES;
-
     for (const shot of shots) {
       this.#considered += 1;
 
       const start = shot.positionAt(gameTimeMs);
       // Already gone. Counted as considered because the caller asked about it.
       if (start === undefined) continue;
-      // Too far to become relevant however fast it is. One comparison saves the
-      // whole prediction, which is the expensive part of a plan.
-      if (Math.abs(start.x - selfX) > skipBeyond || Math.abs(start.y - selfY) > skipBeyond) {
-        continue;
+      const maxSpeed = shot.maxSpeedTilesPerSecond;
+      if (maxSpeed !== undefined && Number.isFinite(maxSpeed)) {
+        const skipBeyond =
+          reach + (Math.max(0, maxSpeed) * horizonMs) / 1000 + DEFAULT_PROJECTILE_HALF_TILES;
+        if (Math.abs(start.x - selfX) > skipBeyond || Math.abs(start.y - selfY) > skipBeyond) {
+          continue;
+        }
       }
-
       this.#reserve(this.#tracked + 1);
       const slot = this.#tracked;
       const base = slot * this.#samples;

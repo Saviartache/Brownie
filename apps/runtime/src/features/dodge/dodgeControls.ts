@@ -233,7 +233,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 1,
     step: 0.05,
   });
-  // What `positionAt` does not model — acceleration, turn rate, the client's own
+  // What `positionAt` does not model — turn rate and the client's own
   // clock — grows with how far ahead it is asked. This is the price of that, and
   // it is why the planner can be trusted tightly up close.
   const driftTilesPerSecond = settings.range('driftTilesPerSecond', {

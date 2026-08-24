@@ -386,6 +386,27 @@ describe('the threat field', () => {
     expect(sweepStanding(field, { x: 0, y: 0 }).unsafeAtMs).toBeLessThan(Infinity);
   });
 
+  it('keeps a distant long-lived shot that accelerates into reach', () => {
+    const field = new ThreatField();
+    const shot: DodgeShot = {
+      maxSpeedTilesPerSecond: 120,
+      positionAt(gameTimeMs) {
+        if (gameTimeMs < 0 || gameTimeMs > 30_000) return undefined;
+        return { x: -40 + 0.00012 * gameTimeMs ** 2, y: 0 };
+      },
+    };
+
+    field.build(0, 0, 0, [shot], {
+      ...OPTIONS,
+      horizonMs: 1000,
+      engageTiles: 2,
+      reactWithinMs: 200,
+    });
+
+    expect(field.tracked).toBe(1);
+    expect(sweepStanding(field, { x: 0, y: 0 }).impactMs).toBeLessThan(Infinity);
+  });
+
   // **What decides which way to go when the field is busy.** The full-horizon
   // clearance is a minimum over a second of prediction, so it is set by whatever
   // passes closest at the far end; the urgent one is set by what is arriving.

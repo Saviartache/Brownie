@@ -1,6 +1,10 @@
 import type { Position, ProjectileView } from '@brownie/plugin-api';
 import { projectileHalfTiles } from '../../features/dodge/hitbox.js';
-import { motionModelled, type ProjectileDefinition } from '../../gamedata/projectiles.js';
+import {
+  maxSpeedTilesPerSecond,
+  motionModelled,
+  type ProjectileDefinition,
+} from '../../gamedata/projectiles.js';
 import { flightEndMs, type StopsShots } from './flightEnd.js';
 import { positionAt, type ShotOrigin } from './positionAt.js';
 
@@ -39,6 +43,10 @@ class TrackedShot implements ProjectileView {
   /** Whether `positionAt` describes this shot's whole path. */
   get motionModelled(): boolean {
     return motionModelled(this.definition);
+  }
+
+  get maxSpeedTilesPerSecond(): number {
+    return maxSpeedTilesPerSecond(this.definition);
   }
 
   /** Where it started. `positionAt` is what says where it is now. */

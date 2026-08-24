@@ -21,11 +21,6 @@ export interface ShotOrigin {
  * `bulletId` parity is load-bearing. The game gives alternating shots opposite
  * phases so a volley fans out; dropping it collapses a spread into one line.
  *
- * **Acceleration is not applied.** The definition carries it, the model does
- * not use it, and a prediction for an accelerating shot is therefore wrong in
- * the same way the reference implementation's is. Stated rather than hidden so
- * that nothing treats the result as exact.
- *
  * @returns `undefined` once the shot has expired — it no longer exists, which
  *   is different from "it is at its last position".
  */
@@ -37,7 +32,6 @@ export function positionAt(
   const lifetime = definition.lifetimeMs;
   if (elapsedMs < 0 || elapsedMs > lifetime || lifetime <= 0) return undefined;
 
-  const speed = speedTilesPerMs(definition);
   const phase = shot.bulletId % 2 === 0 ? 0 : Math.PI;
 
   let x = shot.x;
@@ -47,7 +41,7 @@ export function positionAt(
     const period = 6 * Math.PI;
     const amplitude = Math.PI / 64;
     const angle = shot.angle + amplitude * Math.sin(phase + (period * elapsedMs) / 1000);
-    const distance = elapsedMs * speed;
+    const distance = distanceAt(definition, elapsedMs);
     x += distance * Math.cos(angle);
     y += distance * Math.sin(angle);
     return { x, y };
@@ -65,12 +59,15 @@ export function positionAt(
     return { x, y };
   }
 
-  let distance = elapsedMs * speed;
+  let distance = distanceAt(definition, elapsedMs);
   if (definition.boomerang) {
     // It turns around at the halfway point of its lifetime and retraces its
     // path, so the far end of the arc is reached at half the lifetime.
-    const halfway = (lifetime * speed) / 2;
-    if (distance > halfway) distance = halfway - (distance - halfway);
+    const halfwayMs = lifetime / 2;
+    if (elapsedMs > halfwayMs) {
+      const halfway = distanceAt(definition, halfwayMs);
+      distance = halfway - (distance - halfway);
+    }
   }
 
   x += distance * Math.cos(shot.angle);
@@ -85,4 +82,27 @@ export function positionAt(
   }
 
   return { x, y };
+}
+
+/** Integrates the projectile's speed, including delayed acceleration and its clamp. */
+function distanceAt(definition: ProjectileDefinition, elapsedMs: number): number {
+  const initialTilesPerMs = speedTilesPerMs(definition);
+  if (definition.acceleration === 0) return elapsedMs * initialTilesPerMs;
+
+  const delayMs = Math.max(0, definition.accelerationDelayMs);
+  const acceleratingMs = Math.max(0, elapsedMs - delayMs);
+  if (acceleratingMs === 0) return elapsedMs * initialTilesPerMs;
+
+  const accelerationTilesPerMsSquared = definition.acceleration / 10_000_000;
+  const clampTilesPerMs = definition.speedClamp / 10_000;
+  const untilClampMs = (clampTilesPerMs - initialTilesPerMs) / accelerationTilesPerMsSquared;
+  const changingMs = Math.max(0, Math.min(acceleratingMs, untilClampMs));
+  const clampedMs = acceleratingMs - changingMs;
+
+  return (
+    delayMs * initialTilesPerMs +
+    changingMs * initialTilesPerMs +
+    0.5 * accelerationTilesPerMsSquared * changingMs ** 2 +
+    clampedMs * clampTilesPerMs
+  );
 }

@@ -375,12 +375,10 @@ describe('projectiles', () => {
     expect(catalog.projectile(99, 0)).toBeUndefined();
   });
 
-  it('keeps acceleration even though the motion model does not apply it', async () => {
+  it('keeps acceleration for the projectile motion model', async () => {
     const catalog = new GameObjectCatalog(
       await readObjectDefinitions(chunked(`<Objects>${SHOOTER}</Objects>`)),
     );
-    // Parsed so the model can learn about it without a data change; stated in
-    // `positionAt` so nothing treats an accelerating shot's path as exact.
     expect(catalog.projectile(1, 0)?.acceleration).toBe(80);
   });
 });
