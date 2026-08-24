@@ -184,15 +184,16 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
     if (!tint && !collision && !text) {
         return;
     }
-    // Asked only when one of the two switches wants it, because asking advances
-    // it — a frame that walked the scene for a message would otherwise consume
-    // the tick the switches were waiting for.
-    const bool due = (tint || collision) && pass_.Due(now_ms);
+    // Asked only while the corresponding feature needs it, because asking
+    // advances a cadence. Collision recovers quickly after a properties rebuild
+    // without making the slower UI discovery run at the same rate.
+    const bool tint_due = tint && ui_pass_.Due(now_ms);
+    const bool collision_due = collision && collision_pass_.Due(now_ms);
     // A colour that has just changed is shown now rather than on the next pass:
     // half a second between a picker moving and the bar following it is long
     // enough to be read as the picker not working.
     const bool repaint = tint && repaint_;
-    if (!due && !repaint && !text) {
+    if (!tint_due && !collision_due && !repaint && !text) {
         return;
     }
 
@@ -207,7 +208,7 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
         return;
     }
 
-    if (tint && due) {
+    if (tint_due) {
         TrackHealthBar();
     }
     if (repaint) {
@@ -218,7 +219,7 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
         tint_.Paint();
         repaint_ = false;
     }
-    if (collision && due) {
+    if (collision_due) {
         (void)collision_.Apply(
             *runtime, scene_,
             wanted ? std::optional<float>{collision_multiplier_.load(std::memory_order_relaxed)}

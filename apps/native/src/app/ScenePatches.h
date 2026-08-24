@@ -61,8 +61,10 @@ struct ScenePatchWants {
 
 class ScenePatches {
   public:
-    /// How often the scene is walked. Slow on purpose — see the file comment.
-    static constexpr std::uint32_t kPassIntervalMs = 500;
+    /// Collision is refreshed often enough to recover quickly when the game
+    /// rebuilds its properties. UI discovery remains deliberately slower.
+    static constexpr std::uint32_t kCollisionPassIntervalMs = 100;
+    static constexpr std::uint32_t kUiPassIntervalMs = 500;
 
     ScenePatches() noexcept = default;
 
@@ -79,7 +81,7 @@ class ScenePatches {
     /// is nothing left to do.
     void AdvanceSetup(const game::Il2CppRuntime& game, const game::OffsetTable& table);
 
-    /// One pass over the scene, if one is due and anything is switched on.
+    /// Applies whichever scene work is due and switched on.
     /// **Game thread only.**
     void Apply(std::uint64_t now_ms);
 
@@ -157,13 +159,14 @@ class ScenePatches {
 
     /// The last colour asked for, and whether it still has to be shown.
     ///
-    /// A repaint outside the pass, because the pass runs twice a second and a
+    /// A repaint outside the UI pass, because it runs twice a second and a
     /// colour picker being dragged has to answer now — a slider that shows its
     /// result half a second later is a slider nobody can aim.
     std::uint32_t colour_ = game::PackColour(game::HealthBarTint::kDefaultColour);
     bool repaint_ = false;
 
-    Cadence pass_{kPassIntervalMs};
+    Cadence collision_pass_{kCollisionPassIntervalMs};
+    Cadence ui_pass_{kUiPassIntervalMs};
 };
 
 }  // namespace brownie::app

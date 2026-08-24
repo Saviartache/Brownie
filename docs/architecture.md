@@ -573,9 +573,9 @@ once nobody is asking. See `src/game/PlayerCollision.h`.
 All three still need the same walk through Unity's own object model — `GameObject.Find`,
 `transform`, `GetChild`, `GetComponent` and the rest — which is `UnityScene`, and
 which is why they share an owner. Those calls are managed code, so they run on
-the game's thread, from inside the frame; and they are expensive enough
-(`GameObject.Find` walks the scene) that they run behind a 500 ms cadence rather
-than per frame.
+the game's thread, from inside the frame. Collision refreshes every 100 ms so a
+rebuilt properties object is corrected promptly; UI discovery stays behind a
+500 ms cadence because `GameObject.Find` walks the scene.
 
 Both features come from HPBarMod, a third-party cheat found beside the game.
 `docs/hpbarmod.md` is what it did and which parts of it are here.
