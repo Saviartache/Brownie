@@ -40,8 +40,9 @@ bool PlayerSkin::Apply(const Il2CppRuntime& game, const PlayerRoute& route,
 
     if (!applied_.has_value() || current != *applied_) {
         original_ = current;
+    } else if (current == *wanted) {
+        return false;
     }
-    // The field can outlive the rendered sprite; the setter rebuilds that visual state.
     reinterpret_cast<SetSkin>(set_skin_)(player, *wanted, nullptr);
     applied_ = *wanted;
     return true;

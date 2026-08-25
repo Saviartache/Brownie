@@ -63,7 +63,7 @@ constexpr std::array kQueries{
                     FieldQuery{kPlayer, "PGAFHFAGDLK", {},
                                "DecaGames.RotMG.Objects.Map.Data.ShaderProperties", 0, 1}},
     KeyedFieldQuery{kPlayerSkin,
-                    FieldQuery{kLocalPlayerClass, "BGKKPMKNAIL", {}, "System.Int32", 0, 0}},
+                    FieldQuery{kLocalPlayerClass, "BKMIHOGBMMC", {}, "System.Int32", 0, 0}},
 
     // The two hops to the player object itself. The first is a C# auto-property
     // whose compiler-generated wrapper survived obfuscation even though the
@@ -112,8 +112,8 @@ constexpr MethodQuery kShootWithAngleQuery{kShootClass, "EHGHCACPAGH", {}, "Syst
 constexpr std::string_view kIntParameter[] = {"System.Int32"};
 constexpr std::string_view kShaderPropertiesParameter[] = {
     "DecaGames.RotMG.Objects.Map.Data.ShaderProperties"};
-constexpr MethodQuery kSetPlayerSkinQuery{kLocalPlayerClass, "IABKABACBID", {}, "System.Void",
-                                          kIntParameter};
+constexpr MethodQuery kSetPlayerSkinQuery{kLocalPlayerClass, "MBKGLHCJBCD", {}, "System.Void",
+                                           kIntParameter};
 constexpr MethodQuery kSetPlayerShaderQuery{kLocalPlayerClass, "CNAOFINEJPK", {}, "System.Void",
                                             kShaderPropertiesParameter};
 

@@ -1965,6 +1965,31 @@ void PlayerFieldsAreNotGatedByAnotherModulesProgress() {
     }
 }
 
+void PlayerSkinUsesTheActiveOverride() {
+    const auto queries = brownie::game::PlayerFieldQueries();
+    const brownie::game::KeyedFieldQuery* skin = nullptr;
+    for (const auto& entry : queries) {
+        if (entry.key == brownie::game::kPlayerSkin) {
+            skin = &entry;
+            break;
+        }
+    }
+    Check(skin != nullptr && skin->query.name == "BKMIHOGBMMC",
+          "the skin reads the active override field");
+
+    FakeMetadata metadata;
+    FakeMetadata::Class local_player{.name = "FKALGHJIADI"};
+    local_player.methods.push_back(
+        {"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
+    metadata.Add(std::move(local_player));
+
+    brownie::game::OffsetTable table{metadata};
+    Check(brownie::game::ResolvePlayerMethods(table) == 1,
+          "the active skin setter resolves by name");
+    Check(table.MethodAddress(brownie::game::kSetPlayerSkin) == kEntryPoint,
+          "the skin binds to the active override setter");
+}
+
 void ArcaneStylesMatchTheLiveLibrary() {
     using brownie::game::MatchesArcaneStyle;
     Check(MatchesArcaneStyle("Brown Hologram Style", "Brown Hologram Style"),
@@ -2018,6 +2043,7 @@ int main() {
     AnExportIsChunkedRatherThanSentPerClass();
     AnObjectDumpStopsAtItsBuffer();
     PlayerFieldsAreNotGatedByAnotherModulesProgress();
+    PlayerSkinUsesTheActiveOverride();
     ArcaneStylesMatchTheLiveLibrary();
     RecordsBecomeTargetsThatExpire();
     AProjectionInvertsItself();
