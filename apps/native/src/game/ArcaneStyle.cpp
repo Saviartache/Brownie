@@ -7,6 +7,7 @@ namespace brownie::game {
 namespace {
 
 constexpr std::string_view kInt32Type = "System.Int32";
+constexpr std::string_view kPetStyleSuffix = " Stone";
 constexpr std::int32_t kMaxLibraryItems = 4096;
 
 [[nodiscard]] bool TakeField(const OffsetTable& table, std::string_view key,
@@ -29,6 +30,15 @@ constexpr std::int32_t kMaxLibraryItems = 4096;
 }
 
 }  // namespace
+
+bool MatchesArcaneStyle(std::string_view candidate, std::string_view requested) noexcept {
+    if (candidate == requested) {
+        return true;
+    }
+    return !requested.empty() && !requested.ends_with(kPetStyleSuffix) &&
+           candidate.size() == requested.size() + kPetStyleSuffix.size() &&
+           candidate.starts_with(requested) && candidate.ends_with(kPetStyleSuffix);
+}
 
 void ArcaneStyle::Bind(const Il2CppRuntime& game, const OffsetTable& table) {
     if (!static_bound_.load(std::memory_order_acquire)) {
@@ -89,21 +99,23 @@ std::optional<std::string> ArcaneStyle::IdOf(const Il2CppRuntime& game,
     return game.StringValue(id);
 }
 
-void* ArcaneStyle::Find(const Il2CppRuntime& game, void* manager, std::string_view id) {
+std::optional<ArcaneStyle::FoundProperties> ArcaneStyle::Find(const Il2CppRuntime& game,
+                                                              void* manager,
+                                                              std::string_view id) {
     using GetShaderEffects = void* (*)(void*, void*);
     using GetLibrary = void* (*)(void*, void*);
 
     void* const effects = reinterpret_cast<GetShaderEffects>(get_shader_effects_)(manager, nullptr);
     if (effects == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
     void* const library = reinterpret_cast<GetLibrary>(get_library_)(effects, nullptr);
     if (library == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
     void* items = nullptr;
     if (!ReadField(library, library_items_at_, items) || items == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
 
     if (const auto klass = game.ClassOf(items); klass.has_value()) {
@@ -112,22 +124,22 @@ void* ArcaneStyle::Find(const Il2CppRuntime& game, void* manager, std::string_vi
     const MethodRef count_method = list_count_.load(std::memory_order_acquire);
     const MethodRef item_method = list_item_.load(std::memory_order_acquire);
     if (count_method == nullptr || item_method == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
 
     const auto count = game.InvokeInt32(count_method, items, nullptr);
     if (!count.has_value() || *count < 0 || *count > kMaxLibraryItems) {
-        return nullptr;
+        return std::nullopt;
     }
     for (std::int32_t index = 0; index < *count; ++index) {
         void* arguments[]{&index};
         void* properties = game.InvokeObject(item_method, items, arguments);
         const auto candidate = IdOf(game, properties);
-        if (candidate.has_value() && *candidate == id) {
-            return properties;
+        if (candidate.has_value() && MatchesArcaneStyle(*candidate, id)) {
+            return FoundProperties{properties, *candidate};
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 bool ArcaneStyle::Apply(const Il2CppRuntime& game, const PlayerRoute& route,
@@ -164,10 +176,11 @@ bool ArcaneStyle::Apply(const Il2CppRuntime& game, const PlayerRoute& route,
         void* original = nullptr;
         if (!original_id_.empty()) {
             void* const manager = game.ReadStaticReference(route.singleton);
-            original = manager == nullptr ? nullptr : Find(game, manager, original_id_);
-            if (original == nullptr) {
+            const auto found = manager == nullptr ? std::nullopt : Find(game, manager, original_id_);
+            if (!found.has_value()) {
                 return false;
             }
+            original = found->value;
         }
         reinterpret_cast<SetPlayerProperties>(set_player_properties_)(player, original, nullptr);
         Forget();
@@ -176,17 +189,16 @@ bool ArcaneStyle::Apply(const Il2CppRuntime& game, const PlayerRoute& route,
 
     if (applied_id_.empty() || *current != applied_id_) {
         original_id_ = *current;
-    } else if (*current == wanted) {
-        return false;
     }
 
     void* const manager = game.ReadStaticReference(route.singleton);
-    void* const properties = manager == nullptr ? nullptr : Find(game, manager, wanted);
-    if (properties == nullptr) {
+    const auto found = manager == nullptr ? std::nullopt : Find(game, manager, wanted);
+    if (!found.has_value()) {
         return false;
     }
-    reinterpret_cast<SetPlayerProperties>(set_player_properties_)(player, properties, nullptr);
-    applied_id_.assign(wanted);
+    // As with skins, the field can survive a renderer rebuild that drops the effect.
+    reinterpret_cast<SetPlayerProperties>(set_player_properties_)(player, found->value, nullptr);
+    applied_id_ = found->id;
     return true;
 }
 

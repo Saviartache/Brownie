@@ -12,6 +12,11 @@
 
 namespace brownie::game {
 
+/// The live effect library identifies player-compatible entries by the paired
+/// pet consumable id, while older builds may still expose the player id itself.
+[[nodiscard]] bool MatchesArcaneStyle(std::string_view candidate,
+                                      std::string_view requested) noexcept;
+
 /// Applies a game-owned ShaderProperties entry to the local player's sprite.
 /// Managed objects are found afresh for every pass; only their string ids are
 /// retained, so the garbage collector never has to account for a native root.
@@ -27,8 +32,13 @@ class ArcaneStyle {
     [[nodiscard]] bool holding() const noexcept { return !applied_id_.empty(); }
 
   private:
-    [[nodiscard]] void* Find(const Il2CppRuntime& game, void* manager,
-                             std::string_view id);
+    struct FoundProperties {
+        void* value;
+        std::string id;
+    };
+
+    [[nodiscard]] std::optional<FoundProperties> Find(const Il2CppRuntime& game, void* manager,
+                                                       std::string_view id);
     [[nodiscard]] std::optional<std::string> IdOf(const Il2CppRuntime& game,
                                                   void* properties) const;
     void Forget() noexcept;

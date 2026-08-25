@@ -24,6 +24,7 @@
 #include "core/ModuleImage.h"
 #include "core/Result.h"
 #include "game/AimHook.h"
+#include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
 #include "game/HealthBarTint.h"
 #include "game/OffsetTable.h"
@@ -1964,6 +1965,20 @@ void PlayerFieldsAreNotGatedByAnotherModulesProgress() {
     }
 }
 
+void ArcaneStylesMatchTheLiveLibrary() {
+    using brownie::game::MatchesArcaneStyle;
+    Check(MatchesArcaneStyle("Brown Hologram Style", "Brown Hologram Style"),
+          "an exact Arcane Style id matches");
+    Check(MatchesArcaneStyle("Brown Hologram Style Stone", "Brown Hologram Style"),
+          "a player Arcane Style matches its live library entry");
+    Check(!MatchesArcaneStyle("Brown Hologram Style Stone Stone",
+                              "Brown Hologram Style Stone"),
+          "an existing Stone suffix is not appended twice");
+    Check(!MatchesArcaneStyle("Brown Hologram Style Stone", "Brown Hologram"),
+          "a partial Arcane Style id does not match");
+    Check(!MatchesArcaneStyle(" Stone", ""), "an empty Arcane Style id does not match");
+}
+
 }  // namespace
 
 int main() {
@@ -2003,6 +2018,7 @@ int main() {
     AnExportIsChunkedRatherThanSentPerClass();
     AnObjectDumpStopsAtItsBuffer();
     PlayerFieldsAreNotGatedByAnotherModulesProgress();
+    ArcaneStylesMatchTheLiveLibrary();
     RecordsBecomeTargetsThatExpire();
     AProjectionInvertsItself();
     AStepIsBoundedByTheFrameAndByTheCap();
