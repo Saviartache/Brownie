@@ -73,6 +73,15 @@ export interface SettingCommon {
   /** Hidden behind the overlay's "advanced" toggle. */
   readonly advanced?: boolean;
   /**
+   * Persisted and readable, but never drawn.
+   *
+   * For state a plugin has to keep across runs that is not a knob — what the
+   * skin changer picked for each character class, say. A declaration is already
+   * the only thing the config store persists, so this is where such state
+   * belongs rather than in a second file with its own lifetime.
+   */
+  readonly hidden?: boolean;
+  /**
    * Show only while a sibling setting holds one of these values.
    *
    * Hiding, rather than disabling, is deliberate here and against the

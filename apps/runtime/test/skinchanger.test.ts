@@ -3,6 +3,7 @@ import {
   type NativeApi,
   type SessionApi,
   type SessionView,
+  type SettingValue,
 } from '@brownie/plugin-api';
 import { createPacket, decodeFrame, encodePacket } from '@brownie/protocol';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
@@ -11,6 +12,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StatType } from '../src/constants/StatType.js';
 import { createSkinChangerPlugin } from '../src/features/skinchanger/skinChangerPlugin.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
+import { PluginPreferences } from '../src/plugins/PluginPreferences.js';
+import type { PluginStore } from '../src/plugins/PluginStore.js';
 import { testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
@@ -86,9 +89,11 @@ function session(objectType: number): SessionView {
   return { id: 's1', self: { objectId: SELF_ID, objectType } } as unknown as SessionView;
 }
 
-function load(): {
+function load(store?: PluginStore): {
   host: PluginHost;
   options: (key: string) => readonly (readonly [string, string])[];
+  value: (key: string) => SettingValue | undefined;
+  set: (key: string, value: string) => void;
   nativeCalls: { key: string; value: boolean | number | string }[];
 } {
   const nativeCalls: { key: string; value: boolean | number | string }[] = [];
@@ -97,7 +102,12 @@ function load(): {
     setFeature: (key, value) => nativeCalls.push({ key, value }),
     onConnected: () => () => undefined,
   };
-  const host = new PluginHost({ log: testLogger(), native, sessions: SESSIONS });
+  const host = new PluginHost({
+    log: testLogger(),
+    native,
+    sessions: SESSIONS,
+    ...(store === undefined ? {} : { store }),
+  });
   host.load(
     createSkinChangerPlugin({
       skinsForClass: (type) =>
@@ -127,6 +137,10 @@ function load(): {
         .descriptors()
         .find((candidate) => candidate.key === key);
       return descriptor?.kind === 'select' ? descriptor.options : [];
+    },
+    value: (key) => host.settingsOf('skin-changer')!.values()[key],
+    set: (key, value) => {
+      host.settingsOf('skin-changer')!.apply(key, value);
     },
   };
 }
@@ -235,6 +249,69 @@ describe('Skin Changer', () => {
     expect(statIn(packet, OTHER_ID, StatType.Skin)).toBe(0);
     expect(statIn(packet, OTHER_ID, StatType.Texture1)).toBe(0);
     expect(statIn(packet, OTHER_ID, StatType.Texture2)).toBe(0);
+  });
+
+  it('remembers what was chosen for each class and restores it on the way back', () => {
+    const { host, nativeCalls, value, set } = load();
+    const wizardStyle = 'Low Blue Inferno Flipbook Style';
+    const knightStyle = 'High Violet Inferno Flipbook Style';
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    set('skin', String(MERLIN));
+    set('mainAppearance', String(PINSTRIPE));
+    set('arcaneStyle', wizardStyle);
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    expect(value('skin')).toBe('0');
+    set('skin', String(ROUND_KNIGHT));
+    set('mainAppearance', String(BLUE));
+    set('arcaneStyle', knightStyle);
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    expect(value('skin')).toBe(String(MERLIN));
+    expect(value('mainAppearance')).toBe(String(PINSTRIPE));
+    expect(value('arcaneStyle')).toBe(wizardStyle);
+    expect(nativeCalls.filter((call) => call.key === 'player.skin').at(-1)).toEqual({
+      key: 'player.skin',
+      value: String(MERLIN),
+    });
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    expect(value('skin')).toBe(String(ROUND_KNIGHT));
+    expect(value('mainAppearance')).toBe(String(BLUE));
+    expect(value('arcaneStyle')).toBe(knightStyle);
+  });
+
+  it('starts a class never seen before from what is on screen', () => {
+    const { host, value, set } = load();
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    set('accessoryAppearance', String(BLUE));
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    expect(value('accessoryAppearance')).toBe(String(BLUE));
+
+    set('accessoryAppearance', String(PINSTRIPE));
+    host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    expect(value('accessoryAppearance')).toBe(String(BLUE));
+  });
+
+  it("keeps each class's selection across a restart", () => {
+    const store = new PluginPreferences();
+    const first = load(store);
+    first.host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    first.set('skin', String(MERLIN));
+    first.host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    first.set('skin', String(ROUND_KNIGHT));
+    first.set('mainAppearance', String(BLUE));
+
+    const second = load(store);
+    second.host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    expect(second.value('skin')).toBe(String(MERLIN));
+
+    second.host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    expect(second.value('skin')).toBe(String(ROUND_KNIGHT));
+    expect(second.value('mainAppearance')).toBe(String(BLUE));
   });
 
   it('restores server dyes when Default is selected', () => {

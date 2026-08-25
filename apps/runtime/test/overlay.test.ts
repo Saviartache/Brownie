@@ -251,6 +251,20 @@ describe('OverlayControlPlane', () => {
     expect(picks?.[12]).toBe('A=a;B=b'); // options
   });
 
+  it('does not draw a hidden setting', () => {
+    const h = harness();
+    h.host.load(
+      plugin('skins', (ctx) => {
+        ctx.settings.text('perClass', { default: '', hidden: true });
+        ctx.settings.boolean('audible', { default: true });
+      }),
+    );
+    h.plane.start();
+    h.flush();
+
+    expect(h.overlay.of('setting').map((record) => record[1])).toEqual(['audible']);
+  });
+
   it('applies a multi-select the overlay echoes back as a joined string', () => {
     const h = harness();
     h.host.load(

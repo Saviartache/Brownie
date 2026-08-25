@@ -144,6 +144,12 @@ const dungeons = ctx.settings.multiSelect('portals', {
 because a plugin with one knob per planner would otherwise show several sets of
 greyed-out controls that can never apply at once.
 
+`hidden: true` declares a setting the overlay never draws at all. It is not a
+knob, it is state the plugin has to keep across runs — the skin changer's record
+of what was chosen for each character class, for one. A declaration is already
+the only thing the config store persists, so this is where such state belongs
+instead of in a second file with a lifetime of its own.
+
 ## Persistence
 
 Every setting value and every plugin's on/off switch survives a restart. They

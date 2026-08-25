@@ -14,10 +14,17 @@ import {
   statusOfEntity,
   type MutableStatus,
 } from '../../state/StatOverrides.js';
+import {
+  DEFAULT_APPEARANCE,
+  readAppearanceMemory,
+  writeAppearanceMemory,
+  type ClassAppearance,
+} from './AppearanceMemory.js';
 
-const DEFAULT_SKIN = '0';
+const DEFAULT_SKIN = DEFAULT_APPEARANCE.skin;
+const DEFAULT_STYLE = DEFAULT_APPEARANCE.arcaneStyle;
 const DEFAULT_OPTION = [DEFAULT_SKIN, 'Default'] as const;
-const DEFAULT_STYLE_OPTION = ['', 'Default'] as const;
+const DEFAULT_STYLE_OPTION = [DEFAULT_STYLE, 'Default'] as const;
 const ARCANE_STYLE_FEATURE = 'player.arcaneStyle';
 const SKIN_FEATURE = 'player.skin';
 const CLAIM_INTERVAL_MS = 1000;
@@ -54,24 +61,30 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
       const mainAppearance = context.settings.select<string>('mainAppearance', {
         group: 'Dyes and effects',
         label: 'Main color / effect',
-        default: DEFAULT_SKIN,
+        default: DEFAULT_APPEARANCE.main,
         options: mainOptions,
       });
       const accessoryAppearance = context.settings.select<string>('accessoryAppearance', {
         group: 'Dyes and effects',
         label: 'Accessory color / effect',
-        default: DEFAULT_SKIN,
+        default: DEFAULT_APPEARANCE.accessory,
         options: accessoryOptions,
       });
       const arcaneStyle = context.settings.select<string>('arcaneStyle', {
         group: 'Arcane Style',
         label: 'Arcane Style',
-        default: '',
+        default: DEFAULT_STYLE,
         options: [
           DEFAULT_STYLE_OPTION,
           ...inputs.arcaneStyles().map((name): readonly [string, string] => [name, name]),
         ],
       });
+      const memory = context.settings.text('perClass', {
+        label: 'Selection remembered per class',
+        default: '',
+        hidden: true,
+      });
+      const remembered = readAppearanceMemory(memory.get());
       const states = new Map<string, StatOverrides>();
       const targets = new Map<number, number>();
       let displayedClass = -1;
@@ -124,12 +137,39 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
         ARCANE_STYLE_FEATURE,
         () => arcaneStyle.get(),
         (listener) => arcaneStyle.onChange(listener),
-        '',
+        DEFAULT_STYLE,
       );
 
-      const updateOptions = (objectType: number): void => {
+      const remember = (): void => {
+        if (displayedClass < 0) return;
+        remembered.set(displayedClass, {
+          skin: skin.get(),
+          main: mainAppearance.get(),
+          accessory: accessoryAppearance.get(),
+          arcaneStyle: arcaneStyle.get(),
+        });
+        memory.set(writeAppearanceMemory(remembered));
+      };
+      for (const setting of [skin, mainAppearance, accessoryAppearance, arcaneStyle]) {
+        context.onDispose(setting.onChange(remember));
+      }
+
+      const restore = (appearance: ClassAppearance): void => {
+        // Skin first: its options were just replaced, and a value the new class
+        // cannot wear is refused, leaving the default `setOptions` fell back to.
+        skin.set(appearance.skin);
+        mainAppearance.set(appearance.main);
+        accessoryAppearance.set(appearance.accessory);
+        arcaneStyle.set(appearance.arcaneStyle);
+      };
+
+      const showClass = (objectType: number): void => {
         if (objectType < 0 || objectType === displayedClass) return;
+        // Read before anything below runs: every write from here on is recorded
+        // against the class being switched to, which overwrites this entry.
+        const wanted = remembered.get(objectType);
         displayedClass = objectType;
+
         let options = skinOptionsByClass.get(objectType);
         if (options === undefined) {
           options = [
@@ -144,6 +184,15 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
           skinOptionsByClass.set(objectType, options);
         }
         skin.setOptions(options);
+
+        // A class played for the first time keeps what is on screen as its
+        // starting point — which is also how a selection made before this build
+        // knew about classes carries over instead of being reset to Default.
+        if (wanted === undefined) {
+          remember();
+          return;
+        }
+        restore(wanted);
       };
 
       const rewrite = (
@@ -152,7 +201,7 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
         session: SessionView,
         announced: boolean,
       ): void => {
-        updateOptions(session.self.objectType);
+        showClass(session.self.objectType);
         if (packet.opaque || session.self.objectId < 0) return;
 
         let state = states.get(session.id);

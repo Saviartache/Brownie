@@ -148,6 +148,7 @@ export class OverlayControlPlane {
       if (settings === undefined) continue;
       const values = settings.values();
       for (const descriptor of settings.descriptors()) {
+        if (descriptor.hidden === true) continue;
         records.push(settingRecord(meta.id, descriptor, values[descriptor.key]));
       }
     }
