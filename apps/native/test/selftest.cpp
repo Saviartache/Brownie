@@ -26,6 +26,7 @@
 #include "game/AimHook.h"
 #include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
+#include "game/GlowFields.h"
 #include "game/HealthBarTint.h"
 #include "game/OffsetTable.h"
 #include "game/PlayerCollision.h"
@@ -1990,6 +1991,48 @@ void PlayerSkinUsesTheActiveOverride() {
           "the skin binds to the active override setter");
 }
 
+void TheGlowSetterIsNotTheSkinSetter() {
+    // Both are `void(int)` on the same class, so a shape identifies neither and
+    // the pair is exactly what a fingerprint would confuse. Resolving them
+    // together is the check that each is found by its own name.
+    FakeMetadata metadata;
+    FakeMetadata::Class local_player{.name = "FKALGHJIADI"};
+    local_player.methods.push_back(
+        {"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
+    local_player.methods.push_back(
+        {"JEDNHGGONPP", "System.Void", {"System.Int32"}, kOtherEntryPoint});
+    metadata.Add(std::move(local_player));
+
+    brownie::game::OffsetTable table{metadata};
+    (void)brownie::game::ResolvePlayerMethods(table);
+    Check(table.MethodAddress(brownie::game::kSetPlayerSkin) == kEntryPoint,
+          "the skin setter is the one named for the skin");
+    Check(table.MethodAddress(brownie::game::kSetPlayerGlow) == kOtherEntryPoint,
+          "the glow setter is the one named for the glow");
+}
+
+void GlowStylesAreFoundOnTheirOwnClasses() {
+    FakeMetadata metadata;
+    FakeMetadata::Class aura{.name = "INPKDKIEDLB"};
+    aura.fields.push_back({"PACDNKLMHAK", "UnityEngine.Color", 0x10, false});
+    aura.fields.push_back({"APDEEPOICMN", "UnityEngine.Color", 0x20, false});
+    metadata.Add(std::move(aura));
+
+    FakeMetadata::Class outline{.name = "LDHFNAFNELO"};
+    outline.fields.push_back({"PACDNKLMHAK", "UnityEngine.Color", 0x10, false});
+    metadata.Add(std::move(outline));
+
+    brownie::game::OffsetTable table{metadata};
+    Check(brownie::game::ResolveGlowFields(table) == 2, "both glow styles resolve by name");
+    // The aura's colour is its *second*, and the two are the same type: a query
+    // that took the first would repaint the black every style is paired with
+    // and leave the red alone.
+    Check(table.FieldOffset(brownie::game::kGlowStyleColour) == 0x20,
+          "the aura is recoloured by its second colour");
+    Check(table.FieldOffset(brownie::game::kOutlineStyleColour) == 0x10,
+          "the outline is recoloured by its only one");
+}
+
 void ArcaneStylesMatchTheLiveLibrary() {
     using brownie::game::MatchesArcaneStyle;
     Check(MatchesArcaneStyle("Brown Hologram Style", "Brown Hologram Style"),
@@ -2044,6 +2087,8 @@ int main() {
     AnObjectDumpStopsAtItsBuffer();
     PlayerFieldsAreNotGatedByAnotherModulesProgress();
     PlayerSkinUsesTheActiveOverride();
+    TheGlowSetterIsNotTheSkinSetter();
+    GlowStylesAreFoundOnTheirOwnClasses();
     ArcaneStylesMatchTheLiveLibrary();
     RecordsBecomeTargetsThatExpire();
     AProjectionInvertsItself();

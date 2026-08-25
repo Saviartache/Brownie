@@ -427,6 +427,59 @@ void* Il2CppRuntime::ReadStaticReference(StaticFieldRef field) const {
     return value;
 }
 
+std::optional<Il2CppRuntime::ValueLayout> Il2CppRuntime::StaticValueLayout(
+    StaticFieldRef field) const {
+    if (field == nullptr) {
+        return std::nullopt;
+    }
+    FieldInfo* const info = const_cast<FieldInfo*>(static_cast<const FieldInfo*>(field));
+    const Il2CppType* const type = api_.il2cpp_field_get_type(info);
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    Il2CppClass* const value_class = api_.il2cpp_class_from_type(type);
+    if (value_class == nullptr) {
+        return std::nullopt;
+    }
+
+    std::uint32_t alignment = 0;
+    const std::int32_t value = api_.il2cpp_class_value_size(value_class, &alignment);
+    const std::int32_t boxed = api_.il2cpp_class_instance_size(value_class);
+    // A reference type answers both of these too, and its answers do not
+    // describe a value: the difference comes out as the whole object. Refusing
+    // anything that is not "a value with a box in front of it" is what keeps
+    // the subtraction below from being a guess.
+    if (value <= 0 || boxed <= value) {
+        return std::nullopt;
+    }
+    return ValueLayout{static_cast<std::size_t>(value),
+                       static_cast<std::uint32_t>(boxed - value)};
+}
+
+bool Il2CppRuntime::ReadStaticValue(StaticFieldRef field, std::span<std::byte> out) const {
+    const auto layout = StaticValueLayout(field);
+    if (!layout.has_value() || out.size() < layout->size) {
+        return false;
+    }
+    // No thread scope, for the same reason `ReadStaticReference` needs none:
+    // this copies storage the runtime has already written and allocates
+    // nothing.
+    api_.il2cpp_field_static_get_value(
+        const_cast<FieldInfo*>(static_cast<const FieldInfo*>(field)), out.data());
+    return true;
+}
+
+bool Il2CppRuntime::WriteStaticValue(StaticFieldRef field, std::span<const std::byte> value) const {
+    const auto layout = StaticValueLayout(field);
+    if (!layout.has_value() || value.size() < layout->size) {
+        return false;
+    }
+    api_.il2cpp_field_static_set_value(
+        const_cast<FieldInfo*>(static_cast<const FieldInfo*>(field)),
+        const_cast<void*>(static_cast<const void*>(value.data())));
+    return true;
+}
+
 std::optional<ClassRef> Il2CppRuntime::BaseClass(ClassRef klass) const {
     if (klass == nullptr) {
         return std::nullopt;

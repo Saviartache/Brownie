@@ -176,6 +176,8 @@ constexpr std::string_view kTintColourFeature = "scene.healthBarTintColour";
 constexpr std::string_view kShotNoclipFeature = "shots.noclip";
 constexpr std::string_view kArcaneStyleFeature = "player.arcaneStyle";
 constexpr std::string_view kSkinFeature = "player.skin";
+constexpr std::string_view kGlowFeature = "player.glow";
+constexpr std::string_view kGlowColourFeature = "player.glowColour";
 constexpr std::string_view kFeatureOn = "true";
 
 /// The number a feature value carries, or nothing when it does not carry one.
@@ -423,6 +425,20 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
         skin_.store(skin.value_or(0), std::memory_order_relaxed);
         skin_until_ms_.store(skin.has_value() ? now + kSkinLeaseMs : 0,
                              std::memory_order_relaxed);
+        return;
+    }
+    if (key == kGlowColourFeature) {
+        // Kept whether or not the claim is live, like the health bar's colour
+        // and for the same reason. A value that is not a colour is dropped, so
+        // the glow keeps the last one that was.
+        const auto parsed = FeatureColour(value);
+        if (parsed.has_value()) {
+            glow_colour_.store(*parsed, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (key == kGlowFeature) {
+        glow_until_ms_.store(on ? now + kGlowLeaseMs : 0, std::memory_order_relaxed);
     }
 }
 
@@ -1256,9 +1272,12 @@ void Engine::DrawFrame() {
     const std::optional<std::int32_t> skin =
         SkinWanted(now) ? std::optional<std::int32_t>{skin_.load(std::memory_order_relaxed)}
                         : std::nullopt;
+    const std::optional<game::UiColor> glow =
+        GlowWanted(now) ? std::optional<game::UiColor>{game::UnpackColour(GlowColour())}
+                        : std::nullopt;
     patches_.Want({tint, game::UnpackColour(TintColour()), collider});
     patches_.Apply(now);
-    cosmetics_.Want(skin, arcane_style);
+    cosmetics_.Want(skin, arcane_style, glow);
     cosmetics_.Apply(now);
 
     // A store rather than a claim acted on once: what the lease says is the

@@ -64,6 +64,8 @@ constexpr std::array kQueries{
                                "DecaGames.RotMG.Objects.Map.Data.ShaderProperties", 0, 1}},
     KeyedFieldQuery{kPlayerSkin,
                     FieldQuery{kLocalPlayerClass, "BKMIHOGBMMC", {}, "System.Int32", 0, 0}},
+    KeyedFieldQuery{kPlayerGlow,
+                    FieldQuery{kLocalPlayerClass, "EGMPAONNMFA", {}, "System.Int32", 0, 0}},
 
     // The two hops to the player object itself. The first is a C# auto-property
     // whose compiler-generated wrapper survived obfuscation even though the
@@ -116,6 +118,11 @@ constexpr MethodQuery kSetPlayerSkinQuery{kLocalPlayerClass, "MBKGLHCJBCD", {}, 
                                            kIntParameter};
 constexpr MethodQuery kSetPlayerShaderQuery{kLocalPlayerClass, "CNAOFINEJPK", {}, "System.Void",
                                             kShaderPropertiesParameter};
+/// `void SetGlow(int)`, which shares its shape with the skin setter above —
+/// hence the name, and hence no fingerprint: `void(int)` on this class
+/// identifies neither of them.
+constexpr MethodQuery kSetPlayerGlowQuery{kLocalPlayerClass, "JEDNHGGONPP", {}, "System.Void",
+                                          kIntParameter};
 
 struct KeyedMethodQuery {
     std::string_view key;
@@ -128,6 +135,7 @@ constexpr std::array kMethods{
     KeyedMethodQuery{kShootWithAngle, kShootWithAngleQuery},
     KeyedMethodQuery{kSetPlayerSkin, kSetPlayerSkinQuery},
     KeyedMethodQuery{kSetPlayerShader, kSetPlayerShaderQuery},
+    KeyedMethodQuery{kSetPlayerGlow, kSetPlayerGlowQuery},
 };
 
 }  // namespace

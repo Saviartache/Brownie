@@ -168,6 +168,7 @@ class Engine {
     static constexpr std::uint64_t kShotNoclipLeaseMs = 3000;
     static constexpr std::uint64_t kArcaneStyleLeaseMs = 3000;
     static constexpr std::uint64_t kSkinLeaseMs = 3000;
+    static constexpr std::uint64_t kGlowLeaseMs = 3000;
 
     /// How long the next poll may wait: until the soonest job is due, and no
     /// longer than one poll's worth.
@@ -355,6 +356,14 @@ class Engine {
 
     [[nodiscard]] bool SkinWanted(std::uint64_t now_ms) const noexcept {
         return now_ms < skin_until_ms_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool GlowWanted(std::uint64_t now_ms) const noexcept {
+        return now_ms < glow_until_ms_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::uint32_t GlowColour() const noexcept {
+        return glow_colour_.load(std::memory_order_relaxed);
     }
 
     /// Installs the connect redirect once Winsock is loaded. Ordinary to be too
@@ -596,6 +605,17 @@ class Engine {
 
     std::atomic<std::int32_t> skin_{0};
     std::atomic<std::uint64_t> skin_until_ms_{0};
+
+    /// The glow's colour, and the lease that owns the glow itself.
+    ///
+    /// The colour is kept whether or not the claim is live, like the health
+    /// bar's and for the same reason: it arrives ahead of the claim and only
+    /// when it has moved, so one refused for arriving first would leave the
+    /// claim lighting the glow in whatever came before it. The game's own red
+    /// until somebody says otherwise, which is what a glow looked like before
+    /// this module could repaint one.
+    std::atomic<std::uint32_t> glow_colour_{game::PackColour(game::UiColor{1.0F, 0.0F, 0.0F})};
+    std::atomic<std::uint64_t> glow_until_ms_{0};
 
     std::thread thread_;
     std::atomic<bool> running_{false};

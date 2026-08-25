@@ -253,8 +253,10 @@ The resolved keys include:
 | `player.colliderMultiplier` | `0` … `1`            | what to scale it by, clamped on arrival                      |
 | `player.skin`               | object type / empty  | apply a local skin, or restore the previous one              |
 | `player.arcaneStyle`        | shader id / empty     | apply a local Arcane Style, or restore the previous one      |
+| `player.glow`               | `true` / `false`     | light the local player's glow, and put it out after          |
+| `player.glowColour`         | `#rrggbbaa`          | what colour to repaint the glow's style, refused if malformed |
 
-The three boolean switches and two cosmetic selections are leases. These belong
+The boolean switches and the cosmetic selections are leases. These belong
 to plugins or runtime readers that can be disabled, fail, unload, or disappear;
 without expiry the module could keep acting after nothing remained to say stop.
 The runtime restates each live claim once a second and the module gives it three
@@ -274,6 +276,17 @@ what actually undoes the write.
 selected value as the claim. An empty value restores the value observed before
 the override; a lapsed claim does the same. Shader objects are looked up again
 on the game thread rather than retained as unmanaged roots.
+
+`player.glow` is a boolean claim over **two** writes, because the game keeps the
+two halves of a glow apart: a flag on the character says that it glows, and a
+style shared by every character says what colour a glow is. The module switches
+the flag on through the game's own setter — which is what rebuilds the visual —
+and repaints the style that flag selects with `player.glowColour`. Ending the
+claim puts both back: the flag to what the game had, the style to the colour it
+was built with. `player.glowColour` is the exception `player.colliderMultiplier`
+is: not a claim but the value one applies, kept whether or not the claim is
+live, and refused rather than guessed at when it is not a colour — so a typo
+leaves the glow in the last colour that was one.
 
 **`cursor.track` is the one nothing ever ends early**, and it is claimed by the
 runtime rather than by a plugin. Two features read the point now — aim ranks

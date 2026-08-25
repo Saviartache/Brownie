@@ -7,8 +7,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -134,6 +136,40 @@ class Il2CppRuntime final : public ClassCatalog {
     /// one call into the runtime. Null when the field simply holds nothing yet,
     /// which for a singleton is the ordinary state before the game builds one.
     [[nodiscard]] void* ReadStaticReference(StaticFieldRef field) const;
+
+    /// How one value of a static field's own type is laid out, on this runtime.
+    ///
+    /// **Only interesting because a field offset is not what it looks like.**
+    /// IL2CPP numbers a struct's fields from the front of a *boxed* one, so an
+    /// offset taken from `Fields()` overshoots the bare value by whatever the
+    /// box carries in front of it. `header` is that distance, measured rather
+    /// than assumed, and `size` is what a copy of the value costs.
+    struct ValueLayout {
+        std::size_t size = 0;
+        std::uint32_t header = 0;
+    };
+
+    /// Nothing when the field's type is not one the runtime describes as a
+    /// value — a header wider than the object, or an empty value, is an answer
+    /// to refuse rather than to subtract with.
+    ///
+    /// Taken from the field rather than from a class the caller names, so that
+    /// the size the copies below are checked against is the size the runtime
+    /// will actually move.
+    [[nodiscard]] std::optional<ValueLayout> StaticValueLayout(StaticFieldRef field) const;
+
+    /// Copies a value-type static out of and back into the game's own storage.
+    ///
+    /// **Refused when the span is smaller than the value**, because the runtime
+    /// copies as many bytes as the field's type occupies whatever it is handed
+    /// — so a buffer short of that is one it reads or writes past.
+    ///
+    /// Whole values, not the one member a caller wants to change: a struct
+    /// static has no object to reach through, so the only way to keep the rest
+    /// of it is to read it, edit the copy and put it back.
+    [[nodiscard]] bool ReadStaticValue(StaticFieldRef field, std::span<std::byte> out) const;
+    [[nodiscard]] bool WriteStaticValue(StaticFieldRef field,
+                                        std::span<const std::byte> value) const;
 
     /// The class of a live object, or nothing when it cannot be asked.
     ///

@@ -1,221 +1,108 @@
 /**
- * Glow: puts a coloured glow around your own character.
+ * Glow: puts a glow of your own colour around your own character.
  *
- * Nothing here talks to the server. The two stats the client reads when it
- * decides what glow to draw are rewritten inside the `UPDATE` and `NEWTICK`
- * packets on their way to the game, on the local player's record only, so the
- * glow exists purely in this client — other players see nothing, and the server
- * is never told anything it did not say first.
+ * **The whole of it happens in the injected module**, and it has to. The client
+ * decides a character's glow colour by picking one of a handful of styles built
+ * into `GameAssembly.dll`, and the two a packet can reach are a fixed red and a
+ * fixed purple — no stat carries a colour, so no packet can ask for one. What
+ * the module does instead is switch the game's own "this character glows" flag
+ * on for the local player and repaint the style that flag selects. See
+ * `PlayerGlow.h`.
  *
- * Which stats, and what goes in them, is {@link resolveGlowTargets}; how a
- * value is held and later put back is {@link StatOverrides}. This file is the
- * wiring: the settings, one state per session, and the two handlers.
+ * Nothing here talks to the server, and nothing here rewrites a packet. The
+ * flag is a client-side field no packet carries and the style is a client-side
+ * object, so the server is never told and no other player's client is either.
  *
- * One thing to know before changing it: putting a stat back is itself a
- * rewrite, so it needs a packet to ride on. Setting the mode to Off restores on
- * the next tick that carries the player's status, which is nearly every tick.
- * Switching the *plugin* off stops the handlers instead, so the last value
- * stays on screen until the client rebuilds the character — Off is the way to
- * clear the glow, and disabling is not.
+ * **The claim is a lease.** The module gives it three seconds and this restates
+ * it every second, so switching the plugin off, unloading it, or the runtime
+ * dying all end the same way — the module puts the flag and the colour back. A
+ * disabled plugin stops restating, which is the switch; `onDispose` says so
+ * outright as well, because three seconds of a glow that was switched off reads
+ * as a switch that did not work.
  */
 
-import {
-  PluginCategory,
-  definePlugin,
-  type MutablePacket,
-  type Plugin,
-  type SessionView,
-} from '@brownie/plugin-api';
-import type { FieldValue } from '@brownie/protocol';
-import {
-  StatOverrides,
-  asStatus,
-  statusOfEntity,
-  type MutableStatus,
-} from '../../state/StatOverrides.js';
-import {
-  DEFAULT_GLOW_STAT,
-  DEFAULT_SUPPORTER_STAT,
-  GlowMode,
-  LEAVE_ALONE,
-  resolveGlowTargets,
-} from './glowModes.js';
+import { PluginCategory, definePlugin, type Plugin } from '@brownie/plugin-api';
+import { normaliseGlowColour } from './glowColour.js';
+
+const FEATURE_KEY = 'player.glow';
+const COLOUR_KEY = 'player.glowColour';
+const CLAIM_INTERVAL_MS = 1000;
+
+/** The game's own glow, so an untouched setting looks like the game's did. */
+export const DEFAULT_GLOW_COLOUR = '#ff0000ff';
 
 export function createGlowPlugin(): Plugin {
   return definePlugin({
     meta: {
       id: 'glow',
       name: 'Glow',
-      // A rewrite of what this client draws and nothing else, which is where
-      // anti-lag and anti-debuffs are filed too.
+      // A repaint of what this client draws and nothing else, which is where
+      // the skin changer and the health bar's tint are filed too.
       category: PluginCategory.Visuals,
-      description: 'Draws a coloured glow around your own character, in this client only.',
+      description: 'Draws a glow of your own colour around your character, in this client only.',
     },
 
     setup(context) {
-      const mode = context.settings.select<GlowMode>('mode', {
-        group: 'Glow',
-        label: 'Glow',
-        default: GlowMode.Red,
-        options: [
-          [GlowMode.Off, 'Off'],
-          [GlowMode.Red, 'Red'],
-          [GlowMode.Purple, 'Purple'],
-          [GlowMode.Custom, 'Custom values'],
-        ],
+      const colour = context.settings.text('colour', {
+        label: 'Colour (#rrggbb or #rrggbbaa)',
+        default: DEFAULT_GLOW_COLOUR,
+        // Nine characters is the longest spelling there is; a longer value is
+        // not a colour and the setting should not let one be typed.
+        maxLength: 9,
       });
-
-      // The supporter stat is a tier index and the client picks a colour per
-      // tier, so colours with no preset here — yellow among them — are reached
-      // by stepping this value: 1, 2, 3 …
-      const customGlow = context.settings.number('customGlow', {
-        group: 'Custom',
-        label: 'Glow stat value (-1 leaves it alone)',
-        default: LEAVE_ALONE,
-        min: LEAVE_ALONE,
-        step: 1,
-        visibleWhen: { key: 'mode', equals: [GlowMode.Custom] },
-      });
-
-      const customSupporter = context.settings.number('customSupporter', {
-        group: 'Custom',
-        label: 'Supporter stat value (-1 leaves it alone)',
-        default: LEAVE_ALONE,
-        min: LEAVE_ALONE,
-        step: 1,
-        visibleWhen: { key: 'mode', equals: [GlowMode.Custom] },
-      });
-
-      // Stat ids move between game versions, and neither of these is named in
-      // `stat-types.json` — so retarget here rather than editing the feature.
-      const glowStatId = context.settings.number('glowStatId', {
-        group: 'Stat ids',
-        label: 'Glow stat id',
-        advanced: true,
-        default: DEFAULT_GLOW_STAT,
-        min: 0,
-        step: 1,
-      });
-
-      const supporterStatId = context.settings.number('supporterStatId', {
-        group: 'Stat ids',
-        label: 'Supporter stat id',
-        advanced: true,
-        default: DEFAULT_SUPPORTER_STAT,
-        min: 0,
-        step: 1,
-      });
-
-      let targets = resolveGlowTargets({
-        mode: mode.get(),
-        glowStatId: glowStatId.get(),
-        supporterStatId: supporterStatId.get(),
-        customGlow: customGlow.get(),
-        customSupporter: customSupporter.get(),
-      });
-
-      const refresh = (): void => {
-        targets = resolveGlowTargets({
-          mode: mode.get(),
-          glowStatId: glowStatId.get(),
-          supporterStatId: supporterStatId.get(),
-          customGlow: customGlow.get(),
-          customSupporter: customSupporter.get(),
-        });
-      };
-
-      for (const handle of [mode, customGlow, customSupporter, glowStatId, supporterStatId]) {
-        context.onDispose(handle.onChange(refresh));
-      }
-
-      const bySession = new Map<string, StatOverrides>();
-
-      const stateFor = (session: SessionView): StatOverrides => {
-        let state = bySession.get(session.id);
-        if (state === undefined) {
-          state = new StatOverrides();
-          bySession.set(session.id, state);
-        }
-        return state;
-      };
 
       /**
-       * @returns the state to use, or `undefined` when there is nothing to
-       *   write and nothing outstanding to put back.
-       */
-      const workFor = (session: SessionView): StatOverrides | undefined => {
-        const state = bySession.get(session.id);
-        if (targets.size > 0) return state ?? stateFor(session);
-        return state?.active === true ? state : undefined;
-      };
-
-      /**
-       * The whole of both handlers: the same work on a differently named field.
+       * What the module was last told to paint with.
        *
-       * The gates come before the packet is touched at all. Once the client has
-       * been told, a tick has nothing to write — and that is the case this
-       * plugin spends nearly all of its time in.
+       * The claim is restated every second because it expires; the colour is
+       * not, because it does not. The module keeps what it was last told and
+       * the runtime replays every key it holds whenever the link comes back, so
+       * restating a colour that has not moved would be one message a second
+       * with no reader.
        */
-      const rewrite = (
-        packet: MutablePacket,
-        field: 'newObjs' | 'statuses',
-        session: SessionView,
-        announced: boolean,
-      ): void => {
-        if (packet.opaque) return;
-        const state = workFor(session);
-        if (state === undefined) return;
+      let sent: string | undefined;
+      /** The last text refused, so one typo is one line in the log. */
+      let refused: string | undefined;
 
-        const selfObjectId = session.self.objectId;
-        // Negative until `CREATESUCCESS` names us — the state layer's "no
-        // player yet", and not a value any status carries.
-        if (selfObjectId < 0) return;
-
-        const entries = packet.get(field);
-        if (!Array.isArray(entries)) return;
-        const status = findSelfStatus(entries, selfObjectId, announced);
-        if (status === undefined) return;
-        if (!state.applyTo(status, targets, announced)) return;
-
-        // Editing in place tells the pipeline nothing. Setting the field is
-        // what marks the packet for re-encoding.
-        packet.set(field, entries);
+      const claim = (): void => {
+        const typed = colour.get();
+        const wanted = normaliseGlowColour(typed);
+        if (wanted === undefined) {
+          if (refused !== typed) {
+            refused = typed;
+            context.log.warn(
+              `glow: "${typed}" is not a colour like ${DEFAULT_GLOW_COLOUR}; keeping the last one`,
+            );
+          }
+        } else {
+          refused = undefined;
+          // Before the claim, always: a claim the module heard first would be a
+          // claim on the last colour it happened to hold.
+          if (wanted !== sent) {
+            context.native.setFeature(COLOUR_KEY, wanted);
+            sent = wanted;
+          }
+        }
+        context.native.setFeature(FEATURE_KEY, true);
       };
 
-      context.packets.on('UPDATE', (packet, session) => {
-        rewrite(packet, 'newObjs', session, true);
-      });
-
-      context.packets.on('NEWTICK', (packet, session) => {
-        rewrite(packet, 'statuses', session, false);
-      });
-
+      // Answered now rather than on the next tick: a colour that arrives a
+      // second after it is typed is one nobody can compare against another.
+      // Gated, because a setting changed on a disabled plugin is not a claim.
       context.onDispose(
-        context.sessions.onDisconnected((session) => {
-          bySession.delete(session.id);
+        colour.onChange(() => {
+          if (context.enabled) claim();
         }),
       );
+
+      // The heartbeat, and the whole of the switch: the host runs this only
+      // while the plugin is enabled, so switching it off is what stops the
+      // claim being restated.
+      context.timers.setInterval(claim, CLAIM_INTERVAL_MS);
+
       context.onDispose(() => {
-        bySession.clear();
+        context.native.setFeature(FEATURE_KEY, false);
       });
     },
   });
-}
-
-/**
- * @param announced true for `UPDATE.newObjs`, whose elements are entities
- *   wrapping a status; false for `NEWTICK.statuses`, whose elements are the
- *   statuses themselves.
- */
-function findSelfStatus(
-  entries: readonly FieldValue[],
-  selfObjectId: number,
-  announced: boolean,
-): MutableStatus | undefined {
-  for (const entry of entries) {
-    const status = announced ? statusOfEntity(entry) : asStatus(entry);
-    // One status per object, so the first match is the only one there is.
-    if (status?.objectId === selfObjectId) return status;
-  }
-  return undefined;
 }

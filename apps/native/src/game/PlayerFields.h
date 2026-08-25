@@ -55,6 +55,11 @@ inline constexpr std::string_view kPlayerY = "self.y";
 inline constexpr std::string_view kPlayerSkin = "self.skin";
 inline constexpr std::string_view kPlayerShaderProperties = "self.shaderProperties";
 
+/// Whether the game draws a glow around this player, which is the whole of what
+/// the field says: every value but `-1` means "glowing" and none of them is a
+/// colour. What colour it is comes from the styles in `GlowFields.h`.
+inline constexpr std::string_view kPlayerGlow = "self.glow";
+
 /// The two hops that lead to the player object. See `PlayerHandle.h`.
 inline constexpr std::string_view kWorldManager = "world.manager";
 inline constexpr std::string_view kLocalPlayer = "world.localPlayer";
@@ -85,6 +90,12 @@ inline constexpr std::string_view kComputeShootAngle = "self.computeShootAngle";
 inline constexpr std::string_view kShootWithAngle = "self.shootWithAngle";
 inline constexpr std::string_view kSetPlayerSkin = "self.setSkin";
 inline constexpr std::string_view kSetPlayerShader = "self.setShaderProperties";
+
+/// The setter for {@link kPlayerGlow}, which is called rather than the field
+/// written: it rebuilds the player's visual, and the glow does not appear until
+/// something does. Called only when the value has actually changed — a rebuild
+/// asked for on a loop is an animation restarted on a loop.
+inline constexpr std::string_view kSetPlayerGlow = "self.setGlow";
 
 /// Resolves what the module calls into the game. Same rules as the fields:
 /// exact name, then alias, then the signature as a fingerprint.

@@ -1,5 +1,6 @@
 #include "app/GameBinding.h"
 
+#include "game/GlowFields.h"
 #include "game/MapFields.h"
 #include "game/PlayerFields.h"
 #include "game/ProjectileFields.h"
@@ -50,11 +51,15 @@ bool GameBinding::TryResolve() {
     // ordinary case, not a rename.
     const bool shot_fields = game::ResolveProjectileFields(*offsets_) != 0;
     const bool shot_methods = game::ResolveProjectileMethods(*offsets_) != 0;
+    // The glow styles, which appear once the game has drawn a character that
+    // has one to pick — earlier than a projectile and later than the player.
+    const bool glow_fields = game::ResolveGlowFields(*offsets_) != 0;
     // **The walkability predicates are not resolved here**, unlike everything
     // above. Finding them enumerates a class rather than asking it for one
     // named member, and nothing needs them until player noclip is switched on —
     // so they are found on demand, once, by `WalkabilityPredicates`.
-    return fields || methods || scene_fields || scene_methods || shot_fields || shot_methods;
+    return fields || methods || scene_fields || scene_methods || shot_fields || shot_methods ||
+           glow_fields;
 }
 
 std::span<const game::OffsetTable::Entry> GameBinding::offsets() const noexcept {

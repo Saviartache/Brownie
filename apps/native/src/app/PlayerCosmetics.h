@@ -10,8 +10,10 @@
 #include "game/ArcaneStyle.h"
 #include "game/Il2CppRuntime.h"
 #include "game/OffsetTable.h"
+#include "game/PlayerGlow.h"
 #include "game/PlayerRoute.h"
 #include "game/PlayerSkin.h"
+#include "game/UnityColor.h"
 
 namespace brownie::app {
 
@@ -24,7 +26,8 @@ class PlayerCosmetics {
     void BindPlayer(const game::PlayerRoute& route) noexcept;
 
     /// Records the current claims. Game thread only.
-    void Want(std::optional<std::int32_t> skin, std::string_view arcane_style);
+    void Want(std::optional<std::int32_t> skin, std::string_view arcane_style,
+              std::optional<game::UiColor> glow);
 
     /// Applies changed claims and periodically repairs game-driven rebuilds.
     /// Game thread only.
@@ -33,6 +36,7 @@ class PlayerCosmetics {
   private:
     game::PlayerSkin skin_;
     game::ArcaneStyle arcane_style_;
+    game::PlayerGlow glow_;
 
     game::PlayerRoute route_{};
     std::atomic<bool> route_ready_{false};
@@ -41,6 +45,7 @@ class PlayerCosmetics {
     // Game thread only.
     std::optional<std::int32_t> wanted_skin_;
     std::string wanted_style_;
+    std::optional<game::UiColor> wanted_glow_;
     bool changed_ = false;
     Cadence pass_{kPassIntervalMs};
 };

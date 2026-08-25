@@ -110,6 +110,23 @@ struct Il2CppApi {
     /// field's type. How a singleton is reached without a scan of the scene.
     void (*il2cpp_field_static_get_value)(FieldInfo*, void* out) = nullptr;
 
+    /// Puts `value` back, reading the same number of bytes the type occupies.
+    ///
+    /// The counterpart of the read above, and the only way to change a static
+    /// whose type is a *struct*: it has no object to reach through, so its
+    /// storage cannot be written the way a field of a live object can.
+    void (*il2cpp_field_static_set_value)(FieldInfo*, void* value) = nullptr;
+
+    /// How large one value of a class is, and how large a boxed one is.
+    ///
+    /// **Both, because the difference between them is the answer.** IL2CPP
+    /// reports a value type's field offsets against its *boxed* layout, so
+    /// using one to index the bare value overshoots by whatever the box puts in
+    /// front of it. Subtracting one size from the other says how much that is,
+    /// on this runtime, without a constant to be wrong about.
+    std::int32_t (*il2cpp_class_value_size)(Il2CppClass*, std::uint32_t* align) = nullptr;
+    std::int32_t (*il2cpp_class_instance_size)(Il2CppClass*) = nullptr;
+
     const MethodInfo* (*il2cpp_class_get_methods)(Il2CppClass*, void**) = nullptr;
     const char* (*il2cpp_method_get_name)(const MethodInfo*) = nullptr;
     const Il2CppType* (*il2cpp_method_get_return_type)(const MethodInfo*) = nullptr;
@@ -133,6 +150,9 @@ struct Il2CppApi {
     /// asking twice costs a lookup rather than an allocation.
     const Il2CppType* (*il2cpp_class_get_type)(Il2CppClass*) = nullptr;
     Il2CppObject* (*il2cpp_type_get_object)(const Il2CppType*) = nullptr;
+
+    /// The class behind a type, which is how a field's declared type is sized.
+    Il2CppClass* (*il2cpp_class_from_type)(const Il2CppType*) = nullptr;
 
     /// A managed string, for the methods that take one.
     ///
