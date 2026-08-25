@@ -439,6 +439,36 @@ describe('how far it moves to get out of the way', () => {
     expect(Math.hypot(x - 10, y - 10)).toBeLessThan(0.4);
   });
 
+  // **The live report: "enemies can still walk into us, and you try to go back
+  // to where you started."** A return point is a claim that somewhere is worth
+  // standing on, and a monster walking onto it makes that claim false — so the
+  // planner was pulling the character back into the body it had just stepped
+  // out of.
+  it('walks the ground it returns to out from under a monster', () => {
+    const planner = new DodgePlanner();
+    const bodies = new EnemyBodies();
+    const world = standingOff(bodies, 2.5);
+
+    // Pushed off their ground by a shot, which is what makes it hold one.
+    planner.plan(situation(), SETTINGS, world, [straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000)]);
+
+    // A monster takes the place they were standing on, and nothing else happens.
+    bodies.collect([{ x: 10, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
+    let y = 10.7;
+    for (let step = 0; step < 12; step += 1) {
+      const plan = planner.plan(
+        situation({ x: 10, y, nowMs: 1_000_000 + step * 20 }),
+        SETTINGS,
+        world,
+        [],
+      );
+      if (plan.steer && plan.stepTiles > 0) y += plan.dirY * Math.min(plan.stepTiles, 0.14);
+    }
+
+    // Further from the body than they started, never hauled back onto it.
+    expect(y).toBeGreaterThan(10.7);
+  });
+
   // Their own ground is the line they are walking, not the place they started.
   it('keeps a walking player on their own line', () => {
     const { x, y } = fly([], 40, { intentX: 1, intentY: 0 });
@@ -461,7 +491,9 @@ describe('where it refuses to go', () => {
     };
   }
 
-  it('walks out of damaging ground it is already standing in', () => {
+  // **Ground that hurts is left the fast way**, because walking out costs a
+  // tick of health per step and a frame of movement costs none.
+  it('hops out of damaging ground it is already standing in', () => {
     const plan = new DodgePlanner().plan(
       situation({ onDamagingGround: true }),
       SETTINGS,
@@ -469,9 +501,46 @@ describe('where it refuses to go', () => {
       [],
     );
 
-    expect(plan.verdict).toBe('escape');
+    expect(plan.verdict).toBe('hop');
     expect(plan.steer).toBe(true);
     expect(plan.dirX).toBeLessThan(0);
+  });
+
+  it('still walks out of it when the emergency step is switched off', () => {
+    const plan = new DodgePlanner().plan(
+      situation({ onDamagingGround: true }),
+      { ...SETTINGS, hopEnabled: false },
+      lavaEastOf(9.8),
+      [],
+    );
+
+    expect(plan.verdict).toBe('escape');
+    expect(plan.hop).toBe(false);
+    expect(plan.dirX).toBeLessThan(0);
+  });
+
+  // **A wall costs a step; a pool costs health every tick you are in it, with
+  // nothing left to dodge.** So there is no arrangement of shots for which
+  // *walking* into one is the answer — it is refused outright rather than
+  // charged for, which is a harder rule than the one geometry gets.
+  it('refuses to walk into damaging ground, whatever the shots say', () => {
+    // A shot straight down the northern sidestep, so the cheap way out is
+    // south — and the south is a pool.
+    const shots = [
+      straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000),
+      straightShot({ x: 7.2, y: 9.3 }, 0, 8, 0, 3000),
+    ];
+    const lavaSouth: DodgeGround = {
+      canStand: () => true,
+      isDamaging: (_x, y) => y > 10.05,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, lavaSouth, shots);
+
+    // Never south, however much the fire is pressing from the north.
+    expect(plan.dirY).toBeLessThanOrEqual(0);
   });
 
   // The complaint, end to end: a shot forces a sidestep and one of the two sides
@@ -1789,11 +1858,27 @@ describe('when the plugin decides', () => {
     expect(offsetY).toBeLessThan(0);
   });
 
-  it('still walks them out of it once they are actually in it', () => {
-    const { moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
+  // **Out the fast way once they are actually in it.** Walking out costs a tick
+  // of health per step, and the record the module spends on one frame costs
+  // none — which is the whole reason a hop is not only about bullets.
+  it('hops them out of it once they are actually in it', () => {
+    const { hopBy, moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
 
     plan();
 
+    expect(hopBy).toHaveBeenCalled();
+    expect(moveBy).not.toHaveBeenCalled();
+    const [offsetX] = hopBy.mock.calls[0] as [number, number];
+    expect(offsetX).toBeLessThan(0);
+  });
+
+  it('walks them out instead when the emergency step is switched off', () => {
+    const { host, hopBy, moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
+    host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
+
+    plan();
+
+    expect(hopBy).not.toHaveBeenCalled();
     expect(moveBy).toHaveBeenCalled();
     const [offsetX] = moveBy.mock.calls[0] as [number, number];
     expect(offsetX).toBeLessThan(0);

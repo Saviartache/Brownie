@@ -422,23 +422,33 @@ export class DodgeSearch {
       this.#anchorX = request.anchorX + request.anchorStepX * next;
       this.#anchorY = request.anchorY + request.anchorStepY * next;
 
+      const wasDamaging = request.ground.isDamaging(x, y);
       let toX = x + dirX * request.stepTiles;
       let toY = y + dirY * request.stepTiles;
       let travel = dirX === 0 && dirY === 0 ? 0 : request.stepTiles;
-      if (
-        travel > 0 &&
-        (!request.ground.canStand(toX, toY) ||
-          !request.ground.canStand((x + toX) / 2, (y + toY) / 2))
-      ) {
-        toX = x;
-        toY = y;
-        travel = 0;
+      let damaging = wasDamaging;
+      if (travel > 0) {
+        damaging = request.ground.isDamaging(toX, toY);
+        // **A run stops at the edge of a pool exactly as it stops at a wall**,
+        // and for a stronger reason: a walk into ground that hurts is refused
+        // outright, so a run that would enter one simply ends there rather than
+        // being priced as though it had gone in. See {@link #expand}.
+        if (
+          (damaging && !wasDamaging) ||
+          !request.ground.canStand(toX, toY) ||
+          !request.ground.canStand((x + toX) / 2, (y + toY) / 2)
+        ) {
+          toX = x;
+          toY = y;
+          travel = 0;
+          damaging = wasDamaging;
+        }
       }
 
       const anchorX = toX - this.#anchorX;
       const anchorY = toY - this.#anchorY;
       const anchorTiles = Math.sqrt(anchorX * anchorX + anchorY * anchorY);
-      total += this.#priceOf(request, toX, toY, dirX, dirY, travel, anchorTiles);
+      total += this.#priceOf(request, toX, toY, dirX, dirY, travel, anchorTiles, damaging);
       if (this.#priced < 0 && this.#startsMs < impact) impact = this.#startsMs;
       if (this.#priced < room) room = this.#priced;
 
@@ -488,11 +498,12 @@ export class DodgeSearch {
     this.#arriveMs = this.#startsMs + request.tickMs;
     this.#anchorX = request.anchorX + request.anchorStepX * this.#next;
     this.#anchorY = request.anchorY + request.anchorStepY * this.#next;
+    const wasDamaging = request.ground.isDamaging(this.#fromX, this.#fromY);
 
     // Standing still first, and it can never be refused: a node exists only
     // because its own place was walkable, so the horizon is always reachable
     // from wherever the search has got to.
-    this.#offer(request, node, this.#fromX, this.#fromY, 0, 0, 0);
+    this.#offer(request, node, this.#fromX, this.#fromY, 0, 0, 0, wasDamaging);
 
     for (let i = 0; i < this.#headings; i += 1) {
       const dirX = this.#headingX[i] ?? 0;
@@ -509,7 +520,19 @@ export class DodgeSearch {
       if (!request.ground.canStand(toX, toY)) continue;
       if (!request.ground.canStand((this.#fromX + toX) / 2, (this.#fromY + toY) / 2)) continue;
 
-      this.#offer(request, node, toX, toY, dirX, dirY, request.stepTiles);
+      // **And ground that hurts is refused outright, not merely charged for.**
+      // A wall costs a step; a pool costs health every tick you are in it, with
+      // nothing left to dodge — so there is no arrangement of shots for which
+      // *walking* into one is the answer. What is left when the only way out
+      // runs across it is the hop, which covers the same ground on one frame and
+      // lands on the far side. See `Hop` and `DodgePlanner`.
+      //
+      // Only on the way in. A character already standing in a pool has to be
+      // able to walk out of it, and every step of that walk starts inside.
+      const damaging = request.ground.isDamaging(toX, toY);
+      if (damaging && !wasDamaging) continue;
+
+      this.#offer(request, node, toX, toY, dirX, dirY, request.stepTiles, damaging);
     }
   }
 
@@ -534,6 +557,7 @@ export class DodgeSearch {
     dirY: number,
     travelTiles: number,
     anchorTiles: number,
+    damaging: boolean,
   ): number {
     let clearance = request.threats.clearanceOf(this.#step, this.#fromX, this.#fromY, toX, toY);
     if (request.blasts !== undefined) {
@@ -551,7 +575,7 @@ export class DodgeSearch {
       travelTiles,
       clearance,
       request.ground.crowdingAt(toX, toY, this.#arriveMs),
-      request.ground.isDamaging(toX, toY),
+      damaging,
       this.#stepsLeft,
     );
 
@@ -573,6 +597,7 @@ export class DodgeSearch {
     dirX: number,
     dirY: number,
     travelTiles: number,
+    damaging: boolean,
   ): void {
     const cellX = Math.round((toX - request.startX) / this.#cell);
     const cellY = Math.round((toY - request.startY) / this.#cell);
@@ -601,7 +626,7 @@ export class DodgeSearch {
       if ((this.#g[seen] ?? 0) <= floor) return;
     }
 
-    const cost = this.#priceOf(request, toX, toY, dirX, dirY, travelTiles, anchorTiles);
+    const cost = this.#priceOf(request, toX, toY, dirX, dirY, travelTiles, anchorTiles, damaging);
     const clearance = this.#priced;
     const g = this.#fromG + cost;
     // No decrease-key and no re-expansion: with a consistent estimate the first

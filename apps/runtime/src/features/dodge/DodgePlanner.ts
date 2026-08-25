@@ -478,7 +478,7 @@ export class DodgePlanner {
     // entire fight alone.
     this.#probe(situation, settings, world, stepTiles, ticks, tickMs);
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
-    const offGround = this.#aimAnchor(situation, steering);
+    const offGround = this.#aimAnchor(situation, steering, world, stepTiles, settings.headings);
     if (
       !situation.onDamagingGround &&
       crowding <= CROWD_ACT_TILES &&
@@ -579,14 +579,28 @@ export class DodgePlanner {
    * pushed them so far that the old place is across the room rather than one
    * step away.
    *
+   * **A held place is not a promise that it is still worth standing on**, which
+   * is what {@link #shiftAnchor} answers: a monster walks onto it, or a pool
+   * spreads over it, and returning is then walking back into the thing that
+   * moved them in the first place.
+   *
    * @returns how far off the held ground the character is, in tiles.
    */
-  #aimAnchor(situation: DodgeSituation, steering: boolean): number {
+  #aimAnchor(
+    situation: DodgeSituation,
+    steering: boolean,
+    world: DodgeGround,
+    stepTiles: number,
+    headings: number,
+  ): number {
     if (this.#anchorHeld) {
-      const off = Math.hypot(situation.x - this.#anchorX, situation.y - this.#anchorY);
       const stale = situation.nowMs - this.#anchorAtMs > ANCHOR_FRESH_MS;
       this.#anchorAtMs = situation.nowMs;
-      if (!steering && !stale && off <= ANCHOR_REACH_TILES) return off;
+      if (!steering && !stale) {
+        this.#shiftAnchor(world, stepTiles, headings, situation);
+        const off = Math.hypot(situation.x - this.#anchorX, situation.y - this.#anchorY);
+        if (off <= ANCHOR_REACH_TILES) return off;
+      }
       this.#anchorHeld = false;
     }
 
@@ -594,6 +608,58 @@ export class DodgePlanner {
     this.#anchorY = situation.y;
     this.#anchorAtMs = situation.nowMs;
     return 0;
+  }
+
+  /**
+   * Walks the held ground out from under whatever has taken it.
+   *
+   * **The live report: "enemies can still walk into us, and you try to go back
+   * to where you started."** A return point is a claim that somewhere is worth
+   * standing on, and a monster walking onto it makes that claim false — so the
+   * planner was pulling the character back into the body it had just stepped
+   * out of. Ground that has started to hurt is the same mistake with a worse
+   * ending.
+   *
+   * **One step per plan, and it stops as soon as it is clear.** The anchor is a
+   * place to come back to, not a heading, so it may not sprint: it moves by a
+   * single step towards whichever neighbour is least crowded, settles the moment
+   * nothing is standing in it, and is dropped altogether once the character has
+   * been carried further from it than {@link ANCHOR_REACH_TILES}. Against
+   * something that is chasing, that comes out as a return point retreating ahead
+   * of it — which is the answer, and it costs one ring of cheap questions.
+   */
+  #shiftAnchor(
+    world: DodgeGround,
+    stepTiles: number,
+    headings: number,
+    situation: DodgeSituation,
+  ): void {
+    let bestScore = anchorScoreOf(world, this.#anchorX, this.#anchorY);
+    if (bestScore <= 0) return;
+
+    let bestX = this.#anchorX;
+    let bestY = this.#anchorY;
+    // Nearer the character breaks a tie, so the return point backs away from
+    // the monster rather than away from the player.
+    let bestNear = Math.hypot(this.#anchorX - situation.x, this.#anchorY - situation.y);
+
+    const ring = Math.max(4, Math.round(headings));
+    for (let i = 0; i < ring; i += 1) {
+      const angle = (i * 2 * Math.PI) / ring;
+      const toX = this.#anchorX + Math.cos(angle) * stepTiles;
+      const toY = this.#anchorY + Math.sin(angle) * stepTiles;
+      const score = anchorScoreOf(world, toX, toY);
+      if (score > bestScore) continue;
+      const near = Math.hypot(toX - situation.x, toY - situation.y);
+      if (score === bestScore && near >= bestNear) continue;
+      bestScore = score;
+      bestNear = near;
+      bestX = toX;
+      bestY = toY;
+    }
+
+    this.#anchorX = bestX;
+    this.#anchorY = bestY;
   }
 
   /**
@@ -629,7 +695,11 @@ export class DodgePlanner {
     // chaser closes the better part of a tile in that time, and the hop that
     // answers where it *was* lands under it.
     const touched = world.contactAt(situation.x, situation.y, settings.leadMs) > 0;
-    if (!landingNow && !touched) return false;
+    // **Ground that hurts is left the fast way, and it is the only way out of
+    // it the planner has that is quick.** Walking out costs a tick of health per
+    // step and the search will not walk *in* at all, so a pool the character has
+    // been pushed into is exactly the case a frame of movement is for.
+    if (!landingNow && !touched && !situation.onDamagingGround) return false;
 
     const hop = chooseHop({
       x: situation.x,
@@ -737,6 +807,24 @@ export class DodgePlanner {
     this.#holdDirY = 0;
   }
 }
+
+/**
+ * How unfit a place is to be the ground the planner walks back to.
+ *
+ * Nought for anywhere worth standing, and larger the less worth standing it is.
+ * Somewhere a body does not fit is refused outright — a return point inside a
+ * wall is a target the character can never arrive at, and the planner would walk
+ * at it for as long as it was held.
+ */
+function anchorScoreOf(world: DodgeGround, x: number, y: number): number {
+  if (!world.canStand(x, y)) return Infinity;
+  // Ground that hurts is worth more than any amount of crowding to be off,
+  // because standing on it costs health for as long as the planner aims there.
+  return world.crowdingAt(x, y, 0) + (world.isDamaging(x, y) ? UNFIT_HAZARD_SCORE : 0);
+}
+
+/** What damaging ground is worth, against a tile of somebody standing on you. */
+const UNFIT_HAZARD_SCORE = 100;
 
 /** Why the planner is about to move, once it has decided that it is. */
 function verdictFor(situation: DodgeSituation, plan: DodgePlan, route: DodgeRoute): DodgeVerdict {

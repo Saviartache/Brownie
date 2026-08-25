@@ -121,7 +121,14 @@ export function chooseHop(request: HopRequest): Hop | undefined {
   // no better than the ground already underfoot is movement for its own sake.
   let bestRoom = roomAt(request, request.x, request.y);
   let bestCrowding = request.ground.crowdingAt(request.x, request.y, request.leadMs);
-  let bestAnchor = Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
+  // **Unless the ground underfoot is burning, in which case staying put is not
+  // a candidate at all.** Every landing considered below is already refused if
+  // it is damaging, so anywhere that survives the ring is somewhere better —
+  // and ranked on their own ground alone, standing in the pool would win every
+  // time, because it is by definition nought tiles from where they are.
+  let bestAnchor = request.ground.isDamaging(request.x, request.y)
+    ? Infinity
+    : Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
   let found = false;
 
   for (const fraction of HOP_FRACTIONS) {

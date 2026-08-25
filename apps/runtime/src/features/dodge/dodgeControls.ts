@@ -328,14 +328,20 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     advanced: true,
     default: true,
   });
-  // **Wider than the wall margin, and for a reason walls do not have.** Walking
-  // into a wall costs a step; standing in lava costs health every tick, and
-  // there is nothing to dodge once you are in it. The planner also has no way to
-  // be sure where the character will actually end up — the server has its own
-  // opinion, the command lands a frame late — so a route planned to stop exactly
-  // at the edge is a route that gets a toe in it. Dropped when the player is
-  // already standing that close, exactly as the wall margin is, so it can never
-  // be the thing holding them there.
+  // **Wider than the wall margin, and it is a harder rule as well.** Walking
+  // into a wall costs a step; standing in lava costs health every tick and
+  // leaves nothing to dodge with, so a step that would end inside this radius is
+  // *refused* rather than charged for — there is no arrangement of shots for
+  // which walking into a pool is the answer. What is left when the only way out
+  // runs across one is the emergency step, which covers the same ground on a
+  // single frame and lands on the far side; see `Hop`.
+  //
+  // The margin exists because the planner has no way to be sure where the
+  // character will actually end up — the server has its own opinion, the command
+  // lands a frame late — so a route planned to stop exactly at the edge is a
+  // route that gets a toe in it. Dropped when the player is already standing
+  // that close, exactly as the wall margin is, and for a reason a hard refusal
+  // makes sharper: it must never be the thing holding them in there.
   const hazardClearanceTiles = settings.range('hazardClearanceTiles', {
     label: 'Keep clear of lava and damaging ground by (tiles)',
     group: 'Safety',

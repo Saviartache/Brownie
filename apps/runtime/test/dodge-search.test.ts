@@ -573,6 +573,53 @@ describe('the search', () => {
     expect(route.driftTiles).toBeLessThan(2);
   });
 
+  // **A harder rule than the one geometry gets.** Walking into a wall costs a
+  // step; walking into a pool costs health every tick you are in it, with
+  // nothing left to dodge — so there is no arrangement of shots for which it is
+  // the answer, and the step is refused rather than charged for.
+  it('refuses to walk into ground that hurts, and walks out once it is in it', () => {
+    const { threats } = fieldOf([straightShot({ x: 8.5, y: 10 }, 0, 8, 0, 3000)]);
+    const lavaNorth: DodgeGround = {
+      canStand: () => true,
+      isDamaging: (_x, y) => y < 10,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+
+    const refused = new DodgeSearch().run(searchFor({ threats, ground: lavaNorth }));
+    expect(refused.dirY).toBeGreaterThanOrEqual(0);
+
+    // And the other half: every step out of a pool starts inside one, so a
+    // character already standing in it has to be able to walk.
+    const lavaWest: DodgeGround = {
+      canStand: () => true,
+      isDamaging: (x) => x <= 10,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    const leaving = new DodgeSearch().run(searchFor({ ground: lavaWest }));
+    expect(leaving.stepTiles).toBeGreaterThan(0);
+    expect(leaving.dirX).toBeGreaterThan(0);
+  });
+
+  it('stops a straight run at the edge of a pool rather than pricing it through', () => {
+    const lavaNorth: DodgeGround = {
+      canStand: () => true,
+      isDamaging: (_x, y) => y < 9.5,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    // A wall of fire that leaves running north as the only way out, which the
+    // pool then takes away.
+    const { threats } = fieldOf(wallOfFire(), { reachTiles: 10 });
+
+    const route = new DodgeSearch().run(
+      searchFor({ threats, ground: lavaNorth, maxExpansions: 16 }),
+    );
+
+    expect(route.dirY).toBeGreaterThanOrEqual(0);
+  });
+
   it('refuses a step into a wall and finds the way that is open', () => {
     const wallNorth: DodgeGround = {
       canStand: (_x, y) => y > 9.6,
