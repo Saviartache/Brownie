@@ -86,10 +86,12 @@ export interface Hop {
   readonly offsetY: number;
   /** The least room the landing place has over the next two ticks. */
   readonly clearanceTiles: number;
+  /** How far inside a monster's keep-away distance it lands. */
+  readonly crowdingTiles: number;
 }
 
 /** Rewritten in place: a hop is chosen at worst once per plan. */
-const CHOICE = { offsetX: 0, offsetY: 0, clearanceTiles: 0 };
+const CHOICE = { offsetX: 0, offsetY: 0, clearanceTiles: 0, crowdingTiles: 0 };
 
 /**
  * Picks somewhere to land, or nothing when nowhere in reach beats standing
@@ -118,6 +120,7 @@ export function chooseHop(request: HopRequest): Hop | undefined {
   // What staying put is worth, so a hop has something to beat. A landing place
   // no better than the ground already underfoot is movement for its own sake.
   let bestRoom = roomAt(request, request.x, request.y);
+  let bestCrowding = request.ground.crowdingAt(request.x, request.y, request.leadMs);
   let bestAnchor = Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
   let found = false;
 
@@ -134,17 +137,25 @@ export function chooseHop(request: HopRequest): Hop | undefined {
       // A hop out of a shot and into lava is not an escape, and unlike a walk
       // there is no next step to take back out of it before the ground bites.
       if (request.ground.isDamaging(toX, toY)) continue;
+      // **Nor into a monster.** A hop is instant, so unlike a step there is no
+      // moment in which the planner could change its mind about the landing —
+      // and landing inside a body is contact damage and a shot fired from
+      // nowhere, which is the thing this was reached for in the first place.
+      if (request.ground.contactAt(toX, toY, request.leadMs) > 0) continue;
 
       const room = roomAt(request, toX, toY);
+      const crowding = request.ground.crowdingAt(toX, toY, request.leadMs);
       const anchor = Math.hypot(toX - request.anchorX, toY - request.anchorY);
-      if (!beats(room, anchor, bestRoom, bestAnchor, safe)) continue;
+      if (!beats(room, crowding, anchor, bestRoom, bestCrowding, bestAnchor, safe)) continue;
 
       bestRoom = room;
+      bestCrowding = crowding;
       bestAnchor = anchor;
       found = true;
       CHOICE.offsetX = toX - request.x;
       CHOICE.offsetY = toY - request.y;
       CHOICE.clearanceTiles = room;
+      CHOICE.crowdingTiles = crowding;
     }
   }
 
@@ -158,20 +169,37 @@ export function chooseHop(request: HopRequest): Hop | undefined {
  * stops mattering at all: two places a shot misses by more than the margin are
  * equally survivable, and splitting them by room would send the character
  * sprinting away from a bullet that was already going to miss.
+ *
+ * **Then the room to dodge in, and only then their own ground.** A hop taken to
+ * get out from under a monster is answering that monster, so among landing
+ * places a shot misses equally, the one that is not inside a body wins — where
+ * ranking on the anchor alone would hop the shortest distance, which is back
+ * where the monster is.
  */
 function beats(
   room: number,
+  crowdingTiles: number,
   anchorTiles: number,
   bestRoom: number,
+  bestCrowdingTiles: number,
   bestAnchorTiles: number,
   safeTiles: number,
 ): boolean {
   const enough = room >= safeTiles;
   const bestEnough = bestRoom >= safeTiles;
   if (enough !== bestEnough) return enough;
-  if (enough) return anchorTiles < bestAnchorTiles;
-  return room > bestRoom;
+  if (!enough) return room > bestRoom;
+  // Coarse, because two places a quarter of a tile apart in a three-tile bubble
+  // are the same place to fight from, and splitting them here would spend the
+  // term on a distinction nobody could see.
+  if (Math.abs(crowdingTiles - bestCrowdingTiles) > CROWD_QUANTUM_TILES) {
+    return crowdingTiles < bestCrowdingTiles;
+  }
+  return anchorTiles < bestAnchorTiles;
 }
+
+/** How finely two landing places are told apart by the room they leave. */
+const CROWD_QUANTUM_TILES = 0.25;
 
 /**
  * How much room a body standing at a place has over the next two ticks.

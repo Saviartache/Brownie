@@ -121,6 +121,7 @@ const OPEN_GROUND: DodgeGround = {
   canStand: () => true,
   isDamaging: () => false,
   crowdingAt: () => 0,
+  contactAt: () => 0,
 };
 
 /** Open ground with monsters in it, judged against one keep-away distance. */
@@ -129,6 +130,7 @@ function standingOff(bodies: EnemyBodies, keepAwayTiles: number): DodgeGround {
     canStand: () => true,
     isDamaging: () => false,
     crowdingAt: (x, y, aheadMs) => bodies.crowdingAt(x, y, keepAwayTiles, aheadMs),
+    contactAt: (x, y, aheadMs) => bodies.contactAt(x, y, aheadMs),
   };
 }
 
@@ -455,6 +457,7 @@ describe('where it refuses to go', () => {
       canStand: () => true,
       isDamaging: (x) => x >= edge,
       crowdingAt: () => 0,
+      contactAt: () => 0,
     };
   }
 
@@ -479,6 +482,7 @@ describe('where it refuses to go', () => {
       canStand: () => true,
       isDamaging: (_x, y) => y >= 10.4,
       crowdingAt: () => 0,
+      contactAt: () => 0,
     };
 
     const plan = new DodgePlanner().plan(situation(), SETTINGS, lavaSouth, [shot]);
@@ -493,6 +497,7 @@ describe('where it refuses to go', () => {
       canStand: (_x, y) => y > 9.6,
       isDamaging: () => false,
       crowdingAt: () => 0,
+      contactAt: () => 0,
     };
 
     const plan = new DodgePlanner().plan(situation(), SETTINGS, wallNorth, [shot]);
@@ -531,6 +536,51 @@ describe('room to dodge in', () => {
     const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
     expect(plan.steer).toBe(false);
+  });
+
+  // **The live report: "we build a path into the enemy".** A body is a soft
+  // cost so that the only lane out of a volley is never refused — but charged
+  // flat, a route straight through one was outvoted by a tile of their own
+  // ground. What answers it is that the last half tile costs far more than the
+  // first: see `StepCost`.
+  it('goes round a monster rather than through it', () => {
+    const bodies = new EnemyBodies();
+    // Squarely on the northern sidestep, close enough to be walked into.
+    bodies.collect([{ x: 10, y: 9.2 } as EntityView], 10, 10, 12, ANY_BODY);
+    const shot = straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000);
+
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), [
+      shot,
+    ]);
+
+    expect(plan.steer).toBe(true);
+    // South, which is the other way out of the same shot.
+    expect(plan.dirY).toBeGreaterThan(0);
+  });
+
+  // **The other half of the same report.** A monster that is already standing
+  // in the character is too close for any route the lattice can describe: every
+  // walk out of it starts inside it, and a body matching their speed is never
+  // outwalked at all. One frame of movement, at once, is the only answer.
+  it('hops out from under a monster that is standing in the character', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 10.3, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
+
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
+
+    expect(plan.verdict).toBe('hop');
+    expect(plan.hop).toBe(true);
+    expect(plan.stepTiles).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
+  });
+
+  it('walks rather than hopping while the monster is merely near', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 11.4, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
+
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
+
+    expect(plan.hop).toBe(false);
+    expect(plan.verdict).toBe('spacing');
   });
 
   // **A preference, never a veto.** The only lane out of a volley sometimes runs
@@ -962,6 +1012,30 @@ describe('the room a place leaves to dodge in', () => {
     expect(boss.crowdingAt(0.5, 0, KEEP_AWAY)).toBeCloseTo(0.5, 6);
   });
 
+  // **A different question from how crowded a place is, and the setting cannot
+  // answer it.** How much room to dodge in is a preference somebody chose;
+  // whether a monster is standing *in* you is a fact about two bodies, and it
+  // is the one the game charges contact damage for.
+  it('says when a body is standing in the character, whatever the setting says', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 0.4, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
+    const overlap = ENEMY_CONTACT_HALF_TILES + PLAYER_HALF_TILES - 0.4;
+
+    expect(bodies.contactAt(0, 0)).toBeCloseTo(overlap, 6);
+    // Nought everywhere they are apart, so "is this place occupied" needs no
+    // second threshold — and unchanged by a keep-away distance it never reads.
+    expect(bodies.contactAt(3, 0)).toBe(0);
+    expect(bodies.crowdingAt(0, 0, 6)).toBeGreaterThan(bodies.contactAt(0, 0));
+  });
+
+  it('carries a body forward before asking whether it is touching', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 2, y: 0 } as EntityView], 0, 0, 12, chasing(-6, 0));
+
+    expect(bodies.contactAt(0, 0)).toBe(0);
+    expect(bodies.contactAt(0, 0, 250)).toBeGreaterThan(0);
+  });
+
   // A velocity carried a whole second is a claim about a decision the monster
   // has not made yet.
   it('stops believing a velocity long before the horizon does', () => {
@@ -1339,6 +1413,12 @@ describe('when the plugin decides', () => {
     return marks.filter((mark) => mark.kind === DodgeMarkKind.Body).length;
   }
 
+  /** How wide the last published picture drew the first monster. */
+  function bodyRadius(showPicture: ReturnType<typeof vi.fn>): number {
+    const marks = (showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    return marks.find((mark) => mark.kind === DodgeMarkKind.Body)?.radiusTiles ?? 0;
+  }
+
   it('acts on a shot that has come close enough, with no packet to prompt it', () => {
     // 900 ms in, the shot is two and a half tiles out — a third of a second from
     // landing. On the server's tick that would have been noticed up to 200 ms
@@ -1514,6 +1594,32 @@ describe('when the plugin decides', () => {
     // Ahead of the packet, because the packet is already a moment old.
     expect(body?.x).toBeLessThan(15);
     expect(body?.x).toBeGreaterThan(14);
+  });
+
+  // **The live report: on the picture the monster moves in about ten frames.**
+  // Where a body is, is not known — it is inferred from two sightings a fifth of
+  // a second apart, and the inference ages. Widening it by that age is what
+  // stops a route being planned through a place the runtime merely *believes*
+  // is empty, and drawing it that wide is what makes the two agree.
+  it('draws a monster wider the older the reading behind it is', () => {
+    const monster = { objectId: 9, objectType: 500, x: 14, y: 10, hp: 4000, maxHp: 4000 };
+    const { plan, tick, clock, showPicture, view } = underFire(0, {
+      enemies: [monster as EntityView],
+    });
+    view.on = true;
+
+    tick();
+    plan();
+    const fresh = bodyRadius(showPicture);
+    expect(fresh).toBeGreaterThan(0);
+
+    // Most of a server tick later, with nothing new said about it. Twice,
+    // because the picture goes out slower than a plan is made.
+    clock.ms = 190;
+    plan();
+    plan();
+
+    expect(bodyRadius(showPicture)).toBeGreaterThan(fresh);
   });
 
   it('clears what is drawn once, when the switch goes up', () => {

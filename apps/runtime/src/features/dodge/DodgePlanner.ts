@@ -599,9 +599,18 @@ export class DodgePlanner {
   /**
    * Spends a frame of movement at once, when walking has already lost.
    *
-   * **The one case walking cannot answer**, and the only one a hop is for: the
-   * shot lands before the first step of the lattice has finished being walked,
-   * so every route the search can describe is too late by construction.
+   * **Two cases walking cannot answer, and they are the same case.** A shot that
+   * lands before the first step of the lattice has finished is too early for any
+   * route the search can describe; a monster that is already standing in the
+   * character is too *close* for one, because every walk out of it starts inside
+   * it and a body that matches their speed is never outwalked at all. Both are
+   * answered by covering the ground now instead of over the next tenth of a
+   * second, which is the only thing a hop does.
+   *
+   * **The body case is why the hop is not only about bullets.** Contact is what
+   * the game charges for and what puts a shot in the character's face with no
+   * flight time to react to — see `EnemyBodies.contactAt`, which is a fact about
+   * two bodies rather than the keep-away distance somebody chose.
    *
    * @returns whether the plan is now a hop.
    */
@@ -613,8 +622,14 @@ export class DodgePlanner {
     tickMs: number,
   ): boolean {
     if (!settings.hopEnabled) return false;
-    if (route.impactMs > settings.leadMs) return false;
     if (situation.nowMs - this.#hoppedAtMs < settings.hopCooldownMs) return false;
+
+    const landingNow = route.impactMs <= settings.leadMs;
+    // Where a body will be when the command lands, not where it is now: a
+    // chaser closes the better part of a tile in that time, and the hop that
+    // answers where it *was* lands under it.
+    const touched = world.contactAt(situation.x, situation.y, settings.leadMs) > 0;
+    if (!landingNow && !touched) return false;
 
     const hop = chooseHop({
       x: situation.x,

@@ -18,14 +18,23 @@
  * character walking in a straight line for one tick, and the shots are sampled
  * on exactly those instants so the two can be swept against each other exactly.
  *
- * **Weighted, bounded, and never re-expanding — which is what makes it fast.**
- * The estimate in {@link remainingAnchorCost} is consistent, so multiplying it
- * by `greed` leaves the search `greed`-bounded suboptimal without needing to
- * revisit anything it has already settled. A plan is made fifty times a second
- * and thrown away before it is walked; a route within half a step of the best
- * one, found in a fifth of the expansions, is strictly the better trade. The
- * expansion budget is the backstop: past it the furthest node reached is the
- * answer, which is ordinary anytime behaviour and not a failure.
+ * **Weighted and never re-expanding — which is what makes it fast.** The
+ * estimate in {@link remainingAnchorCost} is consistent, so multiplying it by
+ * `greed` leaves the search bounded without needing to revisit anything it has
+ * already settled. A plan is made fifty times a second and thrown away before it
+ * is walked; a route within half a step of the best one, found in a fifth of the
+ * expansions, is strictly the better trade.
+ *
+ * **And it always has a complete answer to fall back on**, which is
+ * {@link #scanStraight}: twelve straight runs, priced on exactly the same terms,
+ * costing about one per cent of the search's own budget. That is not a
+ * heuristic beside the search — it is a handful of extra candidates, and
+ * "whichever is cheaper" is therefore a statement about one quantity. It is
+ * also what the search *needs*, twice over: a wall of fire is escaped by
+ * running and A* cannot afford to discover that, and a budget that runs out
+ * would otherwise leave a route priced over fewer steps than the one it is
+ * being compared against — which is how a character came to stand in the middle
+ * of a crossfire for a whole fight.
  *
  * **Standing still is always a legal move**, so the horizon is always reachable
  * and the search cannot come back empty-handed. Being hit is priced rather than
@@ -58,6 +67,16 @@ export interface DodgeGround {
    *   from one that is walking up to the player.
    */
   crowdingAt(x: number, y: number, aheadMs: number): number;
+  /**
+   * How far a monster's own body overlaps one standing here, in tiles.
+   *
+   * **Not the keep-away distance scaled down**: that one is a preference, and
+   * this is the fact the game charges contact damage for. Asked once per plan
+   * and once per landing place rather than per edge — see `Hop` and
+   * `DodgePlanner`, which are the two callers that need to know whether
+   * something is standing *in* the character rather than merely near them.
+   */
+  contactAt(x: number, y: number, aheadMs: number): number;
 }
 
 /** What the search needs of the area effects on their way down. */
@@ -180,17 +199,31 @@ const SLICE_SPAN = 64;
 const MAX_HEADINGS = 64;
 
 /**
- * How much a deeper node wins a tie by.
+ * How much a deeper node is preferred by, in the cost model's own units.
  *
- * Two routes of exactly equal cost are not equally useful — the one that has
- * got further is nearer to being an answer — so ties go to depth. Kept far
- * below anything the cost model can distinguish, because it is a tiebreak and
- * not a preference: **measured against a hundredth of a tile and against a
- * quarter of one, a screen full of fire took the same number of expansions
- * either way**, so there is nothing to buy by making it larger and a bounded
- * answer to lose.
+ * **The one thing that stops an easy plan spending its whole budget.** Near the
+ * anchor the estimate is nought and so is most of the cost, so every state in a
+ * tile-wide cloud around the character ties at nearly the same `f` — and A* has
+ * to expand all of them before it reaches the depth where an answer lives.
+ * Measured with a single shot in the air, that was **the budget exhausted on
+ * half of the plans that searched at all**, which then fell through to the
+ * straight run and had the character travelling twice as far as it needed to.
+ *
+ * **It is an inflation, not a tiebreak, and that is deliberate.** Subtracting a
+ * constant per level leaves the ordering *within* each level exactly as it was
+ * and biases only across them, so the search dives through the cheap cloud
+ * instead of sweeping it. What it costs is the `greed` bound: a route may now be
+ * up to this much per level worse than the best one. What replaces that promise
+ * is {@link #scanStraight} — whatever the search comes back with is only taken
+ * when it beats a complete route that was priced exactly.
+ *
+ * A tile-tick, which is the size of an ordinary step's worth of deviation.
+ * **Measured**: at nought the budget was exhausted on half the light plans; at
+ * one it is exhausted on none of them and the fight measurements are at their
+ * best; at four the character starts committing to routes that are visibly
+ * worse, and both the hits and the time spent inside monsters go back up.
  */
-const DEPTH_TIEBREAK = 1e-6;
+const DEPTH_PULL = 1;
 
 export class DodgeSearch {
   readonly #open = new SearchQueue();
@@ -234,6 +267,17 @@ export class DodgeSearch {
   #anchorY = 0;
   #cell = 1;
   #closePerStep = 1;
+  /** The room the last {@link #priceOf} measured. See its note. */
+  #priced = NO_THREAT_TILES;
+
+  /** The best straight run of the current plan, filled by {@link #scanStraight}. */
+  #runCost = Infinity;
+  #runDirX = 0;
+  #runDirY = 0;
+  #runStepTiles = 0;
+  #runImpactMs = Infinity;
+  #runRoom = NO_THREAT_TILES;
+  #runDriftTiles = 0;
 
   readonly #route = {
     dirX: 0,
@@ -279,15 +323,16 @@ export class DodgeSearch {
     // the estimate a bound rather than a guess. See `remainingAnchorCost`.
     this.#closePerStep = request.stepTiles + Math.hypot(request.anchorStepX, request.anchorStepY);
 
+    // Before the search and not after it: this is what the search has to beat,
+    // and it is the answer whenever the budget runs out. See {@link #scanStraight}.
+    this.#scanStraight(request, ticks);
+
     const start = this.#file(request.startX, request.startY, 0, -1, 0, Infinity, NO_THREAT_TILES);
     this.#seen.set(keyOf(0, 0, 0), start);
     this.#open.push(start, 0);
 
     let expansions = 0;
     let goal = -1;
-    // The anytime answer: the furthest the search got, cheapest first. Read only
-    // when the budget runs out, which a plan under ordinary fire never does.
-    let best = start;
 
     while (expansions < request.maxExpansions) {
       const node = this.#open.pop();
@@ -300,18 +345,133 @@ export class DodgeSearch {
         goal = node;
         break;
       }
-
-      const bestSlice = this.#slice[best] ?? 0;
-      const deeper = slice > bestSlice;
-      if (deeper || (slice === bestSlice && (this.#g[node] ?? 0) < (this.#g[best] ?? 0))) {
-        best = node;
-      }
+      // **Nothing is kept from a partial expansion**, and that is the change
+      // the straight scan bought: the deepest node the search happened to reach
+      // is a route priced over fewer steps than the one it would be compared
+      // against, and reading it as an answer is how a character came to stand
+      // in the middle of a crossfire for a whole fight.
 
       expansions += 1;
       this.#expand(request, node, slice, ticks);
     }
 
-    return this.#reportOn(request, goal >= 0 ? goal : best, expansions);
+    // **A route that reached the horizon beats one that did not, whatever the
+    // two cost.** A budget that ran out leaves a partial answer priced over
+    // fewer steps, so its number is not comparable — and the straight run is
+    // always complete. When both are complete the cheaper wins, which is the
+    // ordinary case and settles it in the search's favour nearly every time.
+    if (goal < 0 || (this.#g[goal] ?? Infinity) > this.#runCost) {
+      return this.#reportRun(expansions, ticks);
+    }
+    return this.#reportOn(request, goal, expansions);
+  }
+
+  /**
+   * Walks every heading the whole way, and keeps the cheapest.
+   *
+   * **The answer to a wall of fire, and the search cannot afford to find it.**
+   * When a pattern is wide enough that everywhere nearby is hit, the cost of
+   * every first step ties — they are all hit at the same moment — and A* has to
+   * expand the whole tie before it reaches the depth where running clear starts
+   * to pay. Measured on four sources converging on one spot, that took several
+   * thousand expansions; the character stood in the middle and was hit for half
+   * the fight. Twelve straight lines cost about one per cent of the search's own
+   * budget and describe exactly the escape it could not reach.
+   *
+   * **Priced by {@link #priceOf}, which is what makes the comparison mean
+   * anything.** This is not a heuristic beside the search — it is a handful of
+   * extra candidates scored on the same terms, so "whichever is cheaper" is a
+   * statement about the same quantity.
+   *
+   * **A wall shortens a run rather than ending it.** Walking into one costs the
+   * step and nothing else, and the character stands where it stopped them —
+   * which is the honest model, and it is what stops a run along a corridor being
+   * discarded for the wall at the end of it.
+   */
+  #scanStraight(request: SearchRequest, ticks: number): void {
+    this.#runCost = Infinity;
+    this.#runDirX = 0;
+    this.#runDirY = 0;
+    this.#runStepTiles = 0;
+
+    // Standing still is candidate nought and always available: it is the floor
+    // every other run has to beat, and it is very often the answer.
+    this.#priceRun(request, ticks, 0, 0);
+    for (let i = 0; i < this.#headings; i += 1) {
+      this.#priceRun(request, ticks, this.#headingX[i] ?? 0, this.#headingY[i] ?? 0);
+    }
+  }
+
+  /** Prices one heading run end to end, keeping it if it is the best so far. */
+  #priceRun(request: SearchRequest, ticks: number, dirX: number, dirY: number): void {
+    let x = request.startX;
+    let y = request.startY;
+    let total = 0;
+    let impact = Infinity;
+    let room = NO_THREAT_TILES;
+
+    for (let step = 0; step < ticks; step += 1) {
+      const next = step + 1;
+      this.#fromX = x;
+      this.#fromY = y;
+      this.#step = step;
+      this.#next = next;
+      this.#stepsLeft = ticks - next;
+      this.#startsMs = request.leadMs + step * request.tickMs;
+      this.#arriveMs = this.#startsMs + request.tickMs;
+      this.#anchorX = request.anchorX + request.anchorStepX * next;
+      this.#anchorY = request.anchorY + request.anchorStepY * next;
+
+      let toX = x + dirX * request.stepTiles;
+      let toY = y + dirY * request.stepTiles;
+      let travel = dirX === 0 && dirY === 0 ? 0 : request.stepTiles;
+      if (
+        travel > 0 &&
+        (!request.ground.canStand(toX, toY) ||
+          !request.ground.canStand((x + toX) / 2, (y + toY) / 2))
+      ) {
+        toX = x;
+        toY = y;
+        travel = 0;
+      }
+
+      const anchorX = toX - this.#anchorX;
+      const anchorY = toY - this.#anchorY;
+      const anchorTiles = Math.sqrt(anchorX * anchorX + anchorY * anchorY);
+      total += this.#priceOf(request, toX, toY, dirX, dirY, travel, anchorTiles);
+      if (this.#priced < 0 && this.#startsMs < impact) impact = this.#startsMs;
+      if (this.#priced < room) room = this.#priced;
+
+      x = toX;
+      y = toY;
+      if (total >= this.#runCost) return; // already beaten; the rest cannot help
+    }
+
+    this.#runCost = total;
+    this.#runDirX = dirX;
+    this.#runDirY = dirY;
+    this.#runStepTiles = dirX === 0 && dirY === 0 ? 0 : request.stepTiles;
+    this.#runImpactMs = impact;
+    this.#runRoom = room;
+    this.#runDriftTiles = Math.hypot(
+      x - (request.anchorX + request.anchorStepX * ticks),
+      y - (request.anchorY + request.anchorStepY * ticks),
+    );
+  }
+
+  /** The best straight run, as the answer. */
+  #reportRun(expansions: number, ticks: number): DodgeRoute {
+    const route = this.#route;
+    route.expansions = expansions;
+    route.depth = ticks;
+    route.cost = this.#runCost;
+    route.impactMs = this.#runImpactMs;
+    route.clearanceTiles = this.#runRoom;
+    route.driftTiles = this.#runDriftTiles;
+    route.dirX = this.#runDirX;
+    route.dirY = this.#runDirY;
+    route.stepTiles = this.#runStepTiles;
+    return route;
   }
 
   /** Every move out of one node, priced and offered to the open list. */
@@ -353,6 +513,57 @@ export class DodgeSearch {
     }
   }
 
+  /**
+   * What one move costs, and how much room it had.
+   *
+   * **Shared with the straight scan, and that is the whole point of it being a
+   * method.** The two only mean anything compared against each other, and a
+   * second copy of this arithmetic would be a second set of weights to keep in
+   * step — which is how a planner ends up preferring a run it has priced
+   * differently from the route it is being weighed against.
+   *
+   * The room the move had is left in {@link #priced} rather than returned
+   * beside the cost: both callers want both numbers, and a record per edge is
+   * an allocation per edge.
+   */
+  #priceOf(
+    request: SearchRequest,
+    toX: number,
+    toY: number,
+    dirX: number,
+    dirY: number,
+    travelTiles: number,
+    anchorTiles: number,
+  ): number {
+    let clearance = request.threats.clearanceOf(this.#step, this.#fromX, this.#fromY, toX, toY);
+    if (request.blasts !== undefined) {
+      // Merged rather than reported beside it: "how much room did this step
+      // have" has one answer whatever is taking the room, and a blast that
+      // catches a step is exactly as much an impact as a bullet that does.
+      const blast = request.blasts.clearanceAt(toX, toY, this.#startsMs, this.#arriveMs);
+      if (blast < clearance) clearance = blast;
+    }
+    this.#priced = clearance;
+
+    let cost = stepCost(
+      request.weights,
+      anchorTiles,
+      travelTiles,
+      clearance,
+      request.ground.crowdingAt(toX, toY, this.#arriveMs),
+      request.ground.isDamaging(toX, toY),
+      this.#stepsLeft,
+    );
+
+    // Only the first step, because only the first step is ever commanded. What
+    // it buys is a character that finishes the sidestep it started.
+    if (this.#step === 0 && travelTiles > 0 && request.holdBias > 0) {
+      const along = dirX * request.holdDirX + dirY * request.holdDirY;
+      cost += (request.holdBias * (1 - along)) / 2;
+    }
+    return cost;
+  }
+
   /** Prices one move and files it, unless something cheaper already covers it. */
   #offer(
     request: SearchRequest,
@@ -390,32 +601,8 @@ export class DodgeSearch {
       if ((this.#g[seen] ?? 0) <= floor) return;
     }
 
-    let clearance = request.threats.clearanceOf(this.#step, this.#fromX, this.#fromY, toX, toY);
-    if (request.blasts !== undefined) {
-      // Merged rather than reported beside it: "how much room did this step
-      // have" has one answer whatever is taking the room, and a blast that
-      // catches a step is exactly as much an impact as a bullet that does.
-      const blast = request.blasts.clearanceAt(toX, toY, this.#startsMs, this.#arriveMs);
-      if (blast < clearance) clearance = blast;
-    }
-
-    let cost = stepCost(
-      weights,
-      anchorTiles,
-      travelTiles,
-      clearance,
-      request.ground.crowdingAt(toX, toY, this.#arriveMs),
-      request.ground.isDamaging(toX, toY),
-      this.#stepsLeft,
-    );
-
-    // Only the first step, because only the first step is ever commanded. What
-    // it buys is a character that finishes the sidestep it started.
-    if (this.#step === 0 && travelTiles > 0 && request.holdBias > 0) {
-      const along = dirX * request.holdDirX + dirY * request.holdDirY;
-      cost += (request.holdBias * (1 - along)) / 2;
-    }
-
+    const cost = this.#priceOf(request, toX, toY, dirX, dirY, travelTiles, anchorTiles);
+    const clearance = this.#priced;
     const g = this.#fromG + cost;
     // No decrease-key and no re-expansion: with a consistent estimate the first
     // route to settle a state is the one worth keeping, and a cheaper one
@@ -434,7 +621,7 @@ export class DodgeSearch {
       this.#closePerStep,
       this.#stepsLeft,
     );
-    this.#open.push(node, g + request.greed * heuristic - this.#next * DEPTH_TIEBREAK);
+    this.#open.push(node, g + request.greed * heuristic - this.#next * DEPTH_PULL);
   }
 
   /** Walks the chain back to the first step and fills in the answer. */

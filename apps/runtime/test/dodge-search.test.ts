@@ -33,6 +33,8 @@ import { MAX_HOP_TILES, chooseHop, type HopRequest } from '../src/features/dodge
 import { Blasts } from '../src/features/dodge/Blasts.js';
 import { DodgePlanner, type DodgeSettings } from '../src/features/dodge/DodgePlanner.js';
 import { DODGE_PRESETS, DodgePresetId } from '../src/features/dodge/dodgePresets.js';
+import { ENEMY_CONTACT_HALF_TILES, EnemyBodies } from '../src/features/dodge/EnemyBodies.js';
+import type { EntityView } from '@brownie/plugin-api';
 
 /** A shot travelling in a straight line, which is what most of them do. */
 function straightShot(
@@ -88,6 +90,7 @@ const OPEN_GROUND: DodgeGround = {
   canStand: () => true,
   isDamaging: () => false,
   crowdingAt: () => 0,
+  contactAt: () => 0,
 };
 
 const WEIGHTS: StepWeights = {
@@ -296,6 +299,18 @@ describe('what a step is worth', () => {
     expect(stepCost(WEIGHTS, 0, 0.6, Infinity, 0, false, 5)).toBeGreaterThan(
       stepCost(WEIGHTS, 0, 0, Infinity, 0, false, 5),
     );
+  });
+
+  // **The cost of being near a monster is nothing like linear in the
+  // distance**: the outer half of the bubble is where an ordinary fight
+  // happens, and the last half tile is contact damage and a shot fired point
+  // blank. Flat, a route straight through a body was outvoted by a tile of
+  // anchor.
+  it('charges for being deep inside a monster far more than twice as much', () => {
+    const edge = stepCost(WEIGHTS, 0, 0, Infinity, 0.5, false, 5);
+    const deep = stepCost(WEIGHTS, 0, 0, Infinity, 1, false, 5);
+
+    expect(deep).toBeGreaterThan(edge * 2);
   });
 
   it('pays for room right up to the point where there is enough of it', () => {
@@ -563,6 +578,7 @@ describe('the search', () => {
       canStand: (_x, y) => y > 9.6,
       isDamaging: () => false,
       crowdingAt: () => 0,
+      contactAt: () => 0,
     };
     const { threats } = fieldOf([straightShot({ x: 8.5, y: 10 }, 0, 8, 0, 3000)]);
     const route = new DodgeSearch().run(searchFor({ threats, ground: wallNorth }));
@@ -629,6 +645,58 @@ describe('the search', () => {
     expect(Number.isFinite(route.cost)).toBe(true);
   });
 
+  /**
+   * A band of fire closing from both sides, several ranks deep.
+   *
+   * Nothing inside it survives and nothing along it escapes — the ranks are
+   * faster than the character either way — so the only answer is out of the
+   * side, and it is several steps further than a small budget can look.
+   */
+  function wallOfFire(): DodgeShot[] {
+    const shots: DodgeShot[] = [];
+    for (let rank = 0; rank < 6; rank += 1) {
+      for (let y = 8.5; y <= 11.5; y += 0.7) {
+        shots.push(straightShot({ x: 4 - rank * 1.2, y }, 0, 8, 0, 4000));
+        shots.push(straightShot({ x: 16 + rank * 1.2, y }, Math.PI, 8, 0, 4000));
+      }
+    }
+    return shots;
+  }
+
+  // **The failure this was built to answer, and it is not a tuning matter.**
+  // When a pattern is wide enough that everywhere nearby is hit, every first
+  // step ties — they are all hit at the same moment — and A* has to expand the
+  // whole tie before the depth where running clear starts to pay. Measured on
+  // four sources converging on one spot, the character stood in the middle of
+  // it and was hit for half of an eight-second fight.
+  it('runs clear of a wall the budget could never search through', () => {
+    const { threats } = fieldOf(wallOfFire(), { reachTiles: 10 });
+
+    const route = new DodgeSearch().run(searchFor({ threats, maxExpansions: 16 }));
+
+    // A complete answer rather than however far a partial search happened to
+    // get, which is the whole of what changed.
+    expect(route.depth).toBe(8);
+    expect(route.impactMs).toBe(Infinity);
+    // Out of the side of the band, because neither way along it is quick
+    // enough to matter.
+    expect(Math.abs(route.dirY)).toBeGreaterThan(Math.abs(route.dirX));
+  });
+
+  // The run is a handful of extra candidates priced on the search's own terms,
+  // not a second planner beside it — so when the search can afford an answer of
+  // its own, that answer is the one that stands.
+  it('lets the search overrule the run when it can afford to', () => {
+    const { threats } = fieldOf([straightShot({ x: 8.5, y: 10 }, 0, 8, 0, 3000)]);
+    const search = new DodgeSearch();
+
+    const budgeted = { ...search.run(searchFor({ threats, maxExpansions: 4 })) };
+    const searched = search.run(searchFor({ threats, maxExpansions: 600 }));
+
+    expect(searched.impactMs).toBe(Infinity);
+    expect(searched.cost).toBeLessThanOrEqual(budgeted.cost + 1e-9);
+  });
+
   // The danger field shifts a little every plan, so two near-equal routes swap
   // places on noise — which looks like, and is, a character vibrating.
   it('finishes the sidestep it started rather than swapping sides on noise', () => {
@@ -677,8 +745,55 @@ describe('the emergency step', () => {
     };
   }
 
+  /** A monster of the ordinary size standing at a place, and its bubble. */
+  function bodyAt(x: number, y: number, keepAwayTiles = 2.5): DodgeGround {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x, y } as EntityView], x, y, 40, (enemy) => ({
+      x: enemy.x,
+      y: enemy.y,
+      velocityX: 0,
+      velocityY: 0,
+      halfTiles: ENEMY_CONTACT_HALF_TILES,
+    }));
+    return {
+      canStand: () => true,
+      isDamaging: () => false,
+      crowdingAt: (px, py, aheadMs) => bodies.crowdingAt(px, py, keepAwayTiles, aheadMs),
+      contactAt: (px, py, aheadMs) => bodies.contactAt(px, py, aheadMs),
+    };
+  }
+
   it('says nothing when standing still is already as good as anywhere', () => {
     expect(chooseHop(hopFor())).toBeUndefined();
+  });
+
+  // **A hop is instant, so unlike a step there is no moment in which the
+  // planner could change its mind about the landing.** Into a body is contact
+  // damage and a shot fired from nowhere, which is the thing it was reached for.
+  it('never lands inside a monster', () => {
+    const { threats } = fieldOf([straightShot({ x: 9.6, y: 10 }, 0, 8, 0, 3000)]);
+    // Squarely on the northern landing places.
+    const hop = chooseHop(hopFor({ threats, ground: bodyAt(10, 9.4) }));
+
+    expect(hop).toBeDefined();
+    expect(hop?.offsetY).toBeGreaterThan(0);
+  });
+
+  // Getting out from under a monster is what half the hops are for, so among
+  // landing places a shot misses equally, the one that is not inside a body
+  // wins — where ranking on their own ground alone would hop the shortest
+  // distance, which is back where the monster is.
+  it('breaks away from a body when the shots leave it a choice', () => {
+    const ground = bodyAt(10.3, 10);
+    const standing = ground.crowdingAt(10, 10, 0);
+
+    const hop = chooseHop(hopFor({ ground }));
+
+    expect(hop).toBeDefined();
+    // Further out than it was, and out of the body altogether — which is the
+    // whole of what a hop away from a monster is for.
+    expect(hop?.crowdingTiles).toBeLessThan(standing);
+    expect(ground.contactAt(10 + (hop?.offsetX ?? 0), 10 + (hop?.offsetY ?? 0), 0)).toBe(0);
   });
 
   it('lands clear of a shot it can get out from under', () => {
@@ -727,6 +842,7 @@ describe('the emergency step', () => {
       canStand: () => true,
       isDamaging: (_x, y) => y < 10,
       crowdingAt: () => 0,
+      contactAt: () => 0,
     };
     const hop = chooseHop(hopFor({ threats, ground: lavaNorth }));
 

@@ -61,11 +61,19 @@ export interface StepWeights {
   /** How much room stops being worth paying for. */
   readonly safeClearanceTiles: number;
   /**
-   * Per tile inside a monster's keep-away distance.
+   * Per tile inside a monster's keep-away distance, and it steepens.
    *
    * **Room to dodge in is not distance from the shots.** A body pressed against
    * the character has already taken the space every sidestep is made in, and
    * that is worth a step of its own even with nothing in the air.
+   *
+   * **Charged as `crowding × (1 + crowding)` rather than flat**, because the
+   * cost of being near a monster is nothing like linear in the distance: the
+   * outer half of the bubble is where an ordinary fight happens, and the last
+   * half tile is contact damage and a shot fired point blank. Measured flat, a
+   * route that walked straight through a body was outvoted by a tile of anchor;
+   * curved, the same route costs an order of magnitude more and the planner goes
+   * round.
    */
   readonly crowdPerTile: number;
   /** Flat, for a step that ends on ground that costs health. */
@@ -116,7 +124,9 @@ export function stepCost(
     }
   }
 
-  if (crowdingTiles > 0) cost += weights.crowdPerTile * crowdingTiles;
+  if (crowdingTiles > 0) {
+    cost += weights.crowdPerTile * crowdingTiles * (1 + crowdingTiles);
+  }
   if (damaging) cost += weights.hazard;
   return cost;
 }

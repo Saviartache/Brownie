@@ -236,7 +236,39 @@ export class EnemyBodies {
       const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
       const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
       const inside =
-        nearEdgeOf(this.#half[i] ?? ENEMY_CONTACT_HALF_TILES, keepAwayTiles) - Math.hypot(dx, dy);
+        nearEdgeOf(this.#half[i] ?? ENEMY_CONTACT_HALF_TILES, keepAwayTiles) -
+        Math.sqrt(dx * dx + dy * dy);
+      if (inside > worst) worst = inside;
+    }
+    return worst;
+  }
+
+  /**
+   * How far a body actually overlaps one standing here, in tiles.
+   *
+   * **A different question from {@link crowdingAt}, and the setting cannot
+   * answer it.** How much room to dodge in is a preference somebody chose;
+   * whether a monster is *on top of you* is a fact about two bodies, and it is
+   * the one the game charges contact damage for. Read at the keep-away distance
+   * they happen to have set, the two are the same number scaled — and a player
+   * who turned the distance down would have turned off the only warning that
+   * something is standing in them.
+   *
+   * Nought everywhere the bodies are apart, so a caller can treat it as "is
+   * this place occupied" without a second threshold.
+   */
+  contactAt(x: number, y: number, aheadMs = 0): number {
+    if (this.#count === 0) return 0;
+
+    const ahead = Math.min(Math.max(aheadMs, 0), MAX_BODY_LOOKAHEAD_MS);
+    let worst = 0;
+    for (let i = 0; i < this.#count; i += 1) {
+      const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
+      const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
+      const inside =
+        (this.#half[i] ?? ENEMY_CONTACT_HALF_TILES) +
+        PLAYER_HALF_TILES -
+        Math.sqrt(dx * dx + dy * dy);
       if (inside > worst) worst = inside;
     }
     return worst;

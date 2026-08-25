@@ -28,6 +28,31 @@ import { ENEMY_CONTACT_HALF_TILES, EnemyBodies, type BodySighting } from './Enem
 /** How far past the player's own reach to look for bodies worth avoiding. */
 const ENEMY_SEARCH_MARGIN_TILES = 2;
 
+/**
+ * How fast a body's position stops being believed, in tiles per second.
+ *
+ * **The same admission the shots make**, and for a worse reason: a shot's path
+ * is decided when it is fired, and a monster's is decided several times a second
+ * by something nobody here can see. The velocity carried between sightings is
+ * only right while it goes on doing what it was doing, so what this prices is
+ * the turn, the stop and the knockback — not the walking, which is already
+ * modelled.
+ *
+ * Modest on purpose: at a server tick of doubt it comes to about a third of a
+ * tile, which is enough to keep a step out of a place that is merely *believed*
+ * to be empty and far short of drawing a monster as a room-sized blob.
+ */
+const BODY_DOUBT_TILES_PER_SECOND = 1.6;
+
+/**
+ * How long that doubt is allowed to grow for.
+ *
+ * A little over one server tick. Past that the reading is not stale, it is
+ * absent — and a body nothing has been said about for that long is one the
+ * tracker is about to forget rather than one to draw a wider circle around.
+ */
+const MAX_BODY_DOUBT_MS = 250;
+
 export class DodgeScene {
   readonly #catalog: DodgeCatalog;
   readonly #bodies = new EnemyBodies();
@@ -103,6 +128,10 @@ export class DodgeScene {
   #onDamagingGround = false;
   /** The moment the plan is being made for, on the tracker's own clock. */
   #planAtMs = 0;
+  /** When the last server tick was read, which is when any of this was true. */
+  #sightedAtMs = 0;
+  /** How much wider a body is drawn and avoided for the age of its sighting. */
+  #bodyDoubtTiles = 0;
 
   /**
    * The map, as the search sees it.
@@ -126,6 +155,7 @@ export class DodgeScene {
       isDamaging: (x, y) =>
         this.#damagingMatters && this.#ground.isDamaging(x, y, this.#hazardClearance),
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
+      contactAt: (x, y, aheadMs) => this.#bodies.contactAt(x, y, aheadMs),
     };
   }
 
@@ -172,6 +202,7 @@ export class DodgeScene {
       if (enemy.hp > 0) this.#motion.observe(enemy.objectId, enemy.x, enemy.y, now);
     }
     this.#motion.prune(now);
+    this.#sightedAtMs = now;
   }
 
   /** Looks at the fight the planner is about to search through. */
@@ -219,6 +250,19 @@ export class DodgeScene {
     const reach = (planning.leadMs + planning.horizonMs) / 1000;
     const searchTiles = walkSpeedOf(session, controls) * reach + this.#keepAwayTiles;
     this.#planAtMs = map.gameTimeMs;
+    // **Where a monster is, is not known — it is inferred, and the inference
+    // ages.** Positions arrive five times a second and a plan is made fifty, so
+    // between two ticks the only thing holding a body in place is a velocity
+    // derived from the last two sightings — which is wrong the moment it turns,
+    // stops or is knocked back. Widening the body by the age of the reading is
+    // the same admission the shots make with their drift term, and it is what
+    // stops the planner routing a step through a place it merely believes is
+    // empty. It also widens the drawn circle, so the picture shows the body the
+    // planner is actually avoiding rather than a claim it does not have.
+    this.#bodyDoubtTiles =
+      (BODY_DOUBT_TILES_PER_SECOND *
+        Math.min(Math.max(map.gameTimeMs - this.#sightedAtMs, 0), MAX_BODY_DOUBT_MS)) /
+      1000;
     this.#bodies.collect(
       map.enemies(),
       self.x,
@@ -288,9 +332,11 @@ export class DodgeScene {
     this.#sighting.velocityX = seen?.velocityX ?? 0;
     this.#sighting.velocityY = seen?.velocityY ?? 0;
     // Halved, because the catalog states a width and the distance works in
-    // half-extents. The ordinary body for anything it cannot describe.
+    // half-extents. The ordinary body for anything it cannot describe, widened
+    // by however old the reading behind it is — see {@link BODY_DOUBT_TILES_PER_SECOND}.
     const width = this.#catalog.bodyTiles(enemy.objectType);
-    this.#sighting.halfTiles = width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2;
+    this.#sighting.halfTiles =
+      (width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2) + this.#bodyDoubtTiles;
     return this.#sighting;
   };
 }
