@@ -8,8 +8,9 @@
  *
  * **Two ways to name the ally, and the hand wins.** Auto-teleport names one in
  * the shared {@link FollowTarget} after carrying the character to the boss;
- * Shift+left-click names one directly, by picking the player nearest the cursor.
- * A manual pick takes precedence over the automatic one for as long as it holds,
+ * Shift+left-click names one directly, by taking the ally standing under the
+ * cursor — and clicking where no ally stands cancels the follow outright. A
+ * manual pick takes precedence over the automatic one for as long as it holds,
  * so grabbing a specific ally is never overridden by the boss logic.
  *
  * **It lets go on its own.** Following stops when the ally is gone from the map
@@ -27,7 +28,7 @@ import {
   type SessionView,
 } from '@brownie/plugin-api';
 import { nearestBoss, type BossLookup } from '../autoteleport/bossApproach.js';
-import { WALK_HOLD_MS } from './constants.js';
+import { PICK_RADIUS_TILES, WALK_HOLD_MS } from './constants.js';
 import { followPoint, nearestPlayerTo, tilesBetween } from './followMath.js';
 
 /** Asks the native module to walk, or to stop — the one thing a plugin cannot do alone. */
@@ -71,7 +72,8 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
       id: 'auto-follow',
       name: 'Auto Follow',
       category: PluginCategory.Movement,
-      description: 'Walks after an ally. Shift+left-click to pick one under the cursor.',
+      description:
+        'Walks after an ally. Shift+left-click an ally to follow them, or empty ground to stop.',
     },
 
     setup(context) {
@@ -126,6 +128,38 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         else inputs.followTarget.clear();
       };
 
+      /**
+       * A Shift+left-click: take the ally under the cursor, or cancel.
+       *
+       * **A click on nothing is the cancel**, which is the only stop the player
+       * has under their own hand, so it clears the automatic target as well —
+       * leaving that one standing would simply hand the follow back to the boss
+       * logic and the cancel would not read as one.
+       */
+      const applyPick = (
+        session: SessionView,
+        state: FollowState,
+        cursor: Position | undefined,
+      ): void => {
+        const picked =
+          cursor === undefined
+            ? undefined
+            : nearestPlayerTo(
+                session.world.players(),
+                cursor,
+                session.self.objectId,
+                PICK_RADIUS_TILES,
+              );
+        if (picked !== undefined) {
+          state.manualId = picked.objectId;
+          session.notify(`Following ${picked.name || 'player'}.`, 'Auto Follow');
+          return;
+        }
+        if (activeTarget(state) !== undefined) session.notify('Follow cancelled.', 'Auto Follow');
+        state.manualId = undefined;
+        inputs.followTarget.clear();
+      };
+
       context.packets.on('NEWTICK', (_packet, session) => {
         const state = stateFor(session);
         const self = session.self;
@@ -134,13 +168,7 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         // point exists the instant the player Shift-clicks. The lease is the
         // side effect; the value is only used on a pick.
         const cursor = inputs.cursorPoint();
-        if (inputs.pick.pending() && cursor !== undefined) {
-          const picked = nearestPlayerTo(session.world.players(), cursor, self.objectId);
-          if (picked !== undefined) {
-            state.manualId = picked.objectId;
-            session.notify(`Following ${picked.name || 'player'}.`, 'Auto Follow');
-          }
-        }
+        if (inputs.pick.pending()) applyPick(session, state, cursor);
 
         if (!self.alive) {
           standDown(session, state);

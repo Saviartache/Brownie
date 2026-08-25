@@ -9,3 +9,14 @@
  * as auto-portal's hold.
  */
 export const WALK_HOLD_MS = 500;
+
+/**
+ * How close to the cursor an ally must stand to be picked by Shift+left-click,
+ * in tiles.
+ *
+ * A pick is a click *on* somebody, not a search of the map: a tile is about the
+ * width of a character, so clicking an ally takes them and clicking the ground
+ * beside them takes nobody — which is what makes an empty click a cancel rather
+ * than a grab at whoever happened to be nearest across the room.
+ */
+export const PICK_RADIUS_TILES = 1;

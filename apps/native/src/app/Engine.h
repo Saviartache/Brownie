@@ -255,10 +255,11 @@ class Engine {
     /// goes down.
     ///
     /// **Only the down edge, and no release.** Unlike the walk chord, this is a
-    /// one-shot: the runtime picks the nearest player to the last cursor point
-    /// once and needs nothing on the way up. Left-click is the game's own shoot
-    /// button, so the press is read, never swallowed — the shot still fires, and
-    /// where the cursor points travels as its own record the same as ever.
+    /// one-shot: the runtime takes the ally standing under the last cursor point
+    /// once — or cancels the follow when none is there — and needs nothing on
+    /// the way up. Left-click is the game's own shoot button, so the press is
+    /// read, never swallowed — the shot still fires, and where the cursor points
+    /// travels as its own record the same as ever.
     void ObservePick(bool held);
 
     /// Passes on the place under the cursor, on its own cadence. **Render

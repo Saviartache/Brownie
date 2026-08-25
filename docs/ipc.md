@@ -468,10 +468,11 @@ carry integers only, for the same reason:
 | `pick`      | `1`                          | a Shift+left-click, to pick an ally to follow — down edge only |
 
 **`pick` is a down edge and nothing else**, because the reader wants a single
-event: auto-follow resolves the ally against the last `cursor-at` and needs
-nothing on the way up. Left-click is the game's own shoot button, so the press
-is read by polling and never swallowed — the shot still fires, and the Shift is
-what tells a deliberate pick from ordinary shooting.
+event: auto-follow resolves the ally against the last `cursor-at` — the player
+within a tile of it, or a cancel when there is none — and needs nothing on the
+way up. Left-click is the game's own shoot button, so the press is read by
+polling and never swallowed — the shot still fires, and the Shift is what tells
+a deliberate pick from ordinary shooting.
 
 **`cursor-at` is a place, not a direction, and the module is the only thing that
 can work one out.** The cursor is a point on a window and the map is somewhere

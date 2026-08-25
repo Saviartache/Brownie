@@ -36,26 +36,29 @@ export function followPoint(
 }
 
 /**
- * The player nearest a point — the one the cursor is on — or nothing when no
- * player is present.
+ * The player nearest a point and no further from it than `withinTiles` — the
+ * one the cursor is on — or nothing when none is that close.
  *
  * `excludeId` is the local player: a follow selection is another player, and
  * the cursor is often nearest our own character.
+ *
+ * The reach is what lets a click on empty ground mean *nobody* instead of
+ * whoever is nearest, so the caller can read that answer as a cancel.
  */
 export function nearestPlayerTo(
   players: Iterable<EntityView>,
   point: Position,
   excludeId: number,
+  withinTiles: number,
 ): EntityView | undefined {
   let best: EntityView | undefined;
   let bestDist = Infinity;
   for (const player of players) {
     if (player.objectId === excludeId) continue;
     const dist = tilesBetween(player, point);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = player;
-    }
+    if (dist > withinTiles || dist >= bestDist) continue;
+    bestDist = dist;
+    best = player;
   }
   return best;
 }

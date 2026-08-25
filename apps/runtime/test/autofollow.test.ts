@@ -48,13 +48,18 @@ describe('follow geometry', () => {
     expect(followPoint({ x: 0, y: 0 }, { x: 1, y: 0 }, 1.5)).toBeUndefined();
   });
 
-  it('picks the nearest player to the cursor, never ourselves', () => {
+  it('picks the nearest player within reach of the cursor, never ourselves', () => {
     const players = [
-      entity({ objectId: 99, x: 0, y: 0, isPlayer: true }), // us, nearest but excluded
-      entity({ objectId: 11, x: 3, y: 0, isPlayer: true }),
-      entity({ objectId: 12, x: 9, y: 0, isPlayer: true }),
+      entity({ objectId: 99, x: 4, y: 0, isPlayer: true }), // us, nearest but excluded
+      entity({ objectId: 11, x: 3.5, y: 0, isPlayer: true }),
+      entity({ objectId: 12, x: 4.6, y: 0, isPlayer: true }),
     ];
-    expect(nearestPlayerTo(players, { x: 4, y: 0 }, 99)?.objectId).toBe(11);
+    expect(nearestPlayerTo(players, { x: 4, y: 0 }, 99, 1)?.objectId).toBe(11);
+  });
+
+  it('picks nobody when every player is out of reach of the cursor', () => {
+    const players = [entity({ objectId: 11, x: 3, y: 0, isPlayer: true })];
+    expect(nearestPlayerTo(players, { x: 4.5, y: 0 }, 99, 1)).toBeUndefined();
   });
 });
 
@@ -210,6 +215,41 @@ describe('the auto-follow plugin', () => {
     tick(h);
 
     expect(h.moveTo).toHaveBeenCalledWith(0, 1.5, 5, expect.any(Number));
+  });
+
+  it('cancels the follow when the click lands where no ally is', () => {
+    const h = harness();
+    setting(h, 'stopNearBoss', false);
+    h.players.push(player(11, { x: 10, y: 0 }));
+    h.follow.id = 11;
+    tick(h);
+    h.moveTo.mockClear();
+
+    h.cursor.point = { x: 0, y: 5 }; // empty ground, and the ally is far from it
+    h.pickPending.value = true;
+    tick(h);
+
+    expect(h.follow.id).toBeUndefined();
+    expect(h.moveTo).not.toHaveBeenCalled();
+    expect(h.stop).toHaveBeenCalled();
+  });
+
+  it('lets go of a hand-picked ally when the next click lands on nothing', () => {
+    const h = harness();
+    setting(h, 'stopNearBoss', false);
+    h.players.push(player(11, { x: 3, y: 0 }));
+    h.cursor.point = { x: 3, y: 0 };
+    h.pickPending.value = true;
+    tick(h);
+    expect(h.moveTo).toHaveBeenCalledWith(1.5, 0, 5, expect.any(Number));
+    h.moveTo.mockClear();
+
+    h.cursor.point = { x: 3, y: 4 };
+    h.pickPending.value = true;
+    tick(h);
+
+    expect(h.moveTo).not.toHaveBeenCalled();
+    expect(h.stop).toHaveBeenCalled();
   });
 
   it('stops following once at the boss', () => {
