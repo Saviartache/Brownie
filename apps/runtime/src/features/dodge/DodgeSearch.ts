@@ -311,9 +311,12 @@ export class DodgeSearch {
     const ticks = Math.max(1, Math.min(SLICE_SPAN - 1, request.ticks));
     this.#buildHeadings(request.headings);
     // Every expansion offers standing still and one move per heading, and each
-    // of those files at most one node. Reserved up front so the tables can never
-    // move under a run that is already writing into them.
-    this.#reserve((request.maxExpansions + 2) * (this.#headings + 1));
+    // of those files at most one node, on top of what the straight scan seeds.
+    // Reserved up front so the tables can never move under a run that is
+    // already writing into them.
+    this.#reserve(
+      (request.maxExpansions + 2) * (this.#headings + 1) + (this.#headings + 1) * (ticks + 1),
+    );
 
     this.#seen.clear();
     this.#open.clear();
@@ -323,13 +326,14 @@ export class DodgeSearch {
     // the estimate a bound rather than a guess. See `remainingAnchorCost`.
     this.#closePerStep = request.stepTiles + Math.hypot(request.anchorStepX, request.anchorStepY);
 
-    // Before the search and not after it: this is what the search has to beat,
-    // and it is the answer whenever the budget runs out. See {@link #scanStraight}.
-    this.#scanStraight(request, ticks);
-
     const start = this.#file(request.startX, request.startY, 0, -1, 0, Infinity, NO_THREAT_TILES);
     this.#seen.set(keyOf(0, 0, 0), start);
     this.#open.push(start, 0);
+
+    // After the start node, because every run begins at it — and before the
+    // loop, because the whole point is that the search starts with these already
+    // on the table. See {@link #scanStraight}.
+    this.#scanStraight(request, ticks, start);
 
     let expansions = 0;
     let goal = -1;
@@ -387,8 +391,16 @@ export class DodgeSearch {
    * step and nothing else, and the character stands where it stopped them —
    * which is the honest model, and it is what stops a run along a corridor being
    * discarded for the wall at the end of it.
+   *
+   * **And every place a run passes through is left on the open list**, which is
+   * what turns a floor into a head start. Without it the search has to walk out
+   * from the character's own feet to reach any depth at all, and in a saturated
+   * field it spends its whole budget doing that; with it, four hundred
+   * expansions start a dozen routes deep into the lattice and are spent
+   * *turning* — which is what a crossfire needs and a straight line cannot say.
+   * The nodes are already priced, so seeding them costs a heap push apiece.
    */
-  #scanStraight(request: SearchRequest, ticks: number): void {
+  #scanStraight(request: SearchRequest, ticks: number, start: number): void {
     this.#runCost = Infinity;
     this.#runDirX = 0;
     this.#runDirY = 0;
@@ -396,19 +408,26 @@ export class DodgeSearch {
 
     // Standing still is candidate nought and always available: it is the floor
     // every other run has to beat, and it is very often the answer.
-    this.#priceRun(request, ticks, 0, 0);
+    this.#priceRun(request, ticks, 0, 0, start);
     for (let i = 0; i < this.#headings; i += 1) {
-      this.#priceRun(request, ticks, this.#headingX[i] ?? 0, this.#headingY[i] ?? 0);
+      this.#priceRun(request, ticks, this.#headingX[i] ?? 0, this.#headingY[i] ?? 0, start);
     }
   }
 
   /** Prices one heading run end to end, keeping it if it is the best so far. */
-  #priceRun(request: SearchRequest, ticks: number, dirX: number, dirY: number): void {
+  #priceRun(
+    request: SearchRequest,
+    ticks: number,
+    dirX: number,
+    dirY: number,
+    start: number,
+  ): void {
     let x = request.startX;
     let y = request.startY;
     let total = 0;
     let impact = Infinity;
     let room = NO_THREAT_TILES;
+    let parent = start;
 
     for (let step = 0; step < ticks; step += 1) {
       const next = step + 1;
@@ -452,10 +471,23 @@ export class DodgeSearch {
       if (this.#priced < 0 && this.#startsMs < impact) impact = this.#startsMs;
       if (this.#priced < room) room = this.#priced;
 
+      // **Left on the open list, so the search can turn off this run.** Not the
+      // last one: a node at the horizon is a goal, and a goal on the table
+      // before the first expansion is a search that stops without having looked
+      // at anything. What the seed is for is depth to *start* from.
+      if (next < ticks) {
+        parent = this.#seed(request, toX, toY, next, parent, total, impact, room, anchorTiles);
+      }
+
       x = toX;
       y = toY;
-      if (total >= this.#runCost) return; // already beaten; the rest cannot help
     }
+
+    // **Every run is walked to the end, and only the cheapest is kept.** The
+    // seeding above is why it is walked to the end — abandoning a run the moment
+    // it is beaten would leave the search without the depth it is being given —
+    // and this is what stops the *last* run being mistaken for the best one.
+    if (total >= this.#runCost) return;
 
     this.#runCost = total;
     this.#runDirX = dirX;
@@ -467,6 +499,49 @@ export class DodgeSearch {
       x - (request.anchorX + request.anchorStepX * ticks),
       y - (request.anchorY + request.anchorStepY * ticks),
     );
+  }
+
+  /**
+   * Files one place a straight run passes through, and offers it to the search.
+   *
+   * **Filed whatever else is there, offered only when it is the cheapest.** The
+   * run's own chain has to stay intact — it is what {@link #reportRun} would
+   * report — so the node always exists; what the dedup decides is only whether
+   * the search should ever expand *this* one rather than the cheaper route it
+   * already knows to the same place.
+   *
+   * @returns the node to hang the next step of the run from.
+   */
+  #seed(
+    request: SearchRequest,
+    x: number,
+    y: number,
+    slice: number,
+    parent: number,
+    g: number,
+    impact: number,
+    room: number,
+    anchorTiles: number,
+  ): number {
+    const node = this.#file(x, y, slice, parent, g, impact, room);
+    const cellX = Math.round((x - request.startX) / this.#cell);
+    const cellY = Math.round((y - request.startY) / this.#cell);
+    if (cellX <= -CELL_RANGE || cellX >= CELL_RANGE) return node;
+    if (cellY <= -CELL_RANGE || cellY >= CELL_RANGE) return node;
+
+    const key = keyOf(cellX, cellY, slice);
+    const seen = this.#seen.get(key);
+    if (seen !== undefined && (this.#g[seen] ?? 0) <= g) return node;
+
+    this.#seen.set(key, node);
+    const heuristic = remainingAnchorCost(
+      request.weights.anchorPerTile,
+      anchorTiles,
+      this.#closePerStep,
+      this.#stepsLeft,
+    );
+    this.#open.push(node, g + request.greed * heuristic - slice * DEPTH_PULL);
+    return node;
   }
 
   /** The best straight run, as the answer. */

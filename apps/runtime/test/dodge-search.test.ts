@@ -681,6 +681,27 @@ describe('the search', () => {
     expect(Number.isFinite(route.cost)).toBe(true);
   });
 
+  // **The seeds are what a small budget spends itself on turning.** Without
+  // them the search has to walk out from the character's own feet to reach any
+  // depth at all, and in a saturated field that is the whole budget — which is
+  // how four sources converging on one spot came to be answered by standing in
+  // the middle of them.
+  it('reaches the horizon on a budget too small to walk there', () => {
+    const shots: DodgeShot[] = [];
+    for (let rank = 0; rank < 5; rank += 1) {
+      for (let y = 7; y <= 13; y += 0.8) {
+        shots.push(straightShot({ x: 5 - rank * 1.1, y }, 0, 8, 0, 4000));
+      }
+    }
+    const { threats } = fieldOf(shots, { reachTiles: 9 });
+
+    // Four expansions cannot walk eight steps out from the start on their own.
+    const route = new DodgeSearch().run(searchFor({ threats, maxExpansions: 4 }));
+
+    expect(route.depth).toBe(8);
+    expect(route.stepTiles).toBeGreaterThan(0);
+  });
+
   it('answers with what it has when the budget runs out', () => {
     const shots: DodgeShot[] = [];
     for (let y = 4; y <= 16; y += 0.6) shots.push(straightShot({ x: 8, y }, 0, 6, 0, 3000));

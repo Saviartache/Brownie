@@ -312,11 +312,28 @@ const MAX_STEP_TILES = 3;
 /** Per tile walked. What keeps the character still when nothing forces a move. */
 const TRAVEL_PER_TILE = 0.4;
 
-/** Per tile short of comfortable. Enough that a lane beats a needle. */
-const RISK_PER_TILE = 10;
+/**
+ * Per tile short of comfortable.
+ *
+ * **An order of magnitude above the anchor, and it has to be.** Coming back is
+ * worth about a tile of deviation per tick; a shot aimed at the ground they were
+ * standing on is crossing exactly the way home, and at anything less than this
+ * the arithmetic buys the last hundredth of a tile of room with a shorter walk.
+ * **Measured**: on a second shot timed to cross the return, twenty-one arrival
+ * times each grazed by a hundredth of a tile at ten, and cleared by a sixth of
+ * one at forty — with fewer hits across every other fight as well.
+ */
+const RISK_PER_TILE = 40;
 
-/** Per tile inside a monster's bubble. Above the anchor, so a shove wins. */
-const CROWD_PER_TILE = 2.5;
+/**
+ * Per tile inside a monster's bubble, before the curve in `StepCost` steepens
+ * it.
+ *
+ * Above the anchor, so a shove wins. **Measured** across a dozen fights: at two
+ * and a half the character spent about a fifth of a second per fight actually
+ * touching something, and at four it is half that with no more hits.
+ */
+const CROWD_PER_TILE = 4;
 
 /** For a step ending on ground that hurts. Whole tiles' worth, because it is. */
 const HAZARD_COST = 8;

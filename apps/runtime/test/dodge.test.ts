@@ -56,6 +56,7 @@ import {
 } from '../src/features/dodge/dodgePresets.js';
 import { nearestOtherPlayer } from '../src/features/dodge/hitRedirect.js';
 import {
+  DEFAULT_PROJECTILE_HALF_TILES,
   PLAYER_HALF_TILES,
   effectiveHalf,
   minChebyshevOnSegment,
@@ -428,6 +429,54 @@ describe('how far it moves to get out of the way', () => {
     expect(strayed).toBeLessThan(2);
   });
 
+  // **The way home is a course like any other, and the fire knows where home
+  // is.** A monster aims at where the server last saw the character, which after
+  // a sidestep is the very ground the planner is walking back to — so a return
+  // planned for the anchor alone threads the next shot by a hundredth of a tile
+  // and is clipped by the one after.
+  it('leaves room on the way back, not only on the way out', () => {
+    const planner = new DodgePlanner();
+    let x = 10;
+    let y = 10;
+    let closest = Infinity;
+
+    const FRAME_MS = 25;
+    for (let frame = 0; frame < 100; frame += 1) {
+      const at = frame * FRAME_MS;
+      // One from the west to move them, and one across the ground they were
+      // standing on, timed for the moment they would be walking back over it.
+      const shots = [
+        straightShot({ x: 6, y: 10 }, 0, 8, 0, 2000),
+        straightShot({ x: 10, y: 4 }, Math.PI / 2, 8, 700, 2000),
+      ].filter((shot) => shot.firedAtMs <= at && shot.expiresAtMs > at);
+
+      const plan = planner.plan(
+        { ...situation(), x, y, gameTimeMs: at, nowMs: 1_000_000 + at },
+        SETTINGS,
+        OPEN_GROUND,
+        shots,
+      );
+      if (plan.steer && plan.stepTiles > 0) {
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        x += plan.dirX * travel;
+        y += plan.dirY * travel;
+      }
+
+      for (const shot of shots) {
+        const where = shot.positionAt(at);
+        if (where === undefined) continue;
+        const gap =
+          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) -
+          (PLAYER_HALF_TILES + DEFAULT_PROJECTILE_HALF_TILES);
+        if (gap < closest) closest = gap;
+      }
+    }
+
+    // Room to spare rather than a graze, which is the difference between a miss
+    // and a coin flip on the prediction.
+    expect(closest).toBeGreaterThan(0.1);
+  });
+
   // **And having stepped aside, it walks back.** Without a way home every plan
   // measures from where the character is now, so every plan is already content —
   // and a long fight walks somebody the length of the room one blameless step at
@@ -436,7 +485,10 @@ describe('how far it moves to get out of the way', () => {
     const { x, y, strayed } = fly([straightShot({ x: 4, y: 10 }, 0, 8, 0, 3000)], 80);
 
     expect(strayed).toBeGreaterThan(0.4);
-    expect(Math.hypot(x - 10, y - 10)).toBeLessThan(0.4);
+    // Back to within about a step of their ground rather than onto the exact
+    // tile: the planner stops returning once it is near enough to have given the
+    // ground back, and the last command it issued can carry a step past that.
+    expect(Math.hypot(x - 10, y - 10)).toBeLessThan(0.9);
   });
 
   // **The live report: "enemies can still walk into us, and you try to go back
@@ -1383,6 +1435,16 @@ describe('when the plugin decides', () => {
        * does not.
        */
       shots?: (objectType: number) => boolean;
+      /**
+       * The one shot in flight, for a test whose geometry has to be its own.
+       *
+       * The default is deliberately marginal — a shot arriving just inside the
+       * reaction window, which is what most of these are about — and a test
+       * asking whether the planner *leaves somebody alone* needs the opposite:
+       * a course with room to spare, so that what it measures is the decision
+       * rather than a hundredth of a tile.
+       */
+      shot?: ProjectileView;
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -1394,7 +1456,7 @@ describe('when the plugin decides', () => {
     const view = { on: false };
     // Fired ten tiles west of the player and travelling east at eight tiles a
     // second, so it reaches them a little over a second later.
-    const shot = straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
+    const shot = map.shot ?? straightShot({ x: 0, y: 10 }, 0, 8, 0, 2000);
 
     const clock = { ms: gameTimeMs };
     const session = {
@@ -1513,7 +1575,13 @@ describe('when the plugin decides', () => {
   // The whole of "does not get in your way": a player already walking somewhere
   // safe is told nothing, so their own movement is untouched.
   it('says nothing while the player is walking somewhere safe', () => {
-    const { moveBy, plan, steer } = underFire(900);
+    // Fast and far, so that stepping out of its line has room to spare: a slow
+    // shot close by is one a walking player clears by a hair, and whether the
+    // planner tidies that up is a question about hundredths of a tile rather
+    // than about who is driving. See {@link ACROSS_THE_ROOM}.
+    const { moveBy, plan, steer } = underFire(0, {
+      shot: ACROSS_THE_ROOM as unknown as ProjectileView,
+    });
     // North, out of the shot's line.
     steer.direction = { x: 0, y: -1 };
 
