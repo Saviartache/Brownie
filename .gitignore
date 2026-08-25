@@ -58,7 +58,6 @@ references/
 # part of it, so it stays on the machine it is being written on.
 docs/migration/plan.md
 docs/migration/newfeatures.md
-docs/migration/gameassembly.md
 
 config/local.json
 # Every switch and knob the user set from the overlay, written by the runtime
