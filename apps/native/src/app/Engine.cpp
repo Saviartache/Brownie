@@ -12,6 +12,7 @@
 
 #include "app/Inspection.h"
 #include "core/Clock.h"
+#include "core/Colour.h"
 #include "game/FloatingText.h"
 #include "game/MapFields.h"
 #include "game/PlayerFields.h"
@@ -215,32 +216,6 @@ constexpr std::string_view kFeatureOn = "true";
     return parsed;
 }
 
-/// The colour a feature value carries as `0xRRGGBBAA`, or nothing when it does
-/// not carry one.
-///
-/// `#rrggbbaa` is the one spelling a claimant sends, so that is the one this
-/// reads. Everything else is refused rather than guessed at from a short form:
-/// a colour read as black because a digit was missing looks like a feature that
-/// worked, which is the opposite of what a sign is for.
-[[nodiscard]] std::optional<std::uint32_t> FeatureColour(std::string_view value) noexcept {
-    constexpr std::size_t kDigits = 8;
-    if (value.size() != kDigits + 1 || value.front() != '#') {
-        return std::nullopt;
-    }
-    std::uint32_t packed = 0;
-    for (const char digit : value.substr(1)) {
-        const std::uint32_t nibble = digit >= '0' && digit <= '9'   ? std::uint32_t(digit - '0')
-                                     : digit >= 'a' && digit <= 'f' ? std::uint32_t(digit - 'a' + 10)
-                                     : digit >= 'A' && digit <= 'F' ? std::uint32_t(digit - 'A' + 10)
-                                                                    : 16u;
-        if (nibble > 15u) {
-            return std::nullopt;
-        }
-        packed = (packed << 4u) | nibble;
-    }
-    return packed;
-}
-
 /// How much of a chunk to fill before sending it.
 ///
 /// Well under the frame's 256 KB cap, and large enough that a whole image goes
@@ -400,7 +375,7 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
         // Kept whether or not the claim is live, like the multiplier above and
         // for the same reason: it arrives ahead of the claim. A value that is
         // not a colour is dropped, so the bar keeps the last one that was.
-        const auto parsed = FeatureColour(value);
+        const auto parsed = core::ParseColour(value);
         if (parsed.has_value()) {
             tint_colour_.store(*parsed, std::memory_order_relaxed);
         }
@@ -431,7 +406,7 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
         // Kept whether or not the claim is live, like the health bar's colour
         // and for the same reason. A value that is not a colour is dropped, so
         // the glow keeps the last one that was.
-        const auto parsed = FeatureColour(value);
+        const auto parsed = core::ParseColour(value);
         if (parsed.has_value()) {
             glow_colour_.store(*parsed, std::memory_order_relaxed);
         }

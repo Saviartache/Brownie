@@ -122,6 +122,11 @@ export interface TextSettingOptions extends SettingCommon {
   readonly maxLength?: number;
 }
 
+export interface ColourSettingOptions extends SettingCommon {
+  /** `#rrggbbaa`, or `#rrggbb` for an opaque one. */
+  readonly default: string;
+}
+
 export interface ButtonOptions extends SettingCommon {
   readonly label: string;
   readonly onPress: () => void;
@@ -150,6 +155,16 @@ export interface SettingsApi {
     options: MultiSelectSettingOptions<T>,
   ): MultiSelectHandle<T>;
   text(key: string, options: TextSettingOptions): SettingHandle<string>;
+  /**
+   * A colour, drawn as a picker with a bar for each of red, green, blue and
+   * alpha.
+   *
+   * The value is always `#rrggbbaa` in lower case, whatever spelling it was
+   * set from: a setting that can only hold a colour is one nothing downstream
+   * has to validate, and there are two of those — the overlay's widget and the
+   * injected module.
+   */
+  colour(key: string, options: ColourSettingOptions): SettingHandle<string>;
   /** A control with no value: pressing it calls `onPress`. */
   button(key: string, options: ButtonOptions): void;
 }
@@ -161,6 +176,7 @@ export type SettingDescriptor =
   | ({ readonly kind: 'select'; readonly key: string } & SelectSettingOptions<string>)
   | ({ readonly kind: 'multiSelect'; readonly key: string } & MultiSelectSettingOptions<string>)
   | ({ readonly kind: 'text'; readonly key: string } & TextSettingOptions)
+  | ({ readonly kind: 'colour'; readonly key: string } & ColourSettingOptions)
   | ({ readonly kind: 'button'; readonly key: string } & ButtonOptions);
 
 /**
@@ -177,6 +193,30 @@ export function clampToBounds(value: number, options: NumberSettingOptions): num
   if (options.min !== undefined) result = Math.max(options.min, result);
   if (options.max !== undefined) result = Math.min(options.max, result);
   return result;
+}
+
+const COLOUR_WITH_ALPHA = /^#[0-9a-f]{8}$/;
+const COLOUR_WITHOUT_ALPHA = /^#[0-9a-f]{6}$/;
+
+/**
+ * The one spelling a colour setting holds, or nothing when the text is not one.
+ *
+ * Here for the same reason {@link clampToBounds} is: a value arrives from the
+ * overlay, from config an older build wrote, and from plugin code, and none of
+ * those is trustworthy. A colour is the case where trusting one is worst — a
+ * short form read as `#ff0` would be silently black rather than obviously
+ * wrong, which looks like a feature that worked, in the wrong colour.
+ *
+ * So exactly two things are forgiven, because neither can be mistaken: upper
+ * case, and a missing alpha. Everything else is refused, which for a setting
+ * means the value it already holds stands.
+ */
+export function normaliseColour(text: string): string | undefined {
+  const trimmed = text.trim().toLowerCase();
+  if (COLOUR_WITH_ALPHA.test(trimmed)) return trimmed;
+  // Opaque, which is the only alpha somebody who typed six digits meant.
+  if (COLOUR_WITHOUT_ALPHA.test(trimmed)) return `${trimmed}ff`;
+  return undefined;
 }
 
 /** Turns `hpPercentThreshold` into `Hp percent threshold` for a missing label. */

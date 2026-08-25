@@ -111,6 +111,7 @@ enum class SettingKind : std::uint8_t {
     kSelect,
     kMultiSelect,
     kText,
+    kColour,
     kButton,
 };
 

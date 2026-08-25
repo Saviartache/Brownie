@@ -158,6 +158,7 @@ constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",
     if (name == "range") return SettingKind::kRange;
     if (name == "select") return SettingKind::kSelect;
     if (name == "multiSelect") return SettingKind::kMultiSelect;
+    if (name == "colour") return SettingKind::kColour;
     if (name == "button") return SettingKind::kButton;
     // Text is the fallback for a kind this build predates: every setting has a
     // value that can be shown and edited as text, so an unknown one is still

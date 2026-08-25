@@ -9,6 +9,7 @@
 
 #include <imgui.h>
 
+#include "core/Colour.h"
 #include "overlay/ControlRecord.h"
 
 namespace brownie::overlay {
@@ -805,6 +806,42 @@ void DrawText(const PluginRow& plugin, const SettingRow& row, std::uint64_t vers
     }
 }
 
+void DrawColour(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                PendingEdit& edit, const ActionSink& emit) {
+    const std::string_view source =
+        edit.Holds(plugin.id, row.key) ? edit.TextView() : std::string_view{row.value};
+    const auto packed = core::ParseColour(source);
+    if (!packed.has_value()) {
+        // Not a colour, so not a picker. A picker seeded with black would show
+        // a setting that is black rather than one whose value nothing here can
+        // read, and a text box is both honest and repairable.
+        DrawText(plugin, row, version, edit, emit);
+        return;
+    }
+
+    // A swatch and a label, and the picker itself on a click. `NoInputs` is
+    // what keeps it to one line: the four channel boxes it would otherwise draw
+    // inline are already in the picker, beside the hue and alpha bars and a hex
+    // field, and four of them across a 560-pixel panel pushes the label off the
+    // end. `AlphaPreviewHalf` is so the swatch shows the alpha rather than only
+    // the colour.
+    constexpr ImGuiColorEditFlags kPickerFlags = ImGuiColorEditFlags_NoInputs |
+                                                 ImGuiColorEditFlags_AlphaBar |
+                                                 ImGuiColorEditFlags_AlphaPreviewHalf;
+    std::array<float, 4> channels = core::ColourChannels(*packed);
+    if (ImGui::ColorEdit4(row.label.c_str(), channels.data(), kPickerFlags)) {
+        edit.Hold(plugin.id, row.key);
+        edit.SetText(core::FormatColour(core::PackColourChannels(channels)));
+    }
+    // Sent when the picker closes or the drag ends, not while it runs: the same
+    // rule as the slider's, and here it is what stops a colour being dragged
+    // through from becoming one write of the game's memory per frame.
+    if (ImGui::IsItemDeactivatedAfterEdit() && edit.Holds(plugin.id, row.key)) {
+        SendSetting(plugin, row, edit.TextView(), emit);
+        edit.Sent(version);
+    }
+}
+
 void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
                  PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit) {
     ImGui::PushID(row.key.c_str());
@@ -826,6 +863,9 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
             break;
         case SettingKind::kText:
             DrawText(plugin, row, version, edit, emit);
+            break;
+        case SettingKind::kColour:
+            DrawColour(plugin, row, version, edit, emit);
             break;
         case SettingKind::kButton:
             if (ImGui::Button(row.label.c_str())) {

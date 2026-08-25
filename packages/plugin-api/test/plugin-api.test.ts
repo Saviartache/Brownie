@@ -9,6 +9,7 @@ import {
   clampToBounds,
   definePlugin,
   humaniseKey,
+  normaliseColour,
 } from '../src/index.js';
 
 const registry: PacketRegistry = createBundledRegistry();
@@ -130,6 +131,21 @@ describe('setting helpers', () => {
     expect(clampToBounds(Number.NaN, { default: 25 })).toBe(25);
     // Infinity is "not a number we can trust", not "the maximum".
     expect(clampToBounds(Number.POSITIVE_INFINITY, { default: 25, max: 99 })).toBe(25);
+  });
+
+  it('normalises the two colour spellings that cannot be mistaken', () => {
+    expect(normaliseColour('#ff0000ff')).toBe('#ff0000ff');
+    expect(normaliseColour('#FF00AAff')).toBe('#ff00aaff');
+    // Six digits is opaque, which is the only alpha whoever typed them meant.
+    expect(normaliseColour('  #00ff00  ')).toBe('#00ff00ff');
+  });
+
+  it('refuses a colour it would have to guess at', () => {
+    // A short form read as a colour is the failure this exists to prevent: it
+    // looks like a setting that worked, in the wrong colour.
+    for (const text of ['#f00', 'red', '', '#gggggg', '#ff0000f', '#ff0000fff', 'ff0000ff']) {
+      expect(normaliseColour(text)).toBeUndefined();
+    }
   });
 
   it('humanises a key into a label', () => {

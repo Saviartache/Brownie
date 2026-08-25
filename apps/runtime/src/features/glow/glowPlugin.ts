@@ -22,7 +22,6 @@
  */
 
 import { PluginCategory, definePlugin, type Plugin } from '@brownie/plugin-api';
-import { normaliseGlowColour } from './glowColour.js';
 
 const FEATURE_KEY = 'player.glow';
 const COLOUR_KEY = 'player.glowColour';
@@ -43,12 +42,9 @@ export function createGlowPlugin(): Plugin {
     },
 
     setup(context) {
-      const colour = context.settings.text('colour', {
-        label: 'Colour (#rrggbb or #rrggbbaa)',
+      const colour = context.settings.colour('colour', {
+        label: 'Colour',
         default: DEFAULT_GLOW_COLOUR,
-        // Nine characters is the longest spelling there is; a longer value is
-        // not a colour and the setting should not let one be typed.
-        maxLength: 9,
       });
 
       /**
@@ -61,33 +57,22 @@ export function createGlowPlugin(): Plugin {
        * with no reader.
        */
       let sent: string | undefined;
-      /** The last text refused, so one typo is one line in the log. */
-      let refused: string | undefined;
 
       const claim = (): void => {
-        const typed = colour.get();
-        const wanted = normaliseGlowColour(typed);
-        if (wanted === undefined) {
-          if (refused !== typed) {
-            refused = typed;
-            context.log.warn(
-              `glow: "${typed}" is not a colour like ${DEFAULT_GLOW_COLOUR}; keeping the last one`,
-            );
-          }
-        } else {
-          refused = undefined;
-          // Before the claim, always: a claim the module heard first would be a
-          // claim on the last colour it happened to hold.
-          if (wanted !== sent) {
-            context.native.setFeature(COLOUR_KEY, wanted);
-            sent = wanted;
-          }
+        // Always a colour: the setting kind is what refuses anything else, so
+        // there is nothing to validate here and nothing to fall back to.
+        const wanted = colour.get();
+        // Before the claim, always: a claim the module heard first would be a
+        // claim on the last colour it happened to hold.
+        if (wanted !== sent) {
+          context.native.setFeature(COLOUR_KEY, wanted);
+          sent = wanted;
         }
         context.native.setFeature(FEATURE_KEY, true);
       };
 
       // Answered now rather than on the next tick: a colour that arrives a
-      // second after it is typed is one nobody can compare against another.
+      // second after it is picked is one nobody can compare against another.
       // Gated, because a setting changed on a disabled plugin is not a claim.
       context.onDispose(
         colour.onChange(() => {

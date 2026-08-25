@@ -4,10 +4,15 @@
 // the game a colour somebody picked — the health bar's tint and the player's
 // glow — and a second copy of "four floats in the engine's order" is a second
 // place for the order to be wrong.
+//
+// The arithmetic itself is `core/Colour.h`, which the overlay uses too: this
+// file is only where four channels become the layout managed code expects.
 
 #pragma once
 
 #include <cstdint>
+
+#include "core/Colour.h"
 
 namespace brownie::game {
 
@@ -40,26 +45,13 @@ struct UiColor {
 /// another; four separate floats would let that read see last frame's red
 /// beside this frame's green. One word is one load, and a colour is either the
 /// old one or the new one.
-///
-/// The cost is a channel quantised to 1/255 — which is the precision a colour
-/// picker offers and the precision the game renders at anyway.
 [[nodiscard]] constexpr std::uint32_t PackColour(const UiColor& colour) noexcept {
-    const auto channel = [](float value) -> std::uint32_t {
-        // Clamped rather than trusted: the value comes from a widget, and a
-        // conversion of anything outside [0,1] to an integer is undefined.
-        const float bounded = value < 0.0F ? 0.0F : (value > 1.0F ? 1.0F : value);
-        return static_cast<std::uint32_t>(bounded * 255.0F + 0.5F);
-    };
-    return (channel(colour.r) << 24) | (channel(colour.g) << 16) | (channel(colour.b) << 8) |
-           channel(colour.a);
+    return core::PackColourChannels({colour.r, colour.g, colour.b, colour.a});
 }
 
 [[nodiscard]] constexpr UiColor UnpackColour(std::uint32_t packed) noexcept {
-    const auto channel = [](std::uint32_t byte) {
-        return static_cast<float>(byte & 0xFFu) / 255.0F;
-    };
-    return UiColor{channel(packed >> 24), channel(packed >> 16), channel(packed >> 8),
-                   channel(packed)};
+    const auto channels = core::ColourChannels(packed);
+    return UiColor{channels[0], channels[1], channels[2], channels[3]};
 }
 
 }  // namespace brownie::game

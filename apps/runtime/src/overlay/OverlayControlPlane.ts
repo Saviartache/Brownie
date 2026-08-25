@@ -30,6 +30,7 @@ const WIRE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   select: 'select',
   multiSelect: 'multiSelect',
   text: 'text',
+  colour: 'colour',
   button: 'button',
 };
 
@@ -41,6 +42,9 @@ const VALUE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   // A set of keys, carried as one delimited string — see MULTI_SELECT_DELIMITER.
   multiSelect: 's',
   text: 's',
+  // `#rrggbbaa`, which is a string like any other on the wire — the overlay is
+  // where it becomes four bars, and it comes back in the same spelling.
+  colour: 's',
   button: 'b',
 };
 

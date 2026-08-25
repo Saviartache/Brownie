@@ -2,8 +2,10 @@ import {
   clampToBounds,
   humaniseKey,
   MULTI_SELECT_DELIMITER,
+  normaliseColour,
   type BooleanSettingOptions,
   type ButtonOptions,
+  type ColourSettingOptions,
   type MultiSelectHandle,
   type MultiSelectSettingOptions,
   type NumberSettingOptions,
@@ -155,6 +157,20 @@ export class SettingsRegistry implements SettingsApi {
 
   text(key: string, options: TextSettingOptions): SettingHandle<string> {
     this.#declare({ kind: 'text', key, ...withLabel(key, options) }, options.default);
+    return this.#handle<string>(key);
+  }
+
+  colour(key: string, options: ColourSettingOptions): SettingHandle<string> {
+    const normalised = normaliseColour(options.default);
+    if (normalised === undefined) {
+      // A programming error, and refused like a select whose default is not one
+      // of its options: the alternative is a plugin whose colour is whatever
+      // the coercion below happened to leave in place.
+      throw new TypeError(
+        `setting "${key}" defaults to "${options.default}", which is not a colour`,
+      );
+    }
+    this.#declare({ kind: 'colour', key, ...withLabel(key, options) }, normalised);
     return this.#handle<string>(key);
   }
 
@@ -335,6 +351,11 @@ function coerce(descriptor: SettingDescriptor, raw: unknown): SettingValue | und
       if (typeof raw !== 'string') return undefined;
       const max = descriptor.maxLength;
       return max !== undefined && raw.length > max ? raw.slice(0, max) : raw;
+    }
+    case 'colour': {
+      // Refused rather than truncated or padded: what is already in the setting
+      // is a colour, and keeping it is better than inventing one.
+      return typeof raw === 'string' ? normaliseColour(raw) : undefined;
     }
     case 'button':
       // A button holds no value; setting one is meaningless rather than wrong.

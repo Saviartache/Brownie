@@ -465,6 +465,34 @@ describe('settings', () => {
     expect(settings.apply('on', 'perhaps')).toBe(false);
   });
 
+  it('holds a colour in one spelling, and refuses anything that is not one', () => {
+    const h = host();
+    h.host.load(
+      plugin('p', (ctx) => {
+        // Six digits declared, eight held: a plugin reading this back gets the
+        // one spelling whatever it wrote.
+        ctx.settings.colour('tint', { default: '#FF0000' });
+      }),
+    );
+    const settings = h.host.settingsOf('p')!;
+
+    expect(settings.values()['tint']).toBe('#ff0000ff');
+    expect(settings.apply('tint', '#00FF00')).toBe(true);
+    expect(settings.values()['tint']).toBe('#00ff00ff');
+    // Refused rather than coerced, so what the plugin claims is still a colour.
+    expect(settings.apply('tint', '#0f0')).toBe(false);
+    expect(settings.values()['tint']).toBe('#00ff00ff');
+  });
+
+  it('refuses a colour default that is not a colour', () => {
+    const h = host();
+    h.host.load(
+      plugin('badcolour', (ctx) => ctx.settings.colour('tint', { default: 'chartreuse' })),
+    );
+
+    expect(h.host.status('badcolour')?.state).toBe(PluginState.Failed);
+  });
+
   it('notifies a listener, including for a change made from outside', () => {
     const h = host();
     const seen: number[] = [];

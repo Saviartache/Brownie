@@ -21,6 +21,7 @@
 #include "app/Inspection.h"
 #include "app/PlayerControl.h"
 #include "core/Clock.h"
+#include "core/Colour.h"
 #include "core/ModuleImage.h"
 #include "core/Result.h"
 #include "game/AimHook.h"
@@ -1526,6 +1527,50 @@ void AClassIsLookedForOnlyInItsOwnAssembly() {
           "reported as 'not yet', so the loop asks again after a patch");
 }
 
+void AColourSettingIsDrawnAsOneAndAnUnknownKindIsNot() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|glow|Glow|visuals|1|enabled|"), "one plugin");
+    Check(!mirror.Apply("setting|glow|colour|Colour|colour|s|%23ff0000ff|0|0|0|0|0|0||"),
+          "and a colour");
+    // A kind this build predates. Text is the fallback because every setting
+    // has a value that can be shown and edited as one, so an overlay older than
+    // the runtime is usable rather than blind.
+    Check(!mirror.Apply("setting|glow|later|Later|gradient|s|x|0|0|0|0|0|0||"), "and one from the future");
+    Check(mirror.Apply("sync-end"), "committed");
+
+    const auto& settings = mirror.plugins().front().settings;
+    Check(settings.size() == 2, "both settings arrive");
+    Check(settings[0].kind == brownie::overlay::SettingKind::kColour, "the colour is a colour");
+    Check(settings[0].value == "#ff0000ff", "with its value decoded");
+    Check(settings[1].kind == brownie::overlay::SettingKind::kText,
+          "and an unknown kind falls back to text");
+}
+
+void AColourIsReadAndWrittenInOneSpelling() {
+    using brownie::core::ColourChannels;
+    using brownie::core::FormatColour;
+    using brownie::core::PackColourChannels;
+    using brownie::core::ParseColour;
+
+    const auto parsed = ParseColour("#1a2b3cff");
+    Check(parsed.has_value() && *parsed == 0x1A2B3CFFu, "a colour is read as one word");
+    Check(FormatColour(0x1A2B3CFFu) == "#1a2b3cff",
+          "and written back in the case the runtime keeps");
+    // Upper case is read but never written: what goes back to the runtime has
+    // to compare equal to what it sent, or every sync would look like a change.
+    Check(ParseColour("#1A2B3CFF") == parsed, "upper case reads the same");
+
+    // Anything the module would have to guess at. A short form accepted here
+    // would be a colour silently read as black.
+    for (const auto* text : {"#1a2b3c", "#1a2b3cf", "#1a2b3cfff", "1a2b3cff", "#1a2b3cfg", ""}) {
+        Check(!ParseColour(text).has_value(), "a spelling that is not the one is refused");
+    }
+
+    const auto channels = ColourChannels(0x0080FF40u);
+    Check(PackColourChannels(channels) == 0x0080FF40u, "and four channels survive the round trip");
+}
+
 void AColourSurvivesBeingPacked() {
     using brownie::game::PackColour;
     using brownie::game::UiColor;
@@ -2077,6 +2122,8 @@ int main() {
     AClassIsLookedForOnlyInItsOwnAssembly();
     PropertiesAreFoundByTypeAndBounded();
     TheGamesOwnMultiplierIsTakenOnceAndPutBack();
+    AColourSettingIsDrawnAsOneAndAnUnknownKindIsNot();
+    AColourIsReadAndWrittenInOneSpelling();
     AColourSurvivesBeingPacked();
     AnUnpreparedClassIsNotAskedAboutItsMembers();
     AnUnverifiedEntryPointIsNoEntryPoint();

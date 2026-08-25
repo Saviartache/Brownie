@@ -1,37 +1,16 @@
 import type { NativeApi, SessionApi } from '@brownie/plugin-api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { normaliseGlowColour } from '../src/features/glow/glowColour.js';
 import { DEFAULT_GLOW_COLOUR, createGlowPlugin } from '../src/features/glow/glowPlugin.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
-import { RecordingSink, testLogger } from './fakes.js';
+import { testLogger } from './fakes.js';
 
 const FEATURE_KEY = 'player.glow';
 const COLOUR_KEY = 'player.glowColour';
 
-describe('a typed glow colour', () => {
-  it('is taken as the module spells it', () => {
-    expect(normaliseGlowColour('#ff0000ff')).toBe('#ff0000ff');
-  });
-
-  it('forgives the two spellings that cannot be mistaken', () => {
-    expect(normaliseGlowColour('#FF00AAff')).toBe('#ff00aaff');
-    expect(normaliseGlowColour('  #00ff00  ')).toBe('#00ff00ff');
-  });
-
-  it('refuses everything else rather than guessing at it', () => {
-    // A short form read as a colour is the failure this exists to prevent: it
-    // looks like a feature that worked, in the wrong colour.
-    for (const text of ['#f00', 'red', '', '#gggggg', '#ff0000f', '#ff0000fff', 'ff0000ff']) {
-      expect(normaliseGlowColour(text)).toBeUndefined();
-    }
-  });
-});
-
 describe('the glow plugin', () => {
   const features: [string, boolean | number | string][] = [];
-  let sink = new RecordingSink();
 
   const native: NativeApi = {
     connected: true,
@@ -50,7 +29,7 @@ describe('the glow plugin', () => {
 
   function load(enabled: boolean): { host: PluginHost; settings: SettingsRegistry } {
     const host = new PluginHost({
-      log: testLogger(sink),
+      log: testLogger(),
       native,
       sessions,
       onChanged: () => undefined,
@@ -64,7 +43,6 @@ describe('the glow plugin', () => {
 
   beforeEach(() => {
     features.length = 0;
-    sink = new RecordingSink();
     vi.useFakeTimers();
     vi.setSystemTime(0);
   });
@@ -110,23 +88,21 @@ describe('the glow plugin', () => {
     ]);
   });
 
-  it('keeps the last colour and says so when what was typed is not one', () => {
+  it('keeps claiming the colour it has when a value that is not one arrives', () => {
     const { settings } = load(true);
     vi.advanceTimersByTime(1000);
     features.length = 0;
 
-    settings.apply('colour', '#gg0000');
+    // Refused by the setting itself, so the plugin never sees it — and the
+    // glow stays lit in the colour the module already has rather than going
+    // out.
+    expect(settings.apply('colour', '#gg0000')).toBe(false);
     vi.advanceTimersByTime(2000);
 
-    // The glow stays lit in whatever the module already has: a typo should not
-    // put the character's glow out.
     expect(features).toEqual([
       [FEATURE_KEY, true],
       [FEATURE_KEY, true],
-      [FEATURE_KEY, true],
     ]);
-    // Once for the typo, not once a second for as long as it stands.
-    expect(sink.messages().filter((m) => m.includes('#gg0000'))).toHaveLength(1);
   });
 
   it('releases the claim when it is unloaded', () => {

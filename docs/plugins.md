@@ -83,7 +83,7 @@ One plugin's mistake never reaches another plugin, the proxy, or the game.
 |---|---|
 | `ctx.packets` | `on`, `onFirst`, `onAny` — packet subscriptions |
 | `ctx.commands` | chat commands, consumed only if the handler succeeds |
-| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `text`, `button` |
+| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `text`, `colour`, `button` |
 | `ctx.sessions` | the current session, and connect/disconnect events |
 | `ctx.native` | `setFeature`, and whether the native module is connected |
 | `ctx.timers` | timers the host cancels with the plugin |
@@ -139,6 +139,15 @@ const dungeons = ctx.settings.multiSelect('portals', {
 });
 // dungeons.get() -> readonly string[];  dungeons.has('1817') -> boolean
 ```
+
+`colour` is a colour, drawn as a picker with a bar for red, green, blue and
+alpha. Its value is **always `#rrggbbaa` in lower case**, whatever spelling it
+was set from: `#RRGGBB` is accepted and made opaque, and anything else is
+refused so that what the setting holds stays a colour. That is the point of the
+kind rather than a `text` field — a colour nothing has to validate is one the
+overlay can draw and the injected module can apply without either of them
+inventing a fallback. A default that is not a colour fails the plugin's setup,
+like a `select` default that is not one of its options.
 
 `visibleWhen` hides rather than disables — against the overlay's usual rule,
 because a plugin with one knob per planner would otherwise show several sets of
