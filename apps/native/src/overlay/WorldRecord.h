@@ -65,10 +65,29 @@ struct MoveCommand {
     /// a cursor is measured against the game's own camera, so it already names
     /// a point on the map.
     bool from_player = false;
+    /// Whether this target is spent by the first frame that acts on it.
+    ///
+    /// **Because an offset from the player is resolved afresh every frame.** An
+    /// ordinary walk wants exactly that: the target stays a fixed distance ahead
+    /// and the character keeps walking towards it for as long as the hold lasts.
+    /// A dodge that has to be out of the way *now* wants the opposite — one
+    /// frame's worth of movement, once — and reissuing the same offset on the
+    /// next frame would carry it again, and again, for as many frames as fit
+    /// inside the hold. That is a sprint, and it is the one thing the server
+    /// takes back.
+    ///
+    /// So a one-shot target is cleared by the frame that actually steps towards
+    /// it. **By the frame that steps, not by the frame that sees it**: a frame
+    /// with nothing to measure the player's own walking against issues no step
+    /// at all, and consuming the target there would drop the hop on the floor.
+    /// The hold is still what bounds how long it may wait for one.
+    ///
+    /// See `apps/runtime/src/features/dodge/Hop.ts`.
+    bool once = false;
 };
 
-/// Parses `move|x|y|speed|holdMs[|fromPlayer]`, in hundredths of a tile and
-/// milliseconds.
+/// Parses `move|x|y|speed|holdMs[|fromPlayer[|once]]`, in hundredths of a tile
+/// and milliseconds.
 ///
 /// The runtime decides *where* — it holds the world model and the planner —
 /// and the module only carries the answer to the one thread that may act on

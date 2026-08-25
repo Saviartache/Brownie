@@ -12,6 +12,7 @@ MoveTarget MoveTargetFrom(const overlay::MoveCommand& move, std::uint64_t now_ms
     target.speed = static_cast<float>(move.speed_hundredths) / 100.0F;
     target.expires_at_ms = now_ms + static_cast<std::uint64_t>(move.hold_ms);
     target.from_player = move.from_player;
+    target.once = move.once;
     return target;
 }
 
@@ -196,6 +197,16 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
             const float carried = distance < room ? distance : room;
             last_step_x_ = (toward_x / distance) * carried;
             last_step_y_ = (toward_y / distance) * carried;
+            // **Spent by the frame that stepped, not by the frame that saw
+            // it.** An offset is resolved from wherever the player is now, so a
+            // one-shot target left standing would be carried again on the next
+            // frame and every frame of the hold after it — which is a sprint,
+            // and is exactly what the server takes back. A frame with nothing
+            // to measure their own walking against issues no step and leaves
+            // the target for the next one; the hold still bounds the wait.
+            if (frame_target_.once) {
+                frame_target_.wanted = false;
+            }
         }
     }
 

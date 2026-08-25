@@ -18,7 +18,8 @@
 import type { BlastView, EntityView, SessionView, WorldView } from '@brownie/plugin-api';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
-import type { DodgeSettings, DodgeWorld } from './DodgeController.js';
+import type { DodgeSettings } from './DodgePlanner.js';
+import type { DodgeGround } from './DodgeSearch.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeCatalog } from './dodgeInputs.js';
 import { GroundCache } from './GroundCache.js';
@@ -83,11 +84,19 @@ export class DodgeScene {
     halfTiles: ENEMY_CONTACT_HALF_TILES,
   };
 
-  /** How far off a wall a *course* is planned, this plan. */
+  /** How far off a wall a *route* is planned, this plan. */
   #clearance = 0;
-  /** How far off damaging ground a *course* is planned, this plan. */
+  /** How far off damaging ground a *route* is planned, this plan. */
   #hazardClearance = 0;
   #damagingMatters = true;
+  /**
+   * Whether geometry is allowed to refuse a step at all.
+   *
+   * Off, the search plans as though the room were empty and the game's own
+   * collision is the only thing between the character and a wall — which is what
+   * somebody wants when the map data is wrong, and nothing else.
+   */
+  #wallsMatter = true;
   #minding = false;
   /** How much room to insist on, from the middle of an ordinary monster. */
   #keepAwayTiles = 0;
@@ -96,12 +105,13 @@ export class DodgeScene {
   #planAtMs = 0;
 
   /**
-   * The map, as the controller sees it.
+   * The map, as the search sees it.
    *
    * Built once and pointed at the current session, so a plan does not allocate
-   * an adapter and three closures every twentieth of a second.
+   * an adapter and three closures every twentieth of a second — and the search
+   * asks these a few thousand times per plan, not a few hundred.
    */
-  readonly world: DodgeWorld;
+  readonly world: DodgeGround;
 
   constructor(catalog: DodgeCatalog) {
     this.#catalog = catalog;
@@ -112,7 +122,7 @@ export class DodgeScene {
       isInvincible: catalog.isInvincible,
     };
     this.world = {
-      canStand: (x, y) => this.#ground.canStand(x, y, this.#clearance),
+      canStand: (x, y) => !this.#wallsMatter || this.#ground.canStand(x, y, this.#clearance),
       isDamaging: (x, y) =>
         this.#damagingMatters && this.#ground.isDamaging(x, y, this.#hazardClearance),
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
@@ -164,12 +174,13 @@ export class DodgeScene {
     this.#motion.prune(now);
   }
 
-  /** Looks at the fight the controller is about to plan against. */
+  /** Looks at the fight the planner is about to search through. */
   observe(session: SessionView, controls: DodgeControls, planning: DodgeSettings): void {
     const self = session.self;
     const map = session.world;
     this.#ground.aim(map, self.x, self.y, map.gameTimeMs);
 
+    this.#wallsMatter = controls.walls.avoid.get();
     // **The margin is dropped when the player is already inside it.** Demanding
     // clearance the current position does not have makes every step out of it
     // un-walkable too — including the ones that lead away — so the planner would

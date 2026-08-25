@@ -5,21 +5,21 @@
  * genuinely turns on all twenty-odd of its numbers and every one of them has a
  * reason, but a feature that asks twenty questions before it will switch on is a
  * feature nobody switches on. A preset answers the one question a person
- * actually has — how hard should it try — by writing the eleven numbers that
+ * actually has — how hard should it try — by writing the twelve numbers that
  * trade caution against interference; the rest belong to the machine and the
  * connection and are left alone. Moving one by hand is what turns the label into
  * Custom, so it never claims a preset the numbers are not.
  *
  * **Here rather than in the plugin** because it is the largest single thing the
  * feature does and none of the rest of it is about panels: what the planner does
- * with the numbers is `DodgeController`, how the fight is assembled is
- * `DodgeScene`, and the plugin is what puts the two together. See
- * `dodgePresets` for which numbers a preset owns and why the others are not
- * its business.
+ * with the numbers is `DodgePlanner`, how the fight is assembled is `DodgeScene`,
+ * and the plugin is what puts the two together. See `dodgePresets` for which
+ * numbers a preset owns and why the others are not its business.
  */
 
 import type { PluginContext, SessionView, SettingHandle } from '@brownie/plugin-api';
-import type { DodgeSettings } from './DodgeController.js';
+import type { DodgeSettings } from './DodgePlanner.js';
+import { MAX_HOP_TILES } from './Hop.js';
 import {
   DODGE_PRESETS,
   DodgePresetId,
@@ -28,7 +28,7 @@ import {
   type DodgeTuning,
 } from './dodgePresets.js';
 
-/** The eleven a preset owns, as handles. See {@link DodgeTuning}. */
+/** The twelve a preset owns, as handles. See {@link DodgeTuning}. */
 export type DodgeTuningHandles = {
   readonly [K in keyof DodgeTuning]: SettingHandle<number>;
 };
@@ -51,6 +51,11 @@ export interface DodgeControls {
   readonly spacing: {
     readonly mindMonsters: SettingHandle<boolean>;
   };
+  readonly hop: {
+    readonly enabled: SettingHandle<boolean>;
+    readonly tiles: SettingHandle<number>;
+    readonly cooldownMs: SettingHandle<number>;
+  };
   readonly driving: {
     readonly respectIntent: SettingHandle<boolean>;
     readonly interceptControl: SettingHandle<boolean>;
@@ -60,23 +65,25 @@ export interface DodgeControls {
   };
 }
 
-/** What the controller is tuned to right now. */
+/** What the planner is tuned to right now. */
 export function planningSettings(controls: DodgeControls): DodgeSettings {
   const tuning = controls.tuning;
   return {
     horizonMs: tuning.horizonMs.get(),
+    tickMs: tuning.tickMs.get(),
     reactWithinMs: tuning.reactWithinMs.get(),
-    engageWithinTiles: tuning.engageWithinTiles.get(),
-    sampleStepMs: tuning.sampleStepMs.get(),
     headings: tuning.headings.get(),
     hitScale: tuning.hitScale.get(),
     padTiles: tuning.padTiles.get(),
     leadMs: controls.leadMs.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
-    urgentWithinMs: tuning.urgentWithinMs.get(),
-    avoidWalls: controls.walls.avoid.get(),
-    avoidDamagingGround: controls.hazards.avoid.get(),
+    holdGroundWeight: tuning.holdGroundWeight.get(),
+    greed: tuning.greed.get(),
+    maxExpansions: tuning.maxExpansions.get(),
+    hopEnabled: controls.hop.enabled.get(),
+    hopTiles: controls.hop.tiles.get(),
+    hopCooldownMs: controls.hop.cooldownMs.get(),
   };
 }
 
@@ -117,26 +124,39 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 
   // ── What the preset writes ──────────────────────────────────────────────
   //
-  // The eleven below are a preset's whole assignment: how soon and how near
-  // trouble has to be, how much margin to leave around it, and how hard to
-  // think about the answer. Moving any of them by hand is what turns the label
-  // above into Custom — see `applyPreset` and `onTuningChanged`.
+  // The twelve below are a preset's whole assignment: how soon trouble has to
+  // be, how much margin to leave around it, how hard to hold the player's own
+  // ground, and how hard to think about the answer. Moving any of them by hand
+  // is what turns the label above into Custom.
 
   // **Long enough that running away stops looking clever.** A shot travels
   // faster than a character, so fleeing along its own line always survives a
-  // *short* window — and a planner whose window is short therefore prefers the
-  // backpedal that gets it cornered over the sidestep that ends the problem.
-  // The reference implementation answered this with a bias term against moving
-  // along the incoming flow; the horizon is the same answer without a weight to
-  // tune, because at a second the arithmetic already shows the flight failing.
+  // *short* window — and a planner whose horizon is short therefore prefers the
+  // backpedal that gets it cornered over the sidestep that ends the problem. At
+  // nearly a second the arithmetic already shows the flight failing, which is
+  // why nothing here needs a term against retreat.
   const horizonMs = settings.range('horizonMs', {
     label: 'Look ahead (ms)',
     group: 'Reaction',
     advanced: true,
-    default: 1000,
+    default: 900,
     min: 300,
     max: 2000,
     step: 50,
+  });
+  // **The lattice, and the biggest single lever on what a plan costs.** One tick
+  // is one step of walking, so it is also the smallest movement the planner can
+  // describe — about seven tenths of a tile at an ordinary speed, which is a
+  // bullet's width plus the player's. Halving it doubles both the depth needed
+  // to see the same distance and the work at every level of it.
+  const tickMs = settings.range('tickMs', {
+    label: 'Planning step (ms)',
+    group: 'Reaction',
+    advanced: true,
+    default: 100,
+    min: 50,
+    max: 200,
+    step: 10,
   });
   // **The knob that decides whether this is help or a leash.** Looking a second
   // ahead is what tells a real escape from a postponement; *acting* on
@@ -152,67 +172,17 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 1200,
     step: 20,
   });
-  // **How close a shot gets before the character is moved, and the setting that
-  // decides how the whole feature reads.** Shots in this game live for a second
-  // or two, so a planner that acts on anything that will *reach* the player
-  // eventually is acting on nearly everything on the screen: the character
-  // shuffles from the moment a monster fires and is out of position by the time
-  // the shot is anywhere near. Live report: "we catch half the shots we should
-  // not, because you start dodging them at the spawn." Measured where the shot
-  // is right now, so it means what it says.
-  //
-  // **It never changes what is predicted.** Everything in the air is still
-  // swept and still ranks the courses, which is what stops a dodge of the near
-  // shot from walking into the far one. This decides only when to speak.
-  //
-  // Safe to keep tight because it is not the only trigger: a shot too fast, or
-  // a pattern too wide, to be answered from this distance raises its hand on the
-  // escape deadline instead — see `ThreatField.escapeTiles` — which asks whether
-  // there is still *time*, not how far away anything is. Blasts are not gated by
-  // it at all: an area effect is a place, not an approach.
-  const engageWithinTiles = settings.range('engageWithinTiles', {
-    label: 'Start dodging a shot within (tiles)',
-    group: 'Reaction',
-    advanced: true,
-    default: 2.5,
-    min: 1,
-    max: 8,
-    step: 0.25,
-  });
-  // **Coarser than a stepped planner's step, and that is the point.** The sweep
-  // between two samples is exact, so this bounds how far a *curve* may bend
-  // between them rather than how far a shot may travel — a straight shot is
-  // described perfectly by two samples however far apart. It is the single
-  // biggest lever on what a plan costs.
-  const sampleStepMs = settings.range('stepMs', {
-    label: 'Prediction sample (ms)',
-    group: 'Reaction',
-    advanced: true,
-    default: 60,
-    min: 20,
-    max: 120,
-    step: 10,
-  });
-  // Each one is swept, and in a dense pattern each is swept at three speeds — so
-  // this is the other big lever on cost. Sixteen is what the reference's own
-  // rollout planner settled on.
+  // Each direction is a branch at every level of the search, so this is the
+  // other big lever on cost. Twelve is a thirty-degree ring, which is finer than
+  // the width of a gap at the distance a gap is away.
   const headings = settings.range('headings', {
     label: 'Directions considered',
     group: 'Reaction',
     advanced: true,
-    default: 16,
+    default: 12,
     min: 8,
-    max: 48,
+    max: 32,
     step: 4,
-  });
-  const urgentWithinMs = settings.range('urgentWithinMs', {
-    label: 'Trouble is urgent within (ms)',
-    group: 'Reaction',
-    advanced: true,
-    default: 160,
-    min: 50,
-    max: 500,
-    step: 10,
   });
 
   const hitScale = settings.range('hitScale', {
@@ -233,9 +203,9 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 1,
     step: 0.05,
   });
-  // What `positionAt` does not model — turn rate and the client's own
-  // clock — grows with how far ahead it is asked. This is the price of that, and
-  // it is why the planner can be trusted tightly up close.
+  // What `positionAt` does not model — turn rate and the client's own clock —
+  // grows with how far ahead it is asked. This is the price of that, and it is
+  // why the planner can be trusted tightly up close.
   const driftTilesPerSecond = settings.range('driftTilesPerSecond', {
     label: 'Distrust far predictions (tiles/s)',
     group: 'Safety',
@@ -245,28 +215,66 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 1,
     step: 0.05,
   });
+  // **A gradient, not a bar, which is what changed.** The search charges for
+  // every tile of room a step is short of this, so it is no longer "the least
+  // that counts as safe" but "the point at which more room stops being worth
+  // walking for". Raising it makes the planner spread out; lowering it lets it
+  // thread.
   const safeClearanceTiles = settings.range('safeClearanceTiles', {
-    label: 'Room that counts as safe (tiles)',
+    label: 'Room worth walking for (tiles)',
     group: 'Safety',
     advanced: true,
-    default: 0.08,
+    default: 0.25,
     min: 0,
-    max: 0.5,
+    max: 0.8,
     step: 0.01,
+  });
+  // **The number the whole feel of the feature is quoted against.** It is what a
+  // route is charged, per tick, for each tile it sits away from where the player
+  // meant to be — so raising it buys a tighter dodge that gives the ground back
+  // sooner, and lowering it lets the planner walk further to be safer. Nothing
+  // else in the cost model is on the panel, because everything else is a ratio
+  // against this one.
+  const holdGroundWeight = settings.range('holdGroundWeight', {
+    label: 'Hold your ground',
+    group: 'Control',
+    advanced: true,
+    default: 1,
+    min: 0.2,
+    max: 3,
+    step: 0.1,
+  });
+  // **What the search is allowed to settle for.** One searches exactly and
+  // slowest; above it the route is within this factor of the best one and is
+  // found in a fraction of the expansions. A plan is remade fifty times a second
+  // and thrown away before it is walked, so a little slack is nearly free.
+  const greed = settings.range('greed', {
+    label: 'Search slack (×)',
+    group: 'Reaction',
+    advanced: true,
+    default: 1.6,
+    min: 1,
+    max: 3,
+    step: 0.1,
+  });
+  // The backstop rather than a target: an ordinary plan settles in a fraction of
+  // this, and what it bounds is the worst case — a screen full of fire with no
+  // clean way through, which is exactly when a plan must still arrive on time.
+  const maxExpansions = settings.range('maxExpansions', {
+    label: 'Thinking budget (nodes)',
+    group: 'Reaction',
+    advanced: true,
+    default: DODGE_PRESETS[DodgePresetId.Balanced].maxExpansions,
+    min: 100,
+    max: 2000,
+    step: 50,
   });
   // **Room to dodge in, and the reason it is a distance rather than a hit
   // test.** A monster pressed against the player has already taken the space
   // every escape needs, so by the time contact damage says so there is nowhere
-  // left to go. Raised on its own to the distance at which the bodies touch, so
-  // nought here still means "not inside it".
-  //
-  // Stated from the middle of an ordinary, one-tile monster; what actually holds
-  // is the gap it works out to, so a boss four tiles across is kept four times
-  // as far off its centre and exactly as far off its edge. See
-  // `EnemyBodies.nearEdgeOf`.
-  //
-  // Owned by the preset, unlike the switch in the spacing group: how much room
-  // to insist on is exactly the trade the preset is about.
+  // left to go. Stated from the middle of an ordinary, one-tile monster; what
+  // actually holds is the gap it works out to, so a boss four tiles across is
+  // kept four times as far off its centre and exactly as far off its edge.
   const keepAwayTiles = settings.range('keepAwayTiles', {
     label: 'Keep monsters at least (tiles)',
     group: 'Spacing',
@@ -312,6 +320,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     min: 0,
     max: 1.5,
     step: 0.05,
+    visibleWhen: { key: 'avoidWalls', equals: [true] },
   });
   const avoidDamagingGround = settings.boolean('avoidDamagingGround', {
     label: 'Refuse to walk onto damaging ground',
@@ -323,10 +332,10 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // into a wall costs a step; standing in lava costs health every tick, and
   // there is nothing to dodge once you are in it. The planner also has no way to
   // be sure where the character will actually end up — the server has its own
-  // opinion, the command lands a frame late — so a course planned to stop
-  // exactly at the edge is a course that gets a toe in it. Dropped when the
-  // player is already standing that close, exactly as the wall margin is, so it
-  // can never be the thing holding them there.
+  // opinion, the command lands a frame late — so a route planned to stop exactly
+  // at the edge is a route that gets a toe in it. Dropped when the player is
+  // already standing that close, exactly as the wall margin is, so it can never
+  // be the thing holding them there.
   const hazardClearanceTiles = settings.range('hazardClearanceTiles', {
     label: 'Keep clear of lava and damaging ground by (tiles)',
     group: 'Safety',
@@ -358,6 +367,45 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     group: 'Spacing',
     advanced: true,
     default: true,
+  });
+
+  // ── The emergency step ──────────────────────────────────────────────────
+  //
+  // A frame's worth of movement spent at once, for the shot that lands before a
+  // step of walking finishes. Its own group because it is the one thing here
+  // that is not a walk, and because the numbers that bound it are the module's
+  // rather than a matter of taste — see `Hop.ts`.
+
+  const hopEnabled = settings.boolean('hopEnabled', {
+    label: 'Sidestep instantly when there is no time to walk',
+    group: 'Emergency',
+    default: true,
+  });
+  // Capped at what one frame may actually carry. Asking for more does not move
+  // the character further — the module clamps it — it only makes the planner
+  // choose a landing place nothing ever reaches.
+  const hopTiles = settings.range('hopTiles', {
+    label: 'Instant sidestep distance (tiles)',
+    group: 'Emergency',
+    advanced: true,
+    default: MAX_HOP_TILES,
+    min: 0.2,
+    max: MAX_HOP_TILES,
+    step: 0.05,
+    visibleWhen: { key: 'hopEnabled', equals: [true] },
+  });
+  // **What stops it becoming a way of walking.** One frame at the limit is a
+  // step the character could have taken; one every frame is a sprint, and the
+  // server takes those back. Long enough that a burst is a burst.
+  const hopCooldownMs = settings.range('hopCooldownMs', {
+    label: 'And no sooner than every (ms)',
+    group: 'Emergency',
+    advanced: true,
+    default: 400,
+    min: 100,
+    max: 2000,
+    step: 50,
+    visibleWhen: { key: 'hopEnabled', equals: [true] },
   });
 
   const respectIntent = settings.boolean('respectIntent', {
@@ -402,15 +450,16 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 
   const tuning: DodgeTuningHandles = {
     horizonMs,
+    tickMs,
     reactWithinMs,
-    engageWithinTiles,
-    sampleStepMs,
     headings,
-    urgentWithinMs,
     hitScale,
     padTiles,
     driftTilesPerSecond,
     safeClearanceTiles,
+    holdGroundWeight,
+    greed,
+    maxExpansions,
     keepAwayTiles,
   };
 
@@ -424,6 +473,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     hazards: { avoid: avoidDamagingGround, clearanceTiles: hazardClearanceTiles },
     avoidBlasts,
     spacing: { mindMonsters },
+    hop: { enabled: hopEnabled, tiles: hopTiles, cooldownMs: hopCooldownMs },
     driving: { respectIntent, interceptControl, speedPercent, holdMs, cursorWalk },
   };
 }
@@ -431,9 +481,9 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 /**
  * Keeps the label and the numbers telling the same story.
  *
- * Choosing a preset writes its eleven; moving any of the eleven by hand makes
- * the label Custom. The guard is what stops the first of the eleven writes
- * flipping the label and the remaining ten landing on a preset nobody chose.
+ * Choosing a preset writes its twelve; moving any of the twelve by hand makes
+ * the label Custom. The guard is what stops the first of the twelve writes
+ * flipping the label and the remaining eleven landing on a preset nobody chose.
  */
 function bindPreset(
   context: PluginContext,
@@ -442,15 +492,16 @@ function bindPreset(
 ): void {
   const readTuning = (): DodgeTuning => ({
     horizonMs: tuning.horizonMs.get(),
+    tickMs: tuning.tickMs.get(),
     reactWithinMs: tuning.reactWithinMs.get(),
-    engageWithinTiles: tuning.engageWithinTiles.get(),
-    sampleStepMs: tuning.sampleStepMs.get(),
     headings: tuning.headings.get(),
-    urgentWithinMs: tuning.urgentWithinMs.get(),
     hitScale: tuning.hitScale.get(),
     padTiles: tuning.padTiles.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
+    holdGroundWeight: tuning.holdGroundWeight.get(),
+    greed: tuning.greed.get(),
+    maxExpansions: tuning.maxExpansions.get(),
     keepAwayTiles: tuning.keepAwayTiles.get(),
   });
 

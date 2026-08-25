@@ -446,6 +446,7 @@ void MoveRecordsAreReadStrictly() {
     Check(brownie::overlay::ParseMoveRecord("move|1|2|600|400|0", move),
           "and nought is the map, said out loud");
     Check(!move.from_player, "which is the same as not saying it");
+    Check(!move.once, "and a runtime that says nothing means a target that stands");
 
     // Half a destination is a destination somewhere else, so a short or
     // malformed record leaves the last one alone rather than steering by it.
@@ -462,6 +463,17 @@ void MoveRecordsAreReadStrictly() {
     // that never happens, and saying so beats issuing a zero.
     Check(!brownie::overlay::ParseMoveRecord("move|1|2|0|400", kept), "no speed is refused");
     Check(!brownie::overlay::ParseMoveRecord("move|1|2|600|0", kept), "and no lifetime too");
+
+    // The dodge's hop: one frame's worth of movement, once. An offset is
+    // resolved from wherever the player is on the frame it lands, so one left
+    // standing would be carried again on every frame of the hold — which is a
+    // sprint, and the one thing the server takes back.
+    Check(brownie::overlay::ParseMoveRecord("move|-45|80|12000|60|1|1", move),
+          "a one-shot move parses");
+    Check(move.once && move.from_player, "and says both of the things it is");
+    Check(brownie::overlay::ParseMoveRecord("move|-45|80|12000|60|1|0", move),
+          "and nought is a target that stands, said out loud");
+    Check(!move.once, "which is the same as not saying it");
 }
 
 void AimRecordsAreReadStrictly() {
@@ -1839,6 +1851,11 @@ void RecordsBecomeTargetsThatExpire() {
     Check(std::fabs(target.speed - 7.25F) < 0.001F, "so does the speed");
     // Stamped where it arrived, because the two sides do not share a clock.
     Check(target.expires_at_ms == 1200, "the hold is measured from arrival");
+    Check(!target.once, "and an ordinary walk stands until it expires");
+
+    const brownie::overlay::MoveCommand hop{-40, 60, 12000, 60, true, true};
+    const auto hopped = brownie::app::MoveTargetFrom(hop, 1000);
+    Check(hopped.once && hopped.from_player, "a hop carries both of its flags across");
 
     const brownie::overlay::AimCommand aim{-50, 75, 300};
     const auto aimed = brownie::app::AimTargetFrom(aim, 5000);

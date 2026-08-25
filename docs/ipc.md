@@ -368,7 +368,7 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | ------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
-| `move`  | x·100, y·100, speed·100, holdMs, fromPlayer       | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map |
+| `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
 | `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
@@ -455,6 +455,23 @@ resolution on the side that reads the position every frame.
 The chord that walks to the cursor stays a place, and should: a cursor is
 measured against the game's own camera, so it already names a point on the map
 that owes nothing to the runtime's world model.
+
+**`once` exists because an offset is resolved afresh on every frame**, which is
+exactly what makes an ordinary walk work: the target stays a fixed distance
+ahead and the character keeps walking towards it for as long as the hold lasts.
+The dodge's emergency step wants the opposite — one frame's worth of movement,
+at once — and leaving the same offset standing carries it again on the next
+frame, and the one after, as many times as fit inside the hold. At a hundred and
+forty frames a second a hold of twenty milliseconds is three of them, which is
+two tiles rather than the two thirds of one the planner chose, and the server
+takes the difference back. So a one-shot target is cleared by the frame that
+steps towards it — **by the frame that steps, not the frame that sees it**: a
+frame with nothing to measure the player's own walking against issues no step at
+all, and consuming the target there would drop the step on the floor. The hold
+still bounds how long it may wait for one. See
+`apps/runtime/src/features/dodge/Hop.ts`, which is also where the distance is
+capped: the module's own per-frame limit is what one of these can carry, and
+asking for more does not move the character further.
 
 `holdMs` is how a target stops mattering. The runtime says *nothing* when it
 decides to stand still or hold fire, so silence has to mean stop on its own —

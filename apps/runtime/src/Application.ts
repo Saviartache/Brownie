@@ -115,6 +115,16 @@ const CURSOR_TRACK_FEATURE = 'cursor.track';
  */
 const CURSOR_CLAIM_INTERVAL_MS = 1000;
 
+/**
+ * Whether a target is spent by the first frame that steps towards it.
+ *
+ * An ordinary walk is carried for as long as its hold lasts; the dodge's hop is
+ * one frame's worth of movement and no more. See `dodge/Hop.ts` and
+ * `overlay::MoveCommand::once`.
+ */
+const KEEP = 0;
+const SPEND_ONCE = 1;
+
 /** One walk command, in the hundredths of a tile everything on this link uses. */
 function moveRecord(
   x: number,
@@ -122,6 +132,7 @@ function moveRecord(
   speedTilesPerSecond: number,
   holdMs: number,
   measuredFrom: typeof FROM_MAP | typeof FROM_PLAYER,
+  lifetime: typeof KEEP | typeof SPEND_ONCE = KEEP,
 ): string {
   return [
     'move',
@@ -130,6 +141,7 @@ function moveRecord(
     Math.round(speedTilesPerSecond * 100),
     Math.round(holdMs),
     measuredFrom,
+    lifetime,
   ].join('|');
 }
 
@@ -548,6 +560,16 @@ export class Application {
           moveBy: (offsetX, offsetY, speedTilesPerSecond, holdMs) => {
             this.#native.publishRecord(
               moveRecord(offsetX, offsetY, speedTilesPerSecond, holdMs, FROM_PLAYER),
+            );
+          },
+          // **The same record, spent by the frame that acts on it.** An offset
+          // is resolved from wherever the player is on the frame it lands, so
+          // one left standing is carried again on the next frame and every
+          // frame of the hold after it — which is a sprint the server takes
+          // back, not the single step the dodge asked for. See `dodge/Hop.ts`.
+          hopBy: (offsetX, offsetY, speedTilesPerSecond, holdMs) => {
+            this.#native.publishRecord(
+              moveRecord(offsetX, offsetY, speedTilesPerSecond, holdMs, FROM_PLAYER, SPEND_ONCE),
             );
           },
           // Bracketed, so a set half-received is never drawn: the module stages

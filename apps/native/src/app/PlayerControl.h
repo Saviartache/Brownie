@@ -47,6 +47,12 @@ struct MoveTarget {
     /// Whether {@link x} and {@link y} are an offset from the player rather
     /// than a place on the map. See `overlay::MoveCommand::from_player`.
     bool from_player = false;
+    /// Whether the first frame that steps towards this spends it.
+    ///
+    /// The dodge's hop: one frame's worth of movement, once. See
+    /// `overlay::MoveCommand::once` for why an offset that persists would carry
+    /// the character further on every frame of the hold.
+    bool once = false;
 };
 
 /// Where the runtime wants the player's shots to go, and for how long.

@@ -157,9 +157,12 @@ bool ParseMoveRecord(std::string_view record, MoveCommand& out) noexcept {
 
     // Appended after the four this record has always carried, and read the way
     // the header describes: an older runtime stops before it and means a place
-    // on the map, which is what it only ever sent.
+    // on the map, which is what it only ever sent. The same again for the
+    // one-shot flag, which an older runtime never sends and never means.
     int from_player = 0;
     (void)ParseInt(TakeField(rest), from_player);
+    int once = 0;
+    (void)ParseInt(TakeField(rest), once);
 
     // All or none. Half a destination is a destination somewhere else.
     out.x_hundredths = x;
@@ -167,6 +170,7 @@ bool ParseMoveRecord(std::string_view record, MoveCommand& out) noexcept {
     out.speed_hundredths = speed;
     out.hold_ms = hold;
     out.from_player = from_player != 0;
+    out.once = once != 0;
     return true;
 }
 

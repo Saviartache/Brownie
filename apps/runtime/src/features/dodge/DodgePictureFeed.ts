@@ -15,7 +15,7 @@
 
 import type { SessionView } from '@brownie/plugin-api';
 import { dodgeMarks } from './DodgeMarks.js';
-import type { DodgeControls } from './dodgeControls.js';
+import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeOutput, DodgeView } from './dodgeInputs.js';
 import type { DodgeScene } from './DodgeScene.js';
 import { shotPaths } from './ShotPaths.js';
@@ -77,7 +77,13 @@ export class DodgePictureFeed {
         selfX: self.x,
         selfY: self.y,
         gameTimeMs: world.gameTimeMs,
-        engageTiles: controls.tuning.engageWithinTiles.get(),
+        // **The ground the character can reach before trouble becomes this
+        // moment's problem**, which is what the planner's reaction window
+        // actually means now that there is no engagement ring. A shot outside
+        // this circle is one the player can still walk away from; one inside it
+        // is one the planner is about to answer, and having the two drawn is how
+        // "why did it move" gets answered without a log line.
+        engageTiles: (walkSpeedOf(session, controls) * controls.tuning.reactWithinMs.get()) / 1000,
         keepAwayTiles: scene.keepAwayTiles,
         bodies: scene.bodies,
         blasts: scene.blastsIn(world, controls),

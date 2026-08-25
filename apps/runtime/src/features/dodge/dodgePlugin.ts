@@ -16,11 +16,11 @@
  * **This file is the wiring and the order of precedence, and nothing else.**
  * The panel is `dodgeControls`, the fight the planner is handed is `DodgeScene`,
  * the arithmetic that turns a plan into a step is `dodgeCommand`, the picture is
- * `DodgePictureFeed`, and the planner itself is `DodgeController`.
+ * `DodgePictureFeed`, and the planner itself is `DodgePlanner`.
  *
  * **Three things decide who is driving, in this order.** The chord the player
  * holds to walk somewhere wins outright — a person pointing at a place has more
- * information than any planner. Otherwise the controller decides, and its first
+ * information than any planner. Otherwise the planner decides, and its first
  * answer is almost always "say nothing", which leaves the player's own walking
  * untouched. Only when their course is genuinely about to cost them does it
  * speak, and then it speaks continuously until it does not have to.
@@ -40,7 +40,7 @@
  */
 
 import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
-import { DodgeController } from './DodgeController.js';
+import { DodgePlanner } from './DodgePlanner.js';
 import { DodgePictureFeed } from './DodgePictureFeed.js';
 import { DodgeScene } from './DodgeScene.js';
 import { declareDodgeControls, planningSettings, walkSpeedOf } from './dodgeControls.js';
@@ -52,12 +52,14 @@ import { registerHitRedirect } from './hitRedirect.js';
  * How often a plan is made when nothing prompts one.
  *
  * Short enough that a shot entering the action window is acted on within a frame
- * or two of doing so. **Measured rather than assumed**: the worst case this
- * planner has — twenty-five shots arranged so that every step tier has to be
- * scored, with twenty monsters in reach for the spacing term to measure against
- * — costs about 1.5 ms, so fifty plans a second is a few per cent of one core
- * and the ordinary case is a fraction of that, because a plan with nothing in
- * reach does no sweeping at all.
+ * or two of doing so.
+ *
+ * **What makes fifty plans a second affordable is that most of them stop after
+ * the probe.** A plan whose player is not about to be hit costs one walk down
+ * the lattice — a handful of index queries — and never opens the search at all;
+ * the budgeted search behind it is what the busy ones cost, and its worst case
+ * is bounded by `maxExpansions` rather than by how much is on the screen. See
+ * `DodgePlanner`, and the benchmark that holds both to a figure.
  */
 const PLAN_INTERVAL_MS = 20;
 
@@ -72,6 +74,18 @@ const MIN_PLAN_GAP_MS = 6;
 
 /** The shortest hold the module will accept, for a command that ends a walk. */
 const RELEASE_HOLD_MS = 1;
+
+/**
+ * How long a hop stands before it lapses unspent.
+ *
+ * **A deadline, not a duration.** The record is spent by the first frame that
+ * actually steps towards it, so this only bounds how long it may wait for one —
+ * and a frame with nothing to measure the player's own walking against issues no
+ * step at all, which is the ordinary case immediately after a quiet stretch. A
+ * few frames of grace; past that the situation it was chosen for has moved on
+ * and the next plan will choose again.
+ */
+const HOP_HOLD_MS = 60;
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
   return definePlugin({
@@ -88,7 +102,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // packet, and nothing the planner below reads. See `hitRedirect`.
       registerHitRedirect(context);
 
-      const controller = new DodgeController();
+      const planner = new DodgePlanner();
       const scene = new DodgeScene(inputs);
       const picture = new DodgePictureFeed(inputs.output, inputs.view);
 
@@ -106,7 +120,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       let commanding = false;
 
       context.onDispose(() => {
-        controller.reset();
+        planner.reset();
         scene.reset();
         picture.reset();
         commanding = false;
@@ -116,7 +130,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // last map names something else in this one, so a track kept across the
       // join is a velocity attributed to a stranger.
       context.sessions.onConnected(() => {
-        controller.reset();
+        planner.reset();
         scene.reset();
       });
 
@@ -144,7 +158,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const target = inputs.cursorWalk.target();
         if (target === undefined) return false;
 
-        controller.reset();
+        planner.reset();
         commanding = true;
         inputs.output.moveTo(
           target.x,
@@ -183,7 +197,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const speed = walkSpeedOf(session, controls);
         const intent = controls.driving.respectIntent.get() ? inputs.steer.direction() : undefined;
 
-        const plan = controller.plan(
+        const plan = planner.plan(
           {
             x: self.x,
             y: self.y,
@@ -228,6 +242,20 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         }
 
         commanding = true;
+        // **A hop is the same offset with a different lifetime**, and the module
+        // is the only side that can spend it correctly: an offset is resolved
+        // from wherever the character is on the frame it lands, so one left
+        // standing would be carried again on every frame of the hold. See
+        // `DodgeOutput.hopBy`.
+        if (command.hop) {
+          inputs.output.hopBy(
+            command.offsetX,
+            command.offsetY,
+            command.speedTilesPerSecond,
+            HOP_HOLD_MS,
+          );
+          return;
+        }
         inputs.output.moveBy(command.offsetX, command.offsetY, command.speedTilesPerSecond, hold);
       };
 

@@ -56,6 +56,24 @@ export interface DodgeOutput {
    */
   moveBy(offsetX: number, offsetY: number, speedTilesPerSecond: number, holdMs: number): void;
   /**
+   * The same, spent by the first frame that acts on it. See `Hop.ts`.
+   *
+   * **Why it needs to be a different record and not a shorter hold.** An offset
+   * is resolved against wherever the player is on the frame it lands, which is
+   * exactly what makes an ordinary walk work: the target stays a fixed distance
+   * ahead and the character keeps walking towards it. A hop wants one frame's
+   * worth of movement and no more, and leaving the same offset standing would
+   * carry it again on the next frame, and the one after — as many times as fit
+   * inside the hold. At a hundred and forty frames a second a hold of twenty
+   * milliseconds is three of them, which is two tiles rather than the two thirds
+   * of one the planner chose, and the server takes the difference back.
+   *
+   * The hold is still what bounds how long it may wait: a frame with nothing to
+   * measure the player's own walking against issues no step, and the hop is
+   * spent by the frame that steps rather than by the frame that sees it.
+   */
+  hopBy(offsetX: number, offsetY: number, speedTilesPerSecond: number, holdMs: number): void;
+  /**
    * Replaces the picture the module is drawing over the map.
    *
    * Wholesale, and both halves together, because a set half-replaced is a

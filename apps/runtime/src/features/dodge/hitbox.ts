@@ -84,8 +84,8 @@ export function projectileHalfTiles(collisionMultiplier: number): number {
  * projectile's own extent, the player's, and a pad.
  *
  * @param padTiles Margin for everything the model does not know — see
- *   {@link ThreatField}'s drift term, which is where most of it now lives. It
- *   has no default on purpose.
+ *   `ShotTracks`' drift term, which is where most of it now lives. It has no
+ *   default on purpose.
  */
 export function effectiveHalf(
   projectileHalfTiles: number,

@@ -11,15 +11,22 @@
  * **An offset, never a place.** Where the player is arrives on the wire five
  * times a second while the character walks at the frame rate, so a heading added
  * to this side's idea of their position names somewhere they may already have
- * walked past — see `DodgeOutput.moveBy`. What comes out of here is the
- * step itself, and the module measures it from the position only it can see.
+ * walked past — see `DodgeOutput.moveBy`. What comes out of here is the step
+ * itself, and the module measures it from the position only it can see.
+ *
+ * **A hop is the same offset with a different lifetime**, and that is the whole
+ * of what makes it instant: the module spends its entire per-frame allowance on
+ * it and then the target is gone, where an ordinary walk keeps being carried
+ * towards for as long as its hold lasts. See `Hop.ts`, and `DodgeOutput.hopBy`
+ * for why the difference cannot be expressed as a shorter hold.
  *
  * Pure, and separate from the plugin, because every rule in it is a rule about
  * arithmetic that is worth checking without a session.
  */
 
 import type { Position } from '@brownie/plugin-api';
-import type { DodgePlan } from './DodgeController.js';
+import type { DodgePlan } from './DodgePlanner.js';
+import { HOP_SPEED_TILES_PER_SECOND } from './Hop.js';
 
 /**
  * How far ahead the module is pointed at, at least.
@@ -44,6 +51,13 @@ export interface WalkCommand {
   readonly offsetY: number;
   /** Tiles per second the step may cover. */
   readonly speedTilesPerSecond: number;
+  /**
+   * Whether the module should spend it on one frame and then forget it.
+   *
+   * The emergency step. Everything else about the command is the same, and the
+   * module still clamps it to what a single frame may carry.
+   */
+  readonly hop: boolean;
 }
 
 export interface WalkRequest {
@@ -71,7 +85,21 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   const plan = request.plan;
   if (!plan.steer) return undefined;
 
-  // At full speed, always: a course that is worth walking is worth arriving at,
+  // **The hop is not adjusted for what they are pressing, and does not need to
+  // be.** It is a single frame, so the ground they cover under their own power
+  // during it is a fraction of a tile — and the module already subtracts exactly
+  // that from what it carries, from the position only it can see. Subtracting a
+  // guess about it here as well would take the same ground off twice.
+  if (plan.hop && plan.stepTiles > 0) {
+    return {
+      offsetX: plan.dirX * plan.stepTiles,
+      offsetY: plan.dirY * plan.stepTiles,
+      speedTilesPerSecond: HOP_SPEED_TILES_PER_SECOND,
+      hop: true,
+    };
+  }
+
+  // At full speed, always: a step that is worth walking is worth arriving at,
   // and how far to go is the plan's own answer rather than something to spend
   // speed on. Crossing a lane of fire slowly is the one way of crossing it that
   // does not work.
@@ -82,10 +110,27 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   // because a command past the server's own limit is what makes it pull the
   // character back; the *limit* is what this spends, and no more.
   const speed = plan.crowded ? request.fullSpeedTilesPerSecond : request.speedTilesPerSecond;
+  const intent = request.intent;
+  const standing = plan.dirX === 0 && plan.dirY === 0;
+
+  // **Standing still deliberately, against a player who is walking somewhere
+  // that costs them.** There is no step to correct here — the correction *is*
+  // the command, and it is their own input turned around. Kept apart from the
+  // ordinary case below because the guard there is a test against the planned
+  // direction, and there is not one.
+  if (standing) {
+    if (!request.cancelIntent || intent === undefined) return undefined;
+    return {
+      offsetX: -intent.x * MIN_TARGET_TILES,
+      offsetY: -intent.y * MIN_TARGET_TILES,
+      speedTilesPerSecond: request.speedTilesPerSecond,
+      hop: false,
+    };
+  }
+
   let wantX = plan.dirX * speed;
   let wantY = plan.dirY * speed;
 
-  const intent = request.intent;
   if (request.cancelIntent && intent !== undefined) {
     const cancelX = wantX - intent.x * request.speedTilesPerSecond;
     const cancelY = wantY - intent.y * request.speedTilesPerSecond;
@@ -93,7 +138,13 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
     // is not the one they are actually moving — a hand on the keys while a chat
     // box has them — the correction can otherwise point somewhere the plan never
     // asked for. This bounds that to "less help", never "the wrong way".
-    if (cancelX * plan.dirX + cancelY * plan.dirY > 0) {
+    //
+    // **Nought is admitted, and that is the case worth naming**: a correction of
+    // no length means what they are already doing *is* the plan, which falls
+    // through the floor below and hands the wheel back. Refused here, it became
+    // a command to walk exactly the way they were already walking — harmless,
+    // and a plugin that never stopped talking.
+    if (cancelX * plan.dirX + cancelY * plan.dirY >= 0) {
       wantX = cancelX;
       wantY = cancelY;
     }
@@ -122,5 +173,6 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
     offsetX: (wantX / magnitude) * distance,
     offsetY: (wantY / magnitude) * distance,
     speedTilesPerSecond: commanded,
+    hop: false,
   };
 }

@@ -57,8 +57,8 @@ export interface ForecastShot {
  * which is what lets a fast shot be seen at all: one crossing the player
  * entirely between two predicted positions overlaps neither, and testing them
  * would call it a miss. The step therefore bounds how far a curve may bend
- * between samples, not how far a shot may travel — `ThreatField` samples the
- * same way for the same reason.
+ * between samples, not how far a shot may travel — the dodge's `ShotTracks`
+ * samples the same way for the same reason.
  *
  * A shot whose motion the model does not describe — one that accelerates or
  * turns — is predicted as the straight line `positionAt` gives, and counted like

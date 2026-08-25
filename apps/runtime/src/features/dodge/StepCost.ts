@@ -1,0 +1,156 @@
+/**
+ * What one step of a walk is worth, and what the rest of it cannot cost less
+ * than.
+ *
+ * **This file is the feature's behaviour.** The search in `DodgeSearch` is a
+ * general shortest-path over places and moments; every opinion about what a
+ * dodge *is* lives here, in what a step is charged for. Keeping the two apart is
+ * what makes the behaviour arguable without arguing about heaps and closed sets,
+ * and it is what lets the whole of it be pinned down by tests that never run a
+ * search.
+ *
+ * **The anchor is the whole idea.** A planner that ranks courses by survival
+ * alone backs away from everything, forever: over any finite horizon giving
+ * ground always outlives standing your ground, because the horizon can see the
+ * shot that lands and cannot see the room that ran out. So survival is not what
+ * is being maximised here. What is being minimised is *how far, and for how
+ * long, the character is dragged off the ground they had chosen* — where they
+ * were standing, or the line they are walking. Getting hit is priced out of
+ * reach above that, and everything in between is a preference.
+ *
+ * That single change is what turns running away into weaving: a sidestep that
+ * returns costs two steps of deviation, a retreat costs every remaining step of
+ * it, and no amount of extra safety at the far end pays for the difference.
+ *
+ * **The estimate below it has to be a lower bound, or the search stops being
+ * correct.** {@link remainingAnchorCost} is the least the anchor term can still
+ * cost from here — the character closing on the anchor as fast as it is
+ * physically able, every remaining step, and every other term charging nothing
+ * at all. Anything larger would let A* return a path it has not shown to be
+ * best; anything smaller is merely slower.
+ */
+
+/** How a step is priced. Every one of these is in the same made-up unit. */
+export interface StepWeights {
+  /**
+   * Per tile away from the anchor, per step spent there.
+   *
+   * The unit everything else is quoted against, and the reason it is charged
+   * *per step* rather than once at the end: being pulled a tile off your ground
+   * for the whole horizon should cost more than touching the same place in
+   * passing, because it does.
+   */
+  readonly anchorPerTile: number;
+  /**
+   * Per tile actually walked.
+   *
+   * **What keeps the character still when nothing is making them move.** The
+   * anchor term alone is indifferent between standing at the anchor and orbiting
+   * it, and an indifferent planner picks whichever way the arithmetic rounded.
+   */
+  readonly travelPerTile: number;
+  /**
+   * Per tile of room the step is short of {@link safeClearanceTiles}.
+   *
+   * Not a bar but a gradient, deliberately: "the shot did not technically touch
+   * me" is a plan that relies on the prediction being perfect, and a planner
+   * that treats a hair of room and a tile of it as the same answer will thread
+   * needles when a lane was available one step away.
+   */
+  readonly riskPerTile: number;
+  /** How much room stops being worth paying for. */
+  readonly safeClearanceTiles: number;
+  /**
+   * Per tile inside a monster's keep-away distance.
+   *
+   * **Room to dodge in is not distance from the shots.** A body pressed against
+   * the character has already taken the space every sidestep is made in, and
+   * that is worth a step of its own even with nothing in the air.
+   */
+  readonly crowdPerTile: number;
+  /** Flat, for a step that ends on ground that costs health. */
+  readonly hazard: number;
+  /**
+   * Charged per step still to come, for a step that is actually hit.
+   *
+   * **Per remaining step, so that a hit later is better than a hit sooner** —
+   * which is the only useful thing left to say when every way out is hit. Large
+   * enough that no arrangement of the terms above can buy a hit: the whole
+   * anchor cost of the worst path the lattice can describe is a fraction of one
+   * step of this.
+   */
+  readonly hitPerStep: number;
+}
+
+/**
+ * What one step of a walk costs.
+ *
+ * @param anchorTiles How far the step *ends* from where the character should
+ *   have been at that moment.
+ * @param travelTiles How far it walked.
+ * @param clearanceTiles The least room it had at any instant, from
+ *   {@link ThreatIndex.clearanceOf}. `Infinity` when nothing came near.
+ * @param crowdingTiles How far inside a monster's bubble it ends.
+ * @param damaging Whether it ends on ground that hurts.
+ * @param stepsLeft How many steps of the horizon are still ahead of it, which
+ *   is what makes an early hit worse than a late one.
+ */
+export function stepCost(
+  weights: StepWeights,
+  anchorTiles: number,
+  travelTiles: number,
+  clearanceTiles: number,
+  crowdingTiles: number,
+  damaging: boolean,
+  stepsLeft: number,
+): number {
+  let cost = weights.anchorPerTile * anchorTiles + weights.travelPerTile * travelTiles;
+
+  if (clearanceTiles < weights.safeClearanceTiles) {
+    if (clearanceTiles < 0) {
+      // Landed. Everything above is noise beside it, and the only thing still
+      // worth distinguishing is how much of the horizon was survived first.
+      cost += weights.hitPerStep * (stepsLeft + 1);
+    } else {
+      cost += weights.riskPerTile * (weights.safeClearanceTiles - clearanceTiles);
+    }
+  }
+
+  if (crowdingTiles > 0) cost += weights.crowdPerTile * crowdingTiles;
+  if (damaging) cost += weights.hazard;
+  return cost;
+}
+
+/**
+ * The least the anchor term can still cost, from `tiles` away with `steps` to
+ * go.
+ *
+ * **The character closing as fast as it possibly could, and paying for the
+ * ground it has not closed yet.** Each remaining step is charged for whatever
+ * distance is left at the moment it ends, so the first few steps are charged
+ * even by a perfect run home; only once the gap is closed does the estimate stop
+ * growing. Every other term in {@link stepCost} is charged nothing, which is
+ * what keeps this a bound rather than a guess.
+ *
+ * **`closePerStep` is a closing rate, not a walking speed.** When the character
+ * is steering, the anchor is walking away at their own speed, so the most the
+ * gap can shrink by in one step is their step *plus* the anchor's — using the
+ * character's alone would over-estimate the remaining cost, and an
+ * over-estimate is exactly what makes A* stop being able to promise anything.
+ */
+export function remainingAnchorCost(
+  anchorPerTile: number,
+  tiles: number,
+  closePerStep: number,
+  steps: number,
+): number {
+  if (steps <= 0 || tiles <= 0 || anchorPerTile <= 0) return 0;
+  if (!(closePerStep > 0)) return anchorPerTile * tiles * steps;
+
+  // How many steps are still charged for anything at all: past this the gap is
+  // closed and every further step is free.
+  const charged = Math.min(steps, Math.floor(tiles / closePerStep));
+  // Sum of `tiles - i * closePerStep` for `i` in `1..charged`.
+  const sum = charged * tiles - (closePerStep * charged * (charged + 1)) / 2;
+  return anchorPerTile * sum;
+}
