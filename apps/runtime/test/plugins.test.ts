@@ -585,6 +585,59 @@ describe('settings', () => {
     expect(h.host.status('badmulti')?.state).toBe(PluginState.Failed);
   });
 
+  it('updates a select options list and resets a value that no longer fits', () => {
+    const h = host();
+    let handle: ReturnType<PluginContext['settings']['select']> | undefined;
+    h.host.load(
+      plugin('dynamic', (ctx) => {
+        handle = ctx.settings.select('skin', {
+          default: '0',
+          options: [
+            ['0', 'Default'],
+            ['10', 'Wizard skin'],
+          ],
+        });
+      }),
+    );
+    handle!.set('10');
+
+    handle!.setOptions([
+      ['0', 'Default'],
+      ['20', 'Knight skin'],
+    ]);
+
+    expect(handle!.get()).toBe('0');
+    expect(h.host.settingsOf('dynamic')!.descriptors()[0]).toMatchObject({
+      options: [
+        ['0', 'Default'],
+        ['20', 'Knight skin'],
+      ],
+    });
+  });
+
+  it('keeps a persisted dynamic selection until its live options are known', () => {
+    const store = new PluginPreferences();
+    store.load({ dynamic: { settings: { skin: '836' } } });
+    const h = host({ store });
+    let handle: ReturnType<PluginContext['settings']['select']> | undefined;
+    h.host.load(
+      plugin('dynamic', (ctx) => {
+        handle = ctx.settings.select<string>('skin', {
+          default: '0',
+          dynamic: true,
+          options: [['0', 'Default']],
+        });
+      }),
+    );
+
+    expect(handle!.get()).toBe('836');
+    handle!.setOptions([
+      ['0', 'Default'],
+      ['836', 'Merlin Wizard'],
+    ]);
+    expect(handle!.get()).toBe('836');
+  });
+
   it('keeps a multi-select to its options and to one canonical spelling', () => {
     const h = host();
     let handle: ReturnType<PluginContext['settings']['multiSelect']> | undefined;

@@ -36,6 +36,16 @@ type Parameter struct {
 	TypeIndex int    `json:"type_index"`
 }
 
+// Field is one managed field definition and its declaring type.
+// TypeIndex indexes the native Il2CppMetadataRegistration type table.
+type Field struct {
+	Index         int            `json:"index"`
+	Name          string         `json:"name"`
+	DeclaringType TypeDefinition `json:"declaring_type"`
+	TypeIndex     int            `json:"type_index"`
+	Token         uint32         `json:"token"`
+}
+
 // Method is one managed method definition recovered from metadata v31.
 type Method struct {
 	Index                int            `json:"index"`
@@ -193,6 +203,56 @@ func Methods(data []byte) ([]Method, error) {
 			Token: binary.LittleEndian.Uint32(record[24:]), Flags: binary.LittleEndian.Uint16(record[28:]),
 			ImplementationFlags: binary.LittleEndian.Uint16(record[30:]), Slot: binary.LittleEndian.Uint16(record[32:]),
 			Parameters: params,
+		}
+	}
+	return out, nil
+}
+
+// Fields extracts all field definitions and associates them with their owners.
+func Fields(data []byte) ([]Field, error) {
+	if len(data) < standardHeaderSize || binary.LittleEndian.Uint32(data) != Magic {
+		return nil, fmt.Errorf("not standard IL2CPP metadata")
+	}
+	heapOff, heapSize := tableRange(data, 2)
+	fieldOff, fieldSize := tableRange(data, 11)
+	if !validRange(data, heapOff, heapSize) || !validRange(data, fieldOff, fieldSize) || fieldSize%tableRecordSizes[11] != 0 {
+		return nil, fmt.Errorf("field table range outside file")
+	}
+	types, err := Definitions(data)
+	if err != nil {
+		return nil, err
+	}
+	heap := data[heapOff : heapOff+heapSize]
+	table := data[fieldOff : fieldOff+fieldSize]
+	owners := make([]int, fieldSize/tableRecordSizes[11])
+	for i := range owners {
+		owners[i] = -1
+	}
+	for _, typ := range types {
+		if typ.FieldCount == 0 {
+			continue
+		}
+		if typ.FieldStart < 0 || typ.FieldStart > len(owners)-typ.FieldCount {
+			return nil, fmt.Errorf("type %s has invalid field range %d+%d", typ.FullName(), typ.FieldStart, typ.FieldCount)
+		}
+		for i := typ.FieldStart; i < typ.FieldStart+typ.FieldCount; i++ {
+			owners[i] = typ.Index
+		}
+	}
+	out := make([]Field, len(owners))
+	for i, owner := range owners {
+		if owner < 0 {
+			return nil, fmt.Errorf("field record %d has no declaring type", i)
+		}
+		record := table[i*tableRecordSizes[11]:]
+		name, ok := heapString(heap, int32(binary.LittleEndian.Uint32(record)))
+		if !ok || name == "" {
+			return nil, fmt.Errorf("field record %d has invalid name", i)
+		}
+		out[i] = Field{
+			Index: i, Name: name, DeclaringType: types[owner],
+			TypeIndex: int(int32(binary.LittleEndian.Uint32(record[4:]))),
+			Token:     binary.LittleEndian.Uint32(record[8:]),
 		}
 	}
 	return out, nil

@@ -162,15 +162,16 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
         return;
     }
     const auto* runtime = game_.load(std::memory_order_acquire);
-    if (runtime == nullptr || !scene_.bound()) {
+    if (runtime == nullptr) {
         return;
     }
 
-    const bool tint = tint_wanted_.load(std::memory_order_relaxed);
+    const bool scene_bound = scene_.bound();
+    const bool tint = scene_bound && tint_wanted_.load(std::memory_order_relaxed);
     const bool wanted = collision_wanted_.load(std::memory_order_relaxed);
     // A value taken from the game and not yet put back is its own reason to keep
     // walking: the switch going off is a write, not the absence of one.
-    const bool collision = wanted || collision_.holding();
+    const bool collision = scene_bound && (wanted || collision_.holding());
     if (!tint) {
         // Switched off. The bar goes back to the game's own colour the next
         // time the game paints it, which is the next time it changes.

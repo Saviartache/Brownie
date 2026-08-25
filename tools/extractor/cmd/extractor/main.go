@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"rotmg-extractor/internal/assetripper"
+	"rotmg-extractor/internal/buildscan"
 	"rotmg-extractor/internal/config"
 	"rotmg-extractor/internal/il2cpp"
 	"rotmg-extractor/internal/localsrc"
@@ -34,6 +36,7 @@ func main() {
 	once := flag.Bool("once", false, "run a single pass instead of looping")
 	il2cppOnly := flag.Bool("il2cpp-only", false, "run only the IL2CPP dump against an existing client build")
 	il2cppEnv := flag.String("il2cpp-env", "", "environment/platform for -il2cpp-only (default: local Production or first configured remote platform)")
+	il2cppInput := flag.String("il2cpp-input", "", "published build, game_files directory, or metadata file for -il2cpp-only")
 	il2cppFormat := flag.String("il2cpp-format", "", "comma-separated Cpp2IL output format override for -il2cpp-only (Cpp2IL backend only)")
 	il2cppTool := flag.String("il2cpp-tool", "", "override il2cpp backend for this run: cpp2il or il2cppdumper")
 	flag.Usage = func() {
@@ -84,7 +87,7 @@ func main() {
 	}
 
 	if *il2cppOnly {
-		runIL2CPPOnly(ctx, log, pipe, cfg.Source, *il2cppEnv)
+		runIL2CPPOnly(ctx, log, pipe, cfg.Source, *il2cppEnv, *il2cppInput)
 		return
 	}
 
@@ -176,6 +179,7 @@ func buildIL2CPPDumper(cfg config.Config, log *logx.Logger) pipeline.IL2CPPDumpe
 	c := cfg.IL2CPP.Cpp2IL
 	return &il2cpp.Cpp2IL{
 		BinPath:        il2cpp.ResolveCpp2ILBinary(c.Dir, c.Binary),
+		UnityVersion:   c.UnityVersion,
 		FullDump:       c.FullDump,
 		Formats:        c.Formats,
 		Processors:     c.Processors,
@@ -229,19 +233,43 @@ func runLocalPass(ctx context.Context, log *logx.Logger, pipe *pipeline.Pipeline
 // runIL2CPPOnly reruns the selected il2cpp backend without the normal
 // new-build/download/extract flow. Remote mode uses output/buildfiles/<env>/client,
 // so source.incremental must have preserved the downloaded build files.
-func runIL2CPPOnly(ctx context.Context, log *logx.Logger, pipe *pipeline.Pipeline, src config.Source, env string) {
+func runIL2CPPOnly(ctx context.Context, log *logx.Logger, pipe *pipeline.Pipeline, src config.Source, env, input string) {
 	if pipe.IL2CPPDumper == nil {
 		log.Error("IL2CPP is disabled; set il2cpp.enabled: true")
 		return
 	}
 
-	var installPath string
+	var build localsrc.Build
 	var err error
-	if src.Mode == "local" {
+	if input != "" {
+		artifacts, resolveErr := buildscan.Resolve(input, "")
+		if resolveErr != nil {
+			log.Error("Could not locate IL2CPP artifacts: %v", resolveErr)
+			return
+		}
+		metadataPath := artifacts.Metadata
+		decrypted := filepath.Join(filepath.Dir(metadataPath), "global-metadata.decrypted.dat")
+		if _, statErr := os.Stat(decrypted); statErr == nil {
+			metadataPath = decrypted
+		}
+		build = localsrc.Build{
+			AppPath:      artifacts.Root,
+			DataDir:      filepath.Dir(metadataPath),
+			Metadata:     metadataPath,
+			GameAssembly: artifacts.GameAssembly,
+		}
+		if env == "" {
+			env = buildscan.Label(artifacts)
+		}
+	} else if src.Mode == "local" {
 		if env == "" {
 			env = "Production"
 		}
+		var installPath string
 		installPath, err = localsrc.Discover(src.LocalPath)
+		if err == nil {
+			build, err = localsrc.Locate(installPath)
+		}
 	} else {
 		if env == "" {
 			if len(src.Platforms) > 0 {
@@ -250,16 +278,15 @@ func runIL2CPPOnly(ctx context.Context, log *logx.Logger, pipe *pipeline.Pipelin
 				env = "windows"
 			}
 		}
-		installPath = pipe.Layout.BuildFilesDir(env, string(rotmg.Client))
+		build, err = localsrc.Locate(pipe.Layout.BuildFilesDir(env, string(rotmg.Client)))
 	}
 	if err != nil {
 		log.Error("%v", err)
 		return
 	}
 
-	build, err := localsrc.Locate(installPath)
 	if err != nil {
-		log.Error("Could not locate IL2CPP build at %s: %v", installPath, err)
+		log.Error("Could not locate IL2CPP build: %v", err)
 		return
 	}
 	if err := pipe.RunIL2CPPOnly(ctx, env, build); err != nil {

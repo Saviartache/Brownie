@@ -164,6 +164,72 @@ describe('object catalog', () => {
     expect(catalog.displayName(0x0d59)).toBe('Oryx the Mad God 3');
   });
 
+  it('lists only the skins assigned to a requested player class', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x342" id="Bandit Rogue"><Class>Skin</Class><Skin /><PlayerClassType>0x300</PlayerClassType></Object>
+          <Object type="0x343" id="Robin Hood"><Class>Skin</Class><Skin /><PlayerClassType>0x307</PlayerClassType></Object>
+          <Object type="0x344" id="Merlin Wizard"><Class>Skin</Class><Skin /><PlayerClassType>0x30e</PlayerClassType></Object>
+          <Object type="0x345" id="Not Really A Skin"><PlayerClassType>0x30e</PlayerClassType></Object>
+        </Objects>`),
+      ),
+    );
+
+    expect(catalog.skinsForClass(0x30e)).toEqual([{ type: 0x344, name: 'Merlin Wizard' }]);
+    expect(catalog.skinsForClass(0x300)).toEqual([{ type: 0x342, name: 'Bandit Rogue' }]);
+    expect(catalog.skinsForClass(0xffff)).toEqual([]);
+  });
+
+  it('caches valid colours and cloth effects by the layer they target', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x1000" id="Alice Blue Clothing Dye"><Class>Dye</Class><Tex1>0x01F0F8FF</Tex1></Object>
+          <Object type="0x1001" id="Same Blue Clothing Dye"><Class>Dye</Class><Tex1>0x01F0F8FF</Tex1></Object>
+          <Object type="0x1100" id="Alice Blue Accessory Dye"><Class>Dye</Class><Tex2>0x01F0F8FF</Tex2></Object>
+          <Object type="0x1200" id="Large Purple Pinstripe Cloth"><Class>Dye</Class><Tex1>0x04000000</Tex1></Object>
+          <Object type="0x1300" id="Small Purple Pinstripe Cloth"><Class>Dye</Class><Tex2>0x04000000</Tex2></Object>
+          <Object type="0x1400" id="Not A Dye"><Class>GameObject</Class><Tex1>123</Tex1></Object>
+        </Objects>`),
+      ),
+    );
+
+    expect(catalog.mainAppearances()).toEqual([
+      { value: 0x01f0f8ff, name: 'Alice Blue / Same Blue', kind: 'color' },
+      { value: 0x04000000, name: 'Purple Pinstripe', kind: 'effect' },
+    ]);
+    expect(catalog.accessoryAppearances()).toEqual([
+      { value: 0x01f0f8ff, name: 'Alice Blue', kind: 'color' },
+      { value: 0x04000000, name: 'Purple Pinstripe', kind: 'effect' },
+    ]);
+    expect(catalog.mainAppearances()).toBe(catalog.mainAppearances());
+    expect(catalog.accessoryAppearances()).toBe(catalog.accessoryAppearances());
+  });
+
+  it('lists only equipment that applies an Arcane Style', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x30e7" id="Low Blue Inferno Flipbook Style">
+            <Class>Equipment</Class><Shader /><Description>Applies an Arcane Style to your character.</Description><Activate>Shader</Activate>
+          </Object>
+          <Object type="0x311a" id="High Violet Inferno Flipbook Style">
+            <Class>Equipment</Class><Shader /><Description>Applies an Arcane Style to your character.</Description><Activate>Shader</Activate>
+          </Object>
+          <Object type="0x4000" id="Other Shader"><Class>Equipment</Class><Shader /><Activate>Shader</Activate></Object>
+          <Object type="0x4001" id="Wrong Activation"><Class>Equipment</Class><Shader /><Description>Applies an Arcane Style to your character.</Description><Activate>NotShader</Activate></Object>
+        </Objects>`),
+      ),
+    );
+
+    expect(catalog.arcaneStyles()).toEqual([
+      'High Violet Inferno Flipbook Style',
+      'Low Blue Inferno Flipbook Style',
+    ]);
+    expect(catalog.arcaneStyles()).toBe(catalog.arcaneStyles());
+  });
+
   it('marks the enemies that can never be hurt', async () => {
     const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
 

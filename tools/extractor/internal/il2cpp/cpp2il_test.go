@@ -89,6 +89,29 @@ func TestStageInputUsesDumpableMetadata(t *testing.T) {
 	}
 }
 
+func TestArgsForceAllArchivedInputPathsWithUnityVersion(t *testing.T) {
+	c := &Cpp2IL{UnityVersion: "6000.0.58f2"}
+	stage := filepath.Join("root", "stage")
+	args := c.args(stage, filepath.Join("root", "out"), "isil")
+	want := []string{
+		"--force-binary-path=" + filepath.Join(stage, "GameAssembly.dll"),
+		"--force-metadata-path=" + filepath.Join(stage, "RotMGExalt_Data", "il2cpp_data", "Metadata", "global-metadata.dat"),
+		"--force-unity-version=6000.0.58f2",
+	}
+	for _, expected := range want {
+		found := false
+		for _, arg := range args {
+			if arg == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("args %v do not contain %q", args, expected)
+		}
+	}
+}
+
 func TestLinkOrCopyFileCreatesUsableLinkFromOtherWorkingDir(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.bin")

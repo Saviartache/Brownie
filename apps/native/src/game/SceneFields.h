@@ -88,6 +88,14 @@ inline constexpr std::string_view kPropertiesCollisionRadius =
 inline constexpr std::string_view kMapObjectViewHandler = "map.MapObject.viewHandler";
 inline constexpr std::string_view kViewHandlerUiManager = "map.ViewHandler.GUIManager";
 
+/// The managed route used to find a loaded Arcane Style. Applying it goes
+/// through the local player's setter; see `PlayerFields.h`.
+inline constexpr std::string_view kApplicationShaderEffects =
+    "map.ApplicationManager.ShaderEffects";
+inline constexpr std::string_view kShaderEffectLibrary = "map.ShaderEffectManager.Library";
+inline constexpr std::string_view kShaderLibraryItems = "map.ShaderLibrary.items";
+inline constexpr std::string_view kShaderPropertiesId = "map.ShaderProperties.id";
+
 /// The two calls that put something over the map. **The same managed name, told
 /// apart by how many arguments they take** — a live run listed them:
 ///

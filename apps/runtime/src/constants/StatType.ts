@@ -36,6 +36,10 @@ export const StatType = {
   /** First condition-effect bitmask — bits 0–30. */
   Effects: 29,
   Name: 31,
+  /** Main clothing colour or cloth-pattern value. */
+  Texture1: 32,
+  /** Accessory colour or cloth-pattern value. */
+  Texture2: 33,
   AccountId: 38,
   /**
    * The maximum health the gear adds, on top of {@link MaxHp}.
@@ -49,6 +53,8 @@ export const StatType = {
   MpBoost: 47,
   /** A string stat, and the only one that says two players are on one team. */
   GuildName: 62,
+  /** Object type of the skin the client renders for this player. */
+  Skin: 75,
   /** Second condition-effect bitmask — bits 31+. Not tracked by state yet. */
   Effects2: 95,
 } as const;

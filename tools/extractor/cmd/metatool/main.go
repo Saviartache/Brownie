@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"rotmg-extractor/internal/buildscan"
+	"rotmg-extractor/internal/il2cppnative"
 	"rotmg-extractor/internal/metadata"
 )
 
@@ -32,6 +34,14 @@ func main() {
 		names(os.Args[2:])
 	case "info":
 		info(os.Args[2:])
+	case "members":
+		members(os.Args[2:])
+	case "type":
+		resolveType(os.Args[2:])
+	case "method":
+		resolveMethod(os.Args[2:])
+	case "switch":
+		resolveSwitch(os.Args[2:])
 	default:
 		usage()
 	}
@@ -42,10 +52,228 @@ func usage() {
   metatool decrypt [-out FILE] [-assembly FILE] BUILD_OR_METADATA
   metatool names   [-namespace NS[,NS...]] [-json] [-assembly FILE] BUILD_OR_METADATA
   metatool info    [-json] [-assembly FILE] BUILD_OR_METADATA
+  metatool members [-type TEXT] [-name TEXT] [-field-type-index N] [-rva] [-json] [-assembly FILE] BUILD_OR_METADATA
+  metatool type    -index N [-json] [-assembly FILE] BUILD_OR_METADATA
+  metatool method  -rva N [-assembly FILE] BUILD_OR_METADATA
+  metatool switch  -rva N [-case N] [-assembly FILE] BUILD_OR_METADATA
 
 BUILD_OR_METADATA may be a published build directory, game_files directory,
 or a direct global-metadata.dat path.`)
 	os.Exit(2)
+}
+
+func resolveSwitch(args []string) {
+	fs := flag.NewFlagSet("switch", flag.ExitOnError)
+	rawRVA := fs.String("rva", "", "function RVA in decimal or 0x-prefixed hexadecimal")
+	wantedCase := fs.Int("case", -1, "show only this byte case")
+	assembly := fs.String("assembly", "", "GameAssembly.dll override")
+	_ = fs.Parse(args)
+	a := mustResolve(fs, *assembly)
+	if *rawRVA == "" {
+		fatal(fmt.Errorf("-rva is required"))
+	}
+	rva, err := strconv.ParseUint(*rawRVA, 0, 64)
+	if err != nil {
+		fatal(fmt.Errorf("invalid -rva %q: %w", *rawRVA, err))
+	}
+	if a.GameAssembly == "" {
+		fatal(fmt.Errorf("GameAssembly is required to decode a native switch"))
+	}
+	native, err := il2cppnative.Load(a.GameAssembly)
+	if err != nil {
+		fatal(err)
+	}
+	start, end, ok := native.FunctionRange(native.VA(rva))
+	if !ok || start != native.VA(rva) {
+		fatal(fmt.Errorf("RVA 0x%X is not a native function start", rva))
+	}
+	found := false
+	cases := native.ByteSwitchCases(start, end)
+	for _, switchCase := range cases {
+		if *wantedCase >= 0 && switchCase.ID != *wantedCase {
+			continue
+		}
+		found = true
+		fmt.Printf("case %d -> rva=0x%X\n", switchCase.ID, native.RVA(switchCase.TargetVA))
+	}
+	if !found {
+		if *wantedCase >= 0 && len(cases) > 0 && *wantedCase <= cases[len(cases)-1].ID {
+			fmt.Printf("case %d -> default/unhandled\n", *wantedCase)
+			return
+		}
+		fatal(fmt.Errorf("no matching byte-switch case in function RVA 0x%X", rva))
+	}
+}
+
+func resolveMethod(args []string) {
+	fs := flag.NewFlagSet("method", flag.ExitOnError)
+	rawRVA := fs.String("rva", "", "native method RVA in decimal or 0x-prefixed hexadecimal")
+	assembly := fs.String("assembly", "", "GameAssembly.dll override")
+	_ = fs.Parse(args)
+	a := mustResolve(fs, *assembly)
+	if *rawRVA == "" {
+		fatal(fmt.Errorf("-rva is required"))
+	}
+	rva, err := strconv.ParseUint(*rawRVA, 0, 64)
+	if err != nil {
+		fatal(fmt.Errorf("invalid -rva %q: %w", *rawRVA, err))
+	}
+	data, _ := mustLoad(a)
+	methods, err := metadata.Methods(data)
+	if err != nil {
+		fatal(err)
+	}
+	addresses := mustResolveMethodRVAs(a, data, methods)
+	found := false
+	for _, method := range methods {
+		if addresses[method.Index] != rva {
+			continue
+		}
+		found = true
+		fmt.Printf("method %s.%s token=0x%08X parameters=%d rva=0x%X\n",
+			method.DeclaringType.FullName(), method.Name, method.Token, len(method.Parameters), rva)
+	}
+	if !found {
+		fatal(fmt.Errorf("no managed method starts at RVA 0x%X", rva))
+	}
+}
+
+func resolveType(args []string) {
+	fs := flag.NewFlagSet("type", flag.ExitOnError)
+	index := fs.Int("index", -1, "metadata type index")
+	jsonOutput := fs.Bool("json", false, "write JSON")
+	assembly := fs.String("assembly", "", "GameAssembly.dll override")
+	_ = fs.Parse(args)
+	a := mustResolve(fs, *assembly)
+	if *index < 0 {
+		fatal(fmt.Errorf("-index must be non-negative"))
+	}
+	if a.GameAssembly == "" {
+		fatal(fmt.Errorf("GameAssembly is required to resolve a metadata type index"))
+	}
+	data, _ := mustLoad(a)
+	definitions, err := metadata.Definitions(data)
+	if err != nil {
+		fatal(err)
+	}
+	names := make([]string, len(definitions))
+	for i, definition := range definitions {
+		names[i] = definition.FullName()
+	}
+	native, err := il2cppnative.Load(a.GameAssembly)
+	if err != nil {
+		fatal(err)
+	}
+	table, err := native.FindTypeTable(len(definitions))
+	if err != nil {
+		fatal(err)
+	}
+	resolved, err := table.Resolve(*index, names)
+	if err != nil {
+		fatal(err)
+	}
+	if *jsonOutput {
+		writeJSON(resolved)
+		return
+	}
+	fmt.Println(resolved.DisplayName)
+}
+
+func members(args []string) {
+	fs := flag.NewFlagSet("members", flag.ExitOnError)
+	typeFilter := fs.String("type", "", "case-insensitive declaring type substring")
+	nameFilter := fs.String("name", "", "case-insensitive member name substring")
+	fieldTypeIndex := fs.Int("field-type-index", -1, "include only fields with this metadata type index")
+	rvas := fs.Bool("rva", false, "resolve native method RVAs from GameAssembly")
+	jsonOutput := fs.Bool("json", false, "write JSON")
+	assembly := fs.String("assembly", "", "GameAssembly.dll override")
+	_ = fs.Parse(args)
+	a := mustResolve(fs, *assembly)
+	if *rvas && *jsonOutput {
+		fatal(fmt.Errorf("-rva and -json cannot be combined"))
+	}
+	data, _ := mustLoad(a)
+	fields, err := metadata.Fields(data)
+	if err != nil {
+		fatal(err)
+	}
+	methods, err := metadata.Methods(data)
+	if err != nil {
+		fatal(err)
+	}
+	typeNeedle := strings.ToLower(*typeFilter)
+	nameNeedle := strings.ToLower(*nameFilter)
+	view := struct {
+		Fields  []metadata.Field  `json:"fields"`
+		Methods []metadata.Method `json:"methods"`
+	}{}
+	match := func(owner, name string) bool {
+		return strings.Contains(strings.ToLower(owner), typeNeedle) && strings.Contains(strings.ToLower(name), nameNeedle)
+	}
+	for _, field := range fields {
+		if (*fieldTypeIndex < 0 || field.TypeIndex == *fieldTypeIndex) && match(field.DeclaringType.FullName(), field.Name) {
+			view.Fields = append(view.Fields, field)
+		}
+	}
+	if *fieldTypeIndex < 0 {
+		for _, method := range methods {
+			if match(method.DeclaringType.FullName(), method.Name) {
+				view.Methods = append(view.Methods, method)
+			}
+		}
+	}
+	if *jsonOutput {
+		writeJSON(view)
+		return
+	}
+	methodRVAs := map[int]uint64{}
+	if *rvas {
+		methodRVAs = mustResolveMethodRVAs(a, data, view.Methods)
+	}
+	for _, field := range view.Fields {
+		fmt.Printf("field  %s.%s type-index=%d token=0x%08X\n", field.DeclaringType.FullName(), field.Name, field.TypeIndex, field.Token)
+	}
+	for _, method := range view.Methods {
+		fmt.Printf("method %s.%s token=0x%08X parameters=%d", method.DeclaringType.FullName(), method.Name, method.Token, len(method.Parameters))
+		if rva, ok := methodRVAs[method.Index]; ok {
+			fmt.Printf(" rva=0x%X", rva)
+		}
+		fmt.Println()
+	}
+}
+
+func mustResolveMethodRVAs(a buildscan.Artifacts, data []byte, methods []metadata.Method) map[int]uint64 {
+	if a.GameAssembly == "" {
+		fatal(fmt.Errorf("GameAssembly is required to resolve method RVAs"))
+	}
+	images, err := metadata.Images(data)
+	if err != nil {
+		fatal(err)
+	}
+	native, err := il2cppnative.Load(a.GameAssembly)
+	if err != nil {
+		fatal(err)
+	}
+	modules := map[string]il2cppnative.Module{}
+	result := make(map[int]uint64, len(methods))
+	for _, method := range methods {
+		image, ok := metadata.ImageForType(images, method.DeclaringTypeIndex)
+		if !ok {
+			continue
+		}
+		module, ok := modules[image.Name]
+		if !ok {
+			module, err = native.FindModule(image.Name, 1)
+			if err != nil {
+				continue
+			}
+			modules[image.Name] = module
+		}
+		if pointer, found := module.MethodPointer(method.Token); found {
+			result[method.Index] = native.RVA(pointer)
+		}
+	}
+	return result
 }
 
 func decrypt(args []string) {

@@ -26,6 +26,12 @@ export interface SettingHandle<T extends SettingValue> {
   onChange(listener: (value: T) => void): Unsubscribe;
 }
 
+/** A single choice whose available values may follow live application state. */
+export interface SelectHandle<T extends string> extends SettingHandle<T> {
+  /** Replaces the choices. The declared default must remain available. */
+  setOptions(options: ReadonlyArray<readonly [T, string]>): void;
+}
+
 /**
  * A many-of-N choice — the handle a {@link SettingsApi.multiSelect} returns.
  *
@@ -89,6 +95,8 @@ export interface NumberSettingOptions extends SettingCommon {
 
 export interface SelectSettingOptions<T extends string> extends SettingCommon {
   readonly default: T;
+  /** Persisted values may be accepted before a live option list is supplied. */
+  readonly dynamic?: boolean;
   /** Value → label, in the order the overlay should show them. */
   readonly options: ReadonlyArray<readonly [T, string]>;
 }
@@ -126,7 +134,7 @@ export interface SettingsApi {
     key: string,
     options: NumberSettingOptions & { readonly min: number; readonly max: number },
   ): SettingHandle<number>;
-  select<T extends string>(key: string, options: SelectSettingOptions<T>): SettingHandle<T>;
+  select<T extends string>(key: string, options: SelectSettingOptions<T>): SelectHandle<T>;
   /** A many-of-N choice, drawn as a list of checkboxes. */
   multiSelect<T extends string>(
     key: string,

@@ -78,6 +78,24 @@ Inspect a build and show the recovered key, table count, and managed type count:
 go run ./cmd/metatool info "output/publish/windows/client/6.12.0.2.0-<hash>"
 ```
 
+Search members and resolve managed methods to native RVAs without Cpp2IL:
+
+```sh
+go run ./cmd/metatool members -type SpriteShader -rva "<build>"
+go run ./cmd/metatool method -rva 0x5853D0 "<build>"
+go run ./cmd/metatool switch -rva 0xF73130 -case 75 "<build>"
+```
+
+`members -field-type-index N` finds every field with a metadata type index, and
+`type -index N` expands an index to its managed type. `switch` decodes direct or
+compressed native byte jump tables; a case routed to the table's shared default
+is printed as `default/unhandled`.
+
+For the retained `6.13.0.0.0-39635f2ca772` build, recovered game C# is already
+under `output/temp/work/6.13.0.0.0-39635f2ca772/client/il2cpp_dump/cpp2il/diffable-cs/`.
+Use the matching `isil/` tree when an empty reconstructed C# body needs native
+control-flow details.
+
 Write ordinary metadata for Cpp2IL, Il2CppDumper, or another IL2CPP tool:
 
 ```sh

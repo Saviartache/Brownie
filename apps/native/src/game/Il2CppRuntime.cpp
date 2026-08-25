@@ -269,6 +269,57 @@ void* Il2CppRuntime::NewString(const char* text) const {
     return api_.il2cpp_string_new(text);
 }
 
+void* Il2CppRuntime::InvokeObject(MethodRef method, void* instance, void** arguments) const {
+    if (method == nullptr || instance == nullptr) {
+        return nullptr;
+    }
+    Il2CppObject* exception = nullptr;
+    Il2CppObject* result = api_.il2cpp_runtime_invoke(static_cast<const MethodInfo*>(method),
+                                                      instance, arguments, &exception);
+    return exception == nullptr ? result : nullptr;
+}
+
+std::optional<std::int32_t> Il2CppRuntime::InvokeInt32(MethodRef method, void* instance,
+                                                       void** arguments) const {
+    auto* boxed = static_cast<Il2CppObject*>(InvokeObject(method, instance, arguments));
+    if (boxed == nullptr) {
+        return std::nullopt;
+    }
+    const auto* value = static_cast<const std::int32_t*>(api_.il2cpp_object_unbox(boxed));
+    return value == nullptr ? std::nullopt : std::optional<std::int32_t>{*value};
+}
+
+std::optional<std::string> Il2CppRuntime::StringValue(void* string) const {
+    if (string == nullptr) {
+        return std::nullopt;
+    }
+    auto* managed = static_cast<Il2CppObject*>(string);
+    const std::int32_t length = api_.il2cpp_string_length(managed);
+    constexpr std::int32_t kMaxStyleName = 512;
+    if (length < 0 || length > kMaxStyleName) {
+        return std::nullopt;
+    }
+    if (length == 0) {
+        return std::string{};
+    }
+    const std::uint16_t* characters = api_.il2cpp_string_chars(managed);
+    if (characters == nullptr) {
+        return std::nullopt;
+    }
+    const auto* wide = reinterpret_cast<const wchar_t*>(characters);
+    const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, length, nullptr, 0,
+                                            nullptr, nullptr);
+    if (bytes <= 0) {
+        return std::nullopt;
+    }
+    std::string result(static_cast<std::size_t>(bytes), '\0');
+    if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, length, result.data(), bytes,
+                              nullptr, nullptr) != bytes) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 std::vector<FieldDescription> Il2CppRuntime::Fields(ClassRef klass) const {
     std::vector<FieldDescription> fields;
     if (klass == nullptr) {
@@ -437,6 +488,7 @@ std::vector<MethodDescription> Il2CppRuntime::Methods(ClassRef klass) const {
         }
 
         description.address = EntryPointOf(method);
+        description.reference = method;
         methods.push_back(std::move(description));
     }
     return methods;

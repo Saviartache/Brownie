@@ -144,9 +144,9 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
       // Topping the belt up and hoarding spares are different wants, and the
       // reference implementation had one switch for both — so anybody who
       // wanted their belt kept full got their inventory filled with the
-      // overflow as well. This governs every heal/mana potion that would land
-      // in the inventory rather than on the belt: a quaff potion the belt has
-      // no room for, and a permanent life/mana potion, which never belts.
+      // overflow as well. This governs only the quaff potions the belt has no
+      // room for; the permanent life/mana ones are stat potions with their own
+      // toggle and are not spares.
       const sparePotions = context.settings.boolean('sparePotions', {
         label: 'Also take spare potions into the inventory',
         group: taking,
@@ -371,11 +371,6 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
           const kind = facts?.potion?.kind;
           const quaffable = kind === PotionKind.Heal || kind === PotionKind.Magic;
-          // Every heal/mana potion, whether or not it sits on the belt. A
-          // permanent life/mana one never has a belt slot, so it is always a
-          // spare — and the same switch that keeps quaff spares out of the
-          // inventory is meant to keep these out of it too.
-          const healOrMana = quaffable || kind === PotionKind.LifeOrMana;
 
           // The belt first for a quaff potion: one belt slot holds six, so it
           // is six inventory slots the player keeps, and it is where they are
@@ -385,12 +380,14 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
               ? findBeltDestination(session.self.inventory, objectType, facts.beltStack, isItem)
               : undefined;
 
-          // A heal/mana potion with nowhere on the belt to go is a *spare*, and
-          // spares are a separate question from topping the belt up: filling the
-          // inventory with them is what most players do not want, so it is asked
-          // for rather than assumed. This is about the item, not about the bag,
-          // so the rest of the bag is still worth looking at.
-          if (belt === undefined && healOrMana && !sparePotions.get()) continue;
+          // A *quaff* potion the belt has no room for is a spare, and spares are
+          // a separate question from topping the belt up: filling the inventory
+          // with them is what most players do not want, so it is asked for
+          // rather than assumed. This is only about quaff potions — a permanent
+          // life/mana one raises the cap and is a stat potion wanted in its own
+          // right, taken through its own toggle like any other. This is about
+          // the item, not the bag, so the rest of the bag is still worth a look.
+          if (belt === undefined && quaffable && !sparePotions.get()) continue;
 
           const destination = belt ?? free[0];
           // Nowhere to put it is a fact about the whole inventory, not about
@@ -522,7 +519,17 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         forgetGoneBags(session, state);
 
         if (nowMs < state.pauseUntilMs) return;
-        if (pauseWhenIdle.get() && state.stationaryTicks > STATIONARY_TICK_LIMIT) return;
+
+        // Nearest first, so nothing is in reach once the nearest is not.
+        const nearest = bags[0];
+        const onBag = nearest !== undefined && nearest.distanceTiles <= ON_TOP_TILES;
+
+        // Standing still is how an idle player is told from one at work — but
+        // standing on a bag *is* the work. Left to count, waiting there for the
+        // next pickup reads as going idle and the looting stops with the bag
+        // still half full, which is what "I stood there and it took one and
+        // quit" was.
+        if (pauseWhenIdle.get() && !onBag && state.stationaryTicks > STATIONARY_TICK_LIMIT) return;
         if (state.pending !== undefined) return;
 
         // **One floor for everything this sends, and it is never reset.** The
@@ -532,9 +539,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         // server hangs up on. See `PICKUP_INTERVAL_MS`.
         if (nowMs - state.lastActionAtMs < pickupIntervalMs.get()) return;
 
-        // Nearest first, so nothing is in reach once the nearest is not.
-        const nearest = bags[0];
-        if (nearest === undefined || nearest.distanceTiles > ON_TOP_TILES) return;
+        if (!onBag) return;
 
         // **What is free is settled here, before a bag is read.** A pickup is
         // then aimed at a slot that is already known to be free rather than

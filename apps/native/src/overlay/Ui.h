@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "overlay/Inspector.h"
@@ -348,10 +349,19 @@ struct InspectorInput {
     }
 };
 
+/// A multi-select's search text, keyed by "pluginId\0settingKey".
+///
+/// View state, never a setting: it filters which options a long checklist shows
+/// and changes nothing on the wire, so it is held here rather than sent to the
+/// runtime — a search that reached across the link would be one that stopped
+/// working the moment the link did. See `DrawMultiSelect`.
+using MultiSelectFilters = std::unordered_map<std::string, std::string>;
+
 /// The overlay's own state — everything it holds that the runtime does not.
 struct UiState {
     PendingEdit edit;
     InspectorInput inspector;
+    MultiSelectFilters multi_filters;
 
     /// Whether to draw where the module is walking, and where it is pointing
     /// the player's shots, over the map itself.

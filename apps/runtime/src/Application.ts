@@ -11,9 +11,12 @@ import { createAntiLagPlugin } from './features/antilag/antiLagPlugin.js';
 import { createAutoAbilityPlugin } from './features/autoability/autoAbilityPlugin.js';
 import { createAutoAimPlugin } from './features/autoaim/autoAimPlugin.js';
 import { createAutoDrinkPlugin } from './features/autodrink/autoDrinkPlugin.js';
+import { createAutoFollowPlugin } from './features/autofollow/autoFollowPlugin.js';
+import { FollowTarget } from './features/autofollow/FollowTarget.js';
 import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
 import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.js';
+import { createAutoTeleportPlugin } from './features/autoteleport/autoTeleportPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
 import { createColliderPlugin } from './features/collider/colliderPlugin.js';
 import { createDodgePlugin } from './features/dodge/dodgePlugin.js';
@@ -23,7 +26,9 @@ import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
 import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
+import { createSkinChangerPlugin } from './features/skinchanger/skinChangerPlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
+import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
 import { EquippedWeapon } from './gamedata/EquippedWeapon.js';
 import { Logger, type LogSink } from './core/logging/Logger.js';
 import { CursorTracker } from './native/CursorTracker.js';
@@ -202,6 +207,18 @@ export class Application {
   /// when *not* to act — see `SteerIntent.ts`.
   readonly #steer = new SteerTracker();
 
+  /// The ally auto-follow is walking after, written by auto-teleport and read by
+  /// auto-follow. Owned here because it is a seam between two features and
+  /// belongs to neither — the same reason the cursor and the steer signal are.
+  readonly #followTarget = new FollowTarget();
+
+  /// Whether the module has reported a Shift+left-click since it was last asked.
+  ///
+  /// An edge, consumed on read: the module reports the press, auto-follow picks
+  /// the player under the cursor once, and the flag falls. A module that stops
+  /// talking simply never sets it again, so a stale press cannot linger.
+  #pickPending = false;
+
   /// Whether the module is drawing the dodge picture, and therefore wants it.
   ///
   /// **The only switch that travels this way**, and it does because what it
@@ -215,7 +232,7 @@ export class Application {
   #stopped = false;
   // Replaced once the game's data files are read. Until then every question
   // about an object or a tile is answered "I do not know".
-  #objects: ObjectCatalog = EMPTY_CATALOG;
+  #objects: ObjectCatalog & CosmeticCatalog = { ...EMPTY_CATALOG, ...EMPTY_COSMETIC_CATALOG };
   #tiles: TileCatalog = EMPTY_TILE_CATALOG;
   /**
    * The weapon slot's own data, resolved once per item.
@@ -327,6 +344,10 @@ export class Application {
       // "1" is off, which is the safe reading of a field that did not arrive as
       // either.
       else if (kind === 'dodge-view') this.#dodgeView = first === '1';
+      // Shift+left-click going down: pick the ally under the cursor to follow.
+      // A press edge, latched here and consumed by auto-follow's next tick;
+      // anything that is not "1" is not a press and is ignored.
+      else if (kind === 'pick' && first === '1') this.#pickPending = true;
     });
 
     // A module that has just connected is holding nothing and pointing nowhere.
@@ -337,6 +358,7 @@ export class Application {
       this.#cursor.release();
       this.#steer.release();
       this.#dodgeView = false;
+      this.#pickPending = false;
     });
 
     // The proxy is the plugin host's session source and the host supplies the
@@ -706,6 +728,15 @@ export class Application {
     // having tests for.
     this.#plugins.load(createGlowPlugin());
 
+    this.#plugins.load(
+      createSkinChangerPlugin({
+        skinsForClass: (objectType) => this.#objects.skinsForClass(objectType),
+        mainAppearances: () => this.#objects.mainAppearances(),
+        accessoryAppearances: () => this.#objects.accessoryAppearances(),
+        arcaneStyles: () => this.#objects.arcaneStyles(),
+      }),
+    );
+
     // Needs nothing handed over either — it drops a chat packet on its way to
     // the client — and is built here because what it recognises is a table of
     // patterns written against real spam, which is only trustworthy with the
@@ -786,6 +817,51 @@ export class Application {
         isDungeonPortal: (objectType) => this.#objects.isDungeonPortal(objectType),
         displayName: (objectType) => this.#objects.displayName(objectType),
         dungeonPortals: () => this.#objects.dungeonPortals(),
+        steer: { direction: () => this.#steer.direction() },
+      }),
+    );
+
+    // Teleport is a client packet, so this one needs no native mover — but it
+    // needs the catalog's boss flag, which is nowhere on the wire, and it needs
+    // to name the teammate it landed on so auto-follow can carry on from there.
+    this.#plugins.load(
+      createAutoTeleportPlugin({
+        isBoss: (objectType) => this.#objects.isQuest(objectType),
+        requestFollow: (objectId) => {
+          this.#followTarget.request(objectId);
+        },
+      }),
+    );
+
+    // Auto-teleport's other half: it walks the character after the ally, so like
+    // the dodge and auto-portal it is handed a native mover. The pick edge and
+    // the cursor point are the module's to know — Shift+left-click and where it
+    // landed — and reach it the same way the walk-to-cursor chord does.
+    this.#plugins.load(
+      createAutoFollowPlugin({
+        output: {
+          moveTo: (x, y, speedTilesPerSecond, holdMs) => {
+            this.#native.publishRecord(moveRecord(x, y, speedTilesPerSecond, holdMs, FROM_MAP));
+          },
+          stop: (speedTilesPerSecond) => {
+            this.#native.publishRecord(moveRecord(0, 0, speedTilesPerSecond, 1, FROM_PLAYER));
+          },
+        },
+        followTarget: {
+          current: () => this.#followTarget.current(),
+          clear: () => {
+            this.#followTarget.clear();
+          },
+        },
+        isBoss: (objectType) => this.#objects.isQuest(objectType),
+        cursorPoint: () => this.#cursorPoint(),
+        pick: {
+          pending: () => {
+            const pressed = this.#pickPending;
+            this.#pickPending = false;
+            return pressed;
+          },
+        },
         steer: { direction: () => this.#steer.direction() },
       }),
     );

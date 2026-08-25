@@ -243,7 +243,7 @@ module. The value is read as *text* whatever its JSON type is — `true`, `1234`
 value of no fixed type, and the feature that consumes it is what knows its
 shape.
 
-Four keys are resolved today:
+The resolved keys include:
 
 | key                         | value                | meaning                                                      |
 | --------------------------- | -------------------- | ------------------------------------------------------------ |
@@ -251,16 +251,16 @@ Four keys are resolved today:
 | `cursor.track`              | `true` / `false`     | measure where the cursor points, and send it                 |
 | `player.collider`           | `true` / `false`     | scale the player's collision circle, and put it back after   |
 | `player.colliderMultiplier` | `0` … `1`            | what to scale it by, clamped on arrival                      |
+| `player.skin`               | object type / empty  | apply a local skin, or restore the previous one              |
+| `player.arcaneStyle`        | shader id / empty     | apply a local Arcane Style, or restore the previous one      |
 
-**The three switches are leases rather than flags**, and nothing else here is.
-Every other change the module makes to the game is switched on in the overlay,
-by a switch that cannot go away. These belong to plugins, and a plugin can be
-disabled, can fail, can be unloaded, and the runtime behind it can be killed —
-each of which would otherwise leave the module doing something with nothing left
-to say stop. So the runtime restates `true` once a second while it wants it, the
-module gives the claim three seconds, and `false` ends it at once. A switch that
-is simply switched off is therefore immediate; only the ways a runtime stops
-*without* saying so wait out the lease.
+The three boolean switches and two cosmetic selections are leases. These belong
+to plugins or runtime readers that can be disabled, fail, unload, or disappear;
+without expiry the module could keep acting after nothing remained to say stop.
+The runtime restates each live claim once a second and the module gives it three
+seconds. `false` ends a boolean claim immediately; an empty value ends a
+cosmetic claim. Only a claimant that disappears without saying so waits out the
+lease.
 
 What is left behind differs, and only one of them is dangerous: a lapsed
 `player.noclip` is a character walking through walls, while a lapsed
@@ -269,6 +269,11 @@ lapsed `player.collider` is the module writing the game's own multiplier back
 over its own. The last two are leases anyway, because a claim that outlives its
 claimant is a claim nobody can revoke — and because the collider's expiry is
 what actually undoes the write.
+
+`player.skin` and `player.arcaneStyle` follow the same lease rule with their
+selected value as the claim. An empty value restores the value observed before
+the override; a lapsed claim does the same. Shader objects are looked up again
+on the game thread rather than retained as unmanaged roots.
 
 **`cursor.track` is the one nothing ever ends early**, and it is claimed by the
 runtime rather than by a plugin. Two features read the point now — aim ranks
@@ -452,7 +457,7 @@ shortest hold the record allows, on the plan where it stops needing to drive.
 Waiting out `holdMs` instead would leave the player walking somewhere the
 planner has already stopped choosing, against whatever they are pressing.
 
-Four actions travel the other way and are not about the overlay at all. They
+Several actions travel the other way and are not about the overlay at all. They
 carry integers only, for the same reason:
 
 | action      | fields                       | meaning                                     |
@@ -460,6 +465,13 @@ carry integers only, for the same reason:
 | `cursor-at` | x·100, y·100                 | where the cursor is, in tiles               |
 | `unstick`   | `1` or `0`                   | the walk-to-cursor chord, down or up        |
 | `steer`     | `1`, x·1000, y·1000 — or `0` | which way the player is walking, as a world direction |
+| `pick`      | `1`                          | a Shift+left-click, to pick an ally to follow — down edge only |
+
+**`pick` is a down edge and nothing else**, because the reader wants a single
+event: auto-follow resolves the ally against the last `cursor-at` and needs
+nothing on the way up. Left-click is the game's own shoot button, so the press
+is read by polling and never swallowed — the shot still fires, and the Shift is
+what tells a deliberate pick from ordinary shooting.
 
 **`cursor-at` is a place, not a direction, and the module is the only thing that
 can work one out.** The cursor is a point on a window and the map is somewhere

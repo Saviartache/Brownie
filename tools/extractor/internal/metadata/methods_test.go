@@ -55,3 +55,41 @@ func TestMethodsV31(t *testing.T) {
 		t.Fatalf("unexpected parameters: %#v", methods[0].Parameters)
 	}
 }
+
+func TestFieldsV31(t *testing.T) {
+	heap := []byte("\x00Game\x00Example\x00style\x00")
+	typeRecord := make([]byte, tableRecordSizes[19])
+	binary.LittleEndian.PutUint32(typeRecord, 6)     // Example
+	binary.LittleEndian.PutUint32(typeRecord[4:], 1) // Game
+	binary.LittleEndian.PutUint32(typeRecord[32:], 0)
+	binary.LittleEndian.PutUint16(typeRecord[68:], 1)
+	binary.LittleEndian.PutUint32(typeRecord[84:], 0x02000001)
+	fieldRecord := make([]byte, tableRecordSizes[11])
+	binary.LittleEndian.PutUint32(fieldRecord, 14) // style
+	binary.LittleEndian.PutUint32(fieldRecord[4:], 42)
+	binary.LittleEndian.PutUint32(fieldRecord[8:], 0x04000001)
+
+	data := make([]byte, standardHeaderSize)
+	binary.LittleEndian.PutUint32(data, Magic)
+	binary.LittleEndian.PutUint32(data[4:], DefaultVersion)
+	for i := range tableNames {
+		binary.LittleEndian.PutUint32(data[8+i*8:], uint32(standardHeaderSize))
+	}
+	setTable := func(index int, value []byte) {
+		offset := len(data)
+		data = append(data, value...)
+		binary.LittleEndian.PutUint32(data[8+index*8:], uint32(offset))
+		binary.LittleEndian.PutUint32(data[12+index*8:], uint32(len(value)))
+	}
+	setTable(2, heap)
+	setTable(11, fieldRecord)
+	setTable(19, typeRecord)
+
+	fields, err := Fields(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0].DeclaringType.FullName() != "Game.Example" || fields[0].Name != "style" || fields[0].TypeIndex != 42 {
+		t.Fatalf("unexpected fields: %#v", fields)
+	}
+}

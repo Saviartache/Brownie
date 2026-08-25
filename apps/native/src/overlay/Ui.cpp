@@ -1,6 +1,7 @@
 #include "overlay/Ui.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -676,6 +677,41 @@ std::vector<std::string> SplitChosen(const std::string& value) {
     }
 }
 
+/// Whether `needle` appears in `haystack`, ignoring case. ASCII, like everything
+/// the overlay draws — a search for "undead" is meant to find "Undead Lair".
+[[nodiscard]] bool ContainsIgnoreCase(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) return true;
+    if (needle.size() > haystack.size()) return false;
+    const auto lower = [](char c) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    };
+    for (std::size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (lower(haystack[i + j]) != lower(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+/// The search text belongs to one setting of one plugin, not to a key that
+/// another plugin might reuse. NUL cannot appear in either half, so it joins
+/// them without ambiguity.
+[[nodiscard]] std::string FilterKey(const PluginRow& plugin, const SettingRow& row) {
+    std::string key = plugin.id;
+    key.push_back('\0');
+    key += row.key;
+    return key;
+}
+
+/// The number of options above which a multi-select gets a search box. Below it
+/// the box is clutter; the dungeon chooser is well above it.
+constexpr std::size_t kSearchableFrom = 8;
+
 /// A many-of-N choice, drawn as a list of checkboxes.
 ///
 /// The value is the chosen keys joined by commas, and the runtime treats one
@@ -683,8 +719,12 @@ std::vector<std::string> SplitChosen(const std::string& value) {
 /// toggle rebuilds the string by walking `row.options` in order and keeping the
 /// ones now chosen — the same order this list is drawn in — rather than by
 /// editing the string in place.
+///
+/// A long list gets a search box that filters which options are *shown*. The
+/// filter never touches the value: a toggle still walks every option, so a
+/// choice hidden by the search is kept, not dropped.
 void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
-                     PendingEdit& edit, const ActionSink& emit) {
+                     PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit) {
     const std::string current =
         edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
     std::vector<std::string> chosen = SplitChosen(current);
@@ -693,15 +733,35 @@ void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64
     };
 
     ImGui::TextUnformatted(row.label.c_str());
+
+    std::string filter;
+    if (row.options.size() > kSearchableFrom) {
+        std::string& held = filters[FilterKey(plugin, row)];
+        std::array<char, 64> buffer{};
+        const std::size_t length = std::min(held.size(), buffer.size() - 1);
+        std::memcpy(buffer.data(), held.data(), length);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        if (ImGui::InputTextWithHint("##search", "search", buffer.data(), buffer.size())) {
+            held.assign(buffer.data());
+        }
+        filter = held;
+    }
+
     // A bounded, scrolling box so a long dungeon list does not push everything
     // below it off the panel. Sized to the options, capped at eight rows.
     const auto visible = static_cast<float>(std::min<std::size_t>(row.options.size(), 8));
     const ImVec2 box(0.0F, visible * ImGui::GetTextLineHeightWithSpacing() +
                                ImGui::GetStyle().FramePadding.y * 2.0F);
     if (ImGui::BeginChild("options", box, true)) {
+        bool any = false;
         for (std::size_t i = 0; i < row.options.size(); ++i) {
             const SettingOption& option = row.options[i];
+            if (!ContainsIgnoreCase(option.label, filter)) continue;
+            any = true;
+
             bool on = is_chosen(option.value);
+            // The option's own index, not its position among the matches, so an
+            // id is stable however the filter narrows the list.
             ImGui::PushID(static_cast<int>(i));
             const bool clicked = ImGui::Checkbox(option.label.c_str(), &on);
             ImGui::PopID();
@@ -719,6 +779,7 @@ void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64
             SendSetting(plugin, row, joined, emit);
             edit.Sent(version);
         }
+        if (!any) ImGui::TextDisabled("no match");
     }
     ImGui::EndChild();
 }
@@ -745,7 +806,7 @@ void DrawText(const PluginRow& plugin, const SettingRow& row, std::uint64_t vers
 }
 
 void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
-                 PendingEdit& edit, const ActionSink& emit) {
+                 PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit) {
     ImGui::PushID(row.key.c_str());
     switch (row.kind) {
         case SettingKind::kBoolean:
@@ -761,7 +822,7 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
             DrawSelect(plugin, row, version, edit, emit);
             break;
         case SettingKind::kMultiSelect:
-            DrawMultiSelect(plugin, row, version, edit, emit);
+            DrawMultiSelect(plugin, row, version, edit, filters, emit);
             break;
         case SettingKind::kText:
             DrawText(plugin, row, version, edit, emit);
@@ -777,7 +838,7 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
 
 /// Draws one plugin's settings, either the everyday ones or the advanced ones.
 void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version, PendingEdit& edit,
-                  const ActionSink& emit) {
+                  MultiSelectFilters& filters, const ActionSink& emit) {
     std::string group;
 
     for (const SettingRow& row : plugin.settings) {
@@ -786,7 +847,7 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
             group = row.group;
             if (!group.empty()) ImGui::SeparatorText(group.c_str());
         }
-        DrawSetting(plugin, row, version, edit, emit);
+        DrawSetting(plugin, row, version, edit, filters, emit);
     }
 }
 
@@ -808,7 +869,7 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
 }
 
 void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edit,
-                const ActionSink& emit) {
+                MultiSelectFilters& filters, const ActionSink& emit) {
     bool enabled = edit.Holds(plugin.id, kEnabledKey) ? edit.number != 0.0F : plugin.enabled;
 
     // Only a plugin whose `setup` threw is out of reach — it registered nothing
@@ -845,7 +906,7 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edi
     if (!plugin.error.empty()) {
         ImGui::TextWrapped("%s", plugin.error.c_str());
     }
-    DrawSettings(plugin, false, version, edit, emit);
+    DrawSettings(plugin, false, version, edit, filters, emit);
 
     // Visible ones only, by the same rule as the node above: a section that
     // opens onto nothing is worse than no section.
@@ -854,14 +915,15 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edi
         if (row.advanced && IsVisible(plugin, row)) has_advanced = true;
     }
     if (has_advanced && ImGui::TreeNode("Advanced")) {
-        DrawSettings(plugin, true, version, edit, emit);
+        DrawSettings(plugin, true, version, edit, filters, emit);
         ImGui::TreePop();
     }
 
     ImGui::TreePop();
 }
 
-void DrawPlugins(const OverlayModel& model, PendingEdit& edit, const ActionSink& emit) {
+void DrawPlugins(const OverlayModel& model, PendingEdit& edit, MultiSelectFilters& filters,
+                 const ActionSink& emit) {
     if (model.plugins.empty()) {
         // Two different situations, and the status line above already says which:
         // no runtime connected, or a runtime with an empty plugin directory.
@@ -878,7 +940,7 @@ void DrawPlugins(const OverlayModel& model, PendingEdit& edit, const ActionSink&
             ImGui::SeparatorText(plugin.category.c_str());
         }
         ImGui::PushID(plugin.id.c_str());
-        DrawPlugin(plugin, model.controls_version, edit, emit);
+        DrawPlugin(plugin, model.controls_version, edit, filters, emit);
         ImGui::PopID();
     }
 }
@@ -1187,7 +1249,7 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
     // is up.
     ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
     if (ImGui::CollapsingHeader("Plugins")) {
-        DrawPlugins(model, edit, emit);
+        DrawPlugins(model, edit, state.multi_filters, emit);
     }
 
     if (ImGui::CollapsingHeader("Visualisation")) {

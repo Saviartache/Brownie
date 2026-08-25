@@ -887,8 +887,8 @@ func (b *Binary) ByteSwitchCases(startVA, endVA uint64) []ByteSwitchCase {
 			}
 			continue
 		}
-		// Direct dword table indexed by RCX.
-		if raw+7 <= end && bytes.Equal(b.data[raw:raw+3], []byte{0x8b, 0x84, 0x8a}) {
+		// Direct dword table indexed by RCX or RAX.
+		if raw+7 <= end && isDirectDwordTable(b.data[raw:raw+3]) {
 			jumpRVA := binary.LittleEndian.Uint32(b.data[raw+3:])
 			base, count, found := precedingByteTableRange(b.data, start, raw)
 			if found {
@@ -918,6 +918,11 @@ func (b *Binary) ByteSwitchCases(startVA, endVA uint64) []ByteSwitchCase {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+func isDirectDwordTable(instruction []byte) bool {
+	return bytes.Equal(instruction, []byte{0x8b, 0x84, 0x8a}) ||
+		bytes.Equal(instruction, []byte{0x8b, 0x8c, 0x82})
 }
 
 func decodedInstructionStarts(data []byte, start, end int) map[int]bool {
@@ -950,6 +955,8 @@ func precedingByteTableRange(data []byte, functionStart, raw int) (base, count i
 			count = int(data[cursor+2]) + 1
 		case cursor+3 <= raw && bytes.Equal(data[cursor:cursor+2], []byte{0x83, 0xfb}):
 			base, count = 0, int(data[cursor+2])+1
+		case cursor+2 <= raw && data[cursor] == 0x3c: // cmp al, imm8
+			base, count = 0, int(data[cursor+1])+1
 		}
 	}
 	return base, count, count > 0 && base >= 0 && base+count <= 256
@@ -1116,6 +1123,10 @@ func (b *Binary) RVA(va uint64) uint64 {
 	}
 	return va - b.imageBase
 }
+
+// VA converts an image-relative address to the preferred virtual address used
+// by the file's native code and exception table.
+func (b *Binary) VA(rva uint64) uint64 { return b.imageBase + rva }
 
 // Fingerprint hashes the decoded instruction shape and stable operands of up
 // to maxBytes of native code. PC-relative calls and RIP-relative data offsets

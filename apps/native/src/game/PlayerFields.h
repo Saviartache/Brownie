@@ -52,6 +52,8 @@ inline constexpr std::string_view kPlayerDefense = "self.defense";
 inline constexpr std::string_view kPlayerObjectId = "self.objectId";
 inline constexpr std::string_view kPlayerX = "self.x";
 inline constexpr std::string_view kPlayerY = "self.y";
+inline constexpr std::string_view kPlayerSkin = "self.skin";
+inline constexpr std::string_view kPlayerShaderProperties = "self.shaderProperties";
 
 /// The two hops that lead to the player object. See `PlayerHandle.h`.
 inline constexpr std::string_view kWorldManager = "world.manager";
@@ -81,6 +83,8 @@ inline constexpr std::string_view kPlayerMoveTo = "self.moveTo";
 /// shape, and an overload that two methods match is refused rather than picked.
 inline constexpr std::string_view kComputeShootAngle = "self.computeShootAngle";
 inline constexpr std::string_view kShootWithAngle = "self.shootWithAngle";
+inline constexpr std::string_view kSetPlayerSkin = "self.setSkin";
+inline constexpr std::string_view kSetPlayerShader = "self.setShaderProperties";
 
 /// Resolves what the module calls into the game. Same rules as the fields:
 /// exact name, then alias, then the signature as a fingerprint.

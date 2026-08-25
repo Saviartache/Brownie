@@ -35,6 +35,8 @@ constexpr std::string_view kApplicationManagerClass = "ApplicationManager";
 constexpr std::string_view kWorldManagerClass = "HJMBOMEHGDJ";
 
 constexpr ClassQuery kPlayer{kGlobalNamespace, kPlayerClass, {}};
+constexpr std::string_view kLocalPlayerClassName = "FKALGHJIADI";
+constexpr ClassQuery kLocalPlayerClass{kGlobalNamespace, kLocalPlayerClassName, {}};
 constexpr ClassQuery kMapObject{kGlobalNamespace, kMapObjectClass, {}};
 // Named for the role they play in a query rather than for the class, so that
 // neither collides with the *keys* of the same name in the header.
@@ -57,6 +59,11 @@ constexpr std::array kQueries{
     // only on a teleport or a move, so it lags behind where the player is.
     KeyedFieldQuery{kPlayerX, FieldQuery{kMapObject, "CLFEOFKBNEJ", {}, "System.Single", 0, 6}},
     KeyedFieldQuery{kPlayerY, FieldQuery{kMapObject, "PKEECFNFEIO", {}, "System.Single", 1, 6}},
+    KeyedFieldQuery{kPlayerShaderProperties,
+                    FieldQuery{kPlayer, "PGAFHFAGDLK", {},
+                               "DecaGames.RotMG.Objects.Map.Data.ShaderProperties", 0, 1}},
+    KeyedFieldQuery{kPlayerSkin,
+                    FieldQuery{kLocalPlayerClass, "BGKKPMKNAIL", {}, "System.Int32", 0, 0}},
 
     // The two hops to the player object itself. The first is a C# auto-property
     // whose compiler-generated wrapper survived obfuscation even though the
@@ -82,7 +89,7 @@ constexpr MethodQuery kMoveTo{kPlayer, "DGLCONCOIBO", {}, "System.Boolean", kMov
 /// method is what identifies itself; naming a second class to look in would
 /// only widen where a name may be matched, and every method this file resolves
 /// is one the module is about to detour or call.
-constexpr std::string_view kShootClassName = "FKALGHJIADI";
+constexpr std::string_view kShootClassName = kLocalPlayerClassName;
 constexpr ClassQuery kShootClass{kGlobalNamespace, kShootClassName, {}};
 
 /// `void ComputeShootAngle(byte slot, out float angle, out bool canShoot, bool)`.
@@ -102,6 +109,13 @@ constexpr MethodQuery kComputeShootAngleQuery{kPlayer, "ELCBJAFBLJG", {}, "Syste
 constexpr std::string_view kShootWithAngleParameters[] = {"System.Single"};
 constexpr MethodQuery kShootWithAngleQuery{kShootClass, "EHGHCACPAGH", {}, "System.Void",
                                            kShootWithAngleParameters};
+constexpr std::string_view kIntParameter[] = {"System.Int32"};
+constexpr std::string_view kShaderPropertiesParameter[] = {
+    "DecaGames.RotMG.Objects.Map.Data.ShaderProperties"};
+constexpr MethodQuery kSetPlayerSkinQuery{kLocalPlayerClass, "IABKABACBID", {}, "System.Void",
+                                          kIntParameter};
+constexpr MethodQuery kSetPlayerShaderQuery{kLocalPlayerClass, "CNAOFINEJPK", {}, "System.Void",
+                                            kShaderPropertiesParameter};
 
 struct KeyedMethodQuery {
     std::string_view key;
@@ -112,6 +126,8 @@ constexpr std::array kMethods{
     KeyedMethodQuery{kPlayerMoveTo, kMoveTo},
     KeyedMethodQuery{kComputeShootAngle, kComputeShootAngleQuery},
     KeyedMethodQuery{kShootWithAngle, kShootWithAngleQuery},
+    KeyedMethodQuery{kSetPlayerSkin, kSetPlayerSkinQuery},
+    KeyedMethodQuery{kSetPlayerShader, kSetPlayerShaderQuery},
 };
 
 }  // namespace

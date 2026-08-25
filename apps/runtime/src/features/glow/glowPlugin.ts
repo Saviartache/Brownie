@@ -27,7 +27,12 @@ import {
   type SessionView,
 } from '@brownie/plugin-api';
 import type { FieldValue } from '@brownie/protocol';
-import { StatOverrides, asStatus, statusOfEntity, type MutableStatus } from './StatOverrides.js';
+import {
+  StatOverrides,
+  asStatus,
+  statusOfEntity,
+  type MutableStatus,
+} from '../../state/StatOverrides.js';
 import {
   DEFAULT_GLOW_STAT,
   DEFAULT_SUPPORTER_STAT,

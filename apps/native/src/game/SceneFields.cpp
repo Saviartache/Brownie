@@ -33,6 +33,10 @@ constexpr ClassQuery kImage{kUnityUiNamespace, "Image", {}, kUiAssemblies};
 constexpr std::string_view kMapDataNamespace = "DecaGames.RotMG.Objects.Map.Data";
 constexpr ClassQuery kViewHandler{kMapDataNamespace, "ViewHandler", {}};
 constexpr ClassQuery kObjectProperties{kMapDataNamespace, "ObjectProperties", {}};
+constexpr ClassQuery kShaderProperties{kMapDataNamespace, "ShaderProperties", {}};
+constexpr ClassQuery kApplicationManager{"DecaGames.RotMG.Managers", "ApplicationManager", {}};
+constexpr ClassQuery kShaderEffectManager{{}, "ShaderEffectManager", {}};
+constexpr ClassQuery kShaderLibrary{{}, "JCHBHNEGDFP", {}};
 
 /// The class every map object derives from, the local player included. Named
 /// again here rather than shared with `ProjectileFields.cpp`, which queries it
@@ -85,6 +89,12 @@ constexpr std::string_view kCameraType = "UnityEngine.Camera";
 constexpr std::string_view kVector3Type = "UnityEngine.Vector3";
 constexpr std::string_view kIntType = "System.Int32";
 constexpr std::string_view kVoidType = "System.Void";
+constexpr std::string_view kShaderEffectManagerType = "ShaderEffectManager";
+constexpr std::string_view kShaderLibraryType = "JCHBHNEGDFP";
+constexpr std::string_view kShaderPropertiesType =
+    "DecaGames.RotMG.Objects.Map.Data.ShaderProperties";
+constexpr std::string_view kShaderListType =
+    "System.Collections.Generic.List<DecaGames.RotMG.Objects.Map.Data.ShaderProperties>";
 
 struct KeyedMethodQuery {
     std::string_view key;
@@ -133,8 +143,13 @@ constexpr std::array kMethods{
                                                       {},
                                                       {},
                                                       {},
-                                                      false,
-                                                      kShowFloatingNumberArity}},
+                                                       false,
+                                                       kShowFloatingNumberArity}},
+    KeyedMethodQuery{kApplicationShaderEffects,
+                     MethodQuery{kApplicationManager, "get_ShaderEffects", {},
+                                 kShaderEffectManagerType}},
+    KeyedMethodQuery{kShaderEffectLibrary,
+                     MethodQuery{kShaderEffectManager, "get_Library", {}, kShaderLibraryType}},
 };
 
 struct KeyedFieldQuery {
@@ -149,6 +164,9 @@ constexpr std::array kFields{
                     FieldQuery{kObjectProperties, "collisionRadiusMultiplier", {}}},
     KeyedFieldQuery{kMapObjectViewHandler, FieldQuery{kMapObject, "MPGOFIHIDML", {}}},
     KeyedFieldQuery{kViewHandlerUiManager, FieldQuery{kViewHandler, "GUIManager", {}}},
+    KeyedFieldQuery{kShaderLibraryItems,
+                    FieldQuery{kShaderLibrary, "FHBLGAFGCFF", {}, kShaderListType, 0, 1}},
+    KeyedFieldQuery{kShaderPropertiesId, FieldQuery{kShaderProperties, "id", {}}},
 };
 
 }  // namespace

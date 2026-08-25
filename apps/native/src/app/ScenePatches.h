@@ -26,7 +26,6 @@
 #include <atomic>
 #include <cstdint>
 #include <optional>
-
 #include <string_view>
 
 #include "app/Cadence.h"
@@ -63,8 +62,8 @@ class ScenePatches {
   public:
     /// Collision is refreshed often enough to recover quickly when the game
     /// rebuilds its properties. UI discovery remains deliberately slower.
-    static constexpr std::uint32_t kCollisionPassIntervalMs = 100;
-    static constexpr std::uint32_t kUiPassIntervalMs = 500;
+    static constexpr std::uint32_t kCollisionPassIntervalMs = 25;
+    static constexpr std::uint32_t kUiPassIntervalMs = 1000;
 
     ScenePatches() noexcept = default;
 

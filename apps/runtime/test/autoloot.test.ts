@@ -15,7 +15,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { StatType } from '../src/constants/StatType.js';
 import { createAutoLootPlugin } from '../src/features/autoloot/autoLootPlugin.js';
 import { enlargeBags } from '../src/features/autoloot/bigBags.js';
-import { BIG_BAG_SIZE, PENDING_TIMEOUT_MS } from '../src/features/autoloot/constants.js';
+import {
+  BIG_BAG_SIZE,
+  PENDING_TIMEOUT_MS,
+  STATIONARY_TICK_LIMIT,
+} from '../src/features/autoloot/constants.js';
 import { findBeltDestination, freeSlots } from '../src/features/autoloot/destination.js';
 import { enchantCount, UNIQUE_DATA_STAT } from '../src/features/autoloot/enchants.js';
 import { Claims, LootSession } from '../src/features/autoloot/LootSession.js';
@@ -963,6 +967,21 @@ describe('the auto-loot plugin', () => {
     expect(h.sent).not.toHaveBeenCalled();
   });
 
+  // Standing on a bag waiting for the next pickup is work, not idleness — the
+  // "stop while standing still" guard must not stop it, or a bag is left half
+  // emptied after the player stops moving to watch it fill their bags.
+  it('keeps looting a bag underfoot past the standing-still limit', () => {
+    const h = harness();
+    // Stand still with nothing underfoot until well past the idle limit.
+    for (let t = 0; t <= STATIONARY_TICK_LIMIT + 1; t += 1) tick(h);
+    expect(h.sent).not.toHaveBeenCalled();
+
+    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+    advance(h);
+    tick(h);
+    expect(h.sent).toHaveBeenCalledTimes(1);
+  });
+
   it('stops when the inventory has nowhere left to put anything', () => {
     const h = harness({ carried: [{ slotId: 4, objectType: T6_BOW, quantity: 0 }] });
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
@@ -1055,19 +1074,18 @@ describe('the auto-loot plugin', () => {
     });
   });
 
-  // A permanent life/mana potion never sits on the belt, so it always fills the
-  // inventory — which makes it a spare like any other. It used to ignore the
-  // spare switch and land in the inventory whatever it said.
-  it('leaves a permanent life/mana potion until spares are asked for', () => {
+  // A permanent life/mana potion raises the cap — it is a stat potion, wanted
+  // in its own right through its own toggle, and taken whether or not spares
+  // are. Only the quaffable heal/mana spares hang on that switch.
+  it('takes a permanent life/mana potion even with spares switched off', () => {
+    // sparePotions defaults off, and the harness leaves it there.
     const h = harness();
     h.bags.set(1, bag(1, SOULBOUND_BAG, [LIFE_POTION], { x: 10, y: 10 }));
     tick(h);
-    expect(h.sent).not.toHaveBeenCalled();
-
-    h.settings.apply('sparePotions', true);
-    advance(h);
-    tick(h);
     expect(h.sent).toHaveBeenCalledTimes(1);
+    expect(h.sent.mock.calls[0]?.[1]).toMatchObject({
+      slotObject1: { objectId: 1, slotId: 0, objectType: LIFE_POTION },
+    });
   });
 
   it('goes on looking through the bag past a potion it will not take', () => {

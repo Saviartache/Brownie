@@ -35,6 +35,7 @@ type Input struct {
 // Cpp2IL drives a bundled Cpp2IL executable.
 type Cpp2IL struct {
 	BinPath        string
+	UnityVersion   string
 	FullDump       bool
 	Formats        []string
 	Processors     []string
@@ -226,6 +227,13 @@ func (c *Cpp2IL) args(stageDir, outDir, format string) []string {
 		"--exe-name=" + defaultExeName,
 		"--output-to=" + outDir,
 		"--output-as=" + format,
+	}
+	if c.UnityVersion != "" {
+		args = append(args,
+			"--force-binary-path="+filepath.Join(stageDir, "GameAssembly.dll"),
+			"--force-metadata-path="+filepath.Join(stageDir, defaultExeName+"_Data", "il2cpp_data", "Metadata", "global-metadata.dat"),
+			"--force-unity-version="+c.UnityVersion,
+		)
 	}
 	if c.Verbose {
 		args = append(args, "--verbose")

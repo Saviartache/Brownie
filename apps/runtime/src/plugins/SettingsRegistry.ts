@@ -8,6 +8,7 @@ import {
   type MultiSelectSettingOptions,
   type NumberSettingOptions,
   type SelectSettingOptions,
+  type SelectHandle,
   type SettingDescriptor,
   type SettingHandle,
   type SettingValue,
@@ -119,14 +120,20 @@ export class SettingsRegistry implements SettingsApi {
     return this.#handle<number>(key);
   }
 
-  select<T extends string>(key: string, options: SelectSettingOptions<T>): SettingHandle<T> {
+  select<T extends string>(key: string, options: SelectSettingOptions<T>): SelectHandle<T> {
     if (!options.options.some(([value]) => value === options.default)) {
       throw new TypeError(
         `setting "${key}" defaults to "${options.default}", which is not one of its options`,
       );
     }
     this.#declare({ kind: 'select', key, ...withLabel(key, options) }, options.default);
-    return this.#handle<T>(key);
+    const handle = this.#handle<T>(key);
+    return {
+      ...handle,
+      setOptions: (next): void => {
+        this.#setSelectOptions(key, next);
+      },
+    };
   }
 
   multiSelect<T extends string>(
@@ -168,11 +175,19 @@ export class SettingsRegistry implements SettingsApi {
     this.#descriptors.set(descriptor.key, descriptor);
     this.#values.set(descriptor.key, defaultValue);
 
-    // A persisted value only wins if it still fits the declaration; a setting
-    // whose bounds tightened between builds falls back to the new default
-    // rather than staying out of range.
+    // A persisted value only wins if it still fits the declaration. A dynamic
+    // select is the exception: its real options arrive after setup, and that
+    // first update validates the value before anything can use it.
     const persisted = this.#store.read(this.#pluginId)?.[descriptor.key];
     if (persisted !== undefined) {
+      if (
+        descriptor.kind === 'select' &&
+        descriptor.dynamic === true &&
+        typeof persisted === 'string'
+      ) {
+        this.#values.set(descriptor.key, persisted);
+        return;
+      }
       const coerced = coerce(descriptor, persisted);
       if (coerced !== undefined) this.#values.set(descriptor.key, coerced);
     }
@@ -230,6 +245,25 @@ export class SettingsRegistry implements SettingsApi {
       (listener as (value: SettingValue) => void)(value);
     }
     this.#onChanged(this.#pluginId, key, value);
+  }
+
+  #setSelectOptions(key: string, options: ReadonlyArray<readonly [string, string]>): void {
+    const current = this.#descriptors.get(key);
+    if (current?.kind !== 'select') throw new TypeError(`setting "${key}" is not a select`);
+    if (!options.some(([value]) => value === current.default)) {
+      throw new TypeError(
+        `setting "${key}" options no longer contain its default "${current.default}"`,
+      );
+    }
+
+    const descriptor: SettingDescriptor = { ...current, options };
+    this.#descriptors.set(key, descriptor);
+    const value = this.#values.get(key);
+    if (typeof value === 'string' && options.some(([candidate]) => candidate === value)) {
+      this.#onChanged(this.#pluginId, key, value);
+      return;
+    }
+    this.#commit(key, current.default);
   }
 }
 

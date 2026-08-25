@@ -20,6 +20,7 @@ namespace brownie::game {
 /// An opaque handle to a class in whatever metadata the source describes.
 /// Callers pass it back; they never look inside it.
 using ClassRef = const void*;
+using MethodRef = const void*;
 
 struct FieldDescription {
     std::string name;
@@ -39,6 +40,9 @@ struct MethodDescription {
     /// image — or null when it could not be verified. Verification happens in
     /// the source, so nothing downstream ever holds an unchecked pointer.
     void* address = nullptr;
+    /// The runtime's opaque method handle, for calls that require generic
+    /// context and therefore cannot safely use the entry point alone.
+    MethodRef reference = nullptr;
 };
 
 class MetadataSource {

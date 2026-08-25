@@ -158,6 +158,15 @@ class Il2CppRuntime final : public ClassCatalog {
     /// cannot see, so it is made where it is passed and forgotten after.
     [[nodiscard]] void* NewString(const char* text) const;
 
+    /// Invokes a method through IL2CPP, preserving the generic context carried
+    /// by its MethodInfo. Game thread only.
+    [[nodiscard]] void* InvokeObject(MethodRef method, void* instance, void** arguments) const;
+    [[nodiscard]] std::optional<std::int32_t> InvokeInt32(MethodRef method, void* instance,
+                                                          void** arguments) const;
+
+    /// Copies a managed UTF-16 string into native UTF-8. Game thread only.
+    [[nodiscard]] std::optional<std::string> StringValue(void* string) const;
+
     [[nodiscard]] const Il2CppApi& api() const noexcept { return api_; }
     [[nodiscard]] Il2CppDomain* domain() const noexcept { return domain_; }
 

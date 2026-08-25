@@ -31,6 +31,7 @@
 #include "app/Cadence.h"
 #include "app/GameBinding.h"
 #include "app/PlayerControl.h"
+#include "app/PlayerCosmetics.h"
 #include "app/ScenePatches.h"
 #include "core/Result.h"
 #include "core/Snapshot.h"
@@ -165,6 +166,8 @@ class Engine {
     /// claimant is a claim nobody can revoke.
     static constexpr std::uint64_t kTintLeaseMs = 3000;
     static constexpr std::uint64_t kShotNoclipLeaseMs = 3000;
+    static constexpr std::uint64_t kArcaneStyleLeaseMs = 3000;
+    static constexpr std::uint64_t kSkinLeaseMs = 3000;
 
     /// How long the next poll may wait: until the soonest job is due, and no
     /// longer than one poll's worth.
@@ -246,6 +249,17 @@ class Engine {
     /// the same plugin, so that the module's move target keeps having exactly
     /// one writer.
     void ObserveCursorWalk(bool held);
+
+    /// Passes on a Shift+left-click, so auto-follow can pick the ally under the
+    /// cursor. **Render thread**, once a frame, and only on the frame the chord
+    /// goes down.
+    ///
+    /// **Only the down edge, and no release.** Unlike the walk chord, this is a
+    /// one-shot: the runtime picks the nearest player to the last cursor point
+    /// once and needs nothing on the way up. Left-click is the game's own shoot
+    /// button, so the press is read, never swallowed — the shot still fires, and
+    /// where the cursor points travels as its own record the same as ever.
+    void ObservePick(bool held);
 
     /// Passes on the place under the cursor, on its own cadence. **Render
     /// thread.**
@@ -334,6 +348,14 @@ class Engine {
         return now_ms < shot_noclip_until_ms_.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] bool ArcaneStyleWanted(std::uint64_t now_ms) const noexcept {
+        return now_ms < arcane_style_until_ms_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool SkinWanted(std::uint64_t now_ms) const noexcept {
+        return now_ms < skin_until_ms_.load(std::memory_order_relaxed);
+    }
+
     /// Installs the connect redirect once Winsock is loaded. Ordinary to be too
     /// early — the loop is the retry.
     void TryRedirect();
@@ -405,6 +427,7 @@ class Engine {
     /// All three hold detours, so all three are declared after the engine that
     /// owns MinHook and destroyed before it.
     ScenePatches patches_;
+    PlayerCosmetics cosmetics_;
     game::ProjectileNoclip shot_noclip_;
     game::PlayerNoclip walk_noclip_;
     game::QuitWatch quit_;
@@ -485,6 +508,9 @@ class Engine {
     /// The state last reported. Render thread only, which is what makes the
     /// chord an edge rather than a record per frame.
     bool frame_cursor_walk_ = false;
+    /// Whether the pick chord was down last frame. Render thread only, so a held
+    /// Shift+left-click fires one pick on the way down rather than one a frame.
+    bool frame_pick_ = false;
     /// How often the point under the cursor is passed on. Render thread only,
     /// because that is the only thread that may ask the camera.
     Cadence cursor_point_{kCursorPointIntervalMs};
@@ -558,6 +584,17 @@ class Engine {
     ///
     /// Written by the IPC thread, read by the game's on every frame.
     std::atomic<std::uint64_t> shot_noclip_until_ms_{0};
+
+    /// The selected ShaderProperties id and the lease that owns the override.
+    /// The IPC thread publishes it only when a claim arrives; the render thread
+    /// keeps its own copy and passes an empty view once the claim expires.
+    Snapshot<std::string> arcane_style_;
+    std::string frame_arcane_style_;
+    std::uint64_t frame_arcane_style_version_ = 0;
+    std::atomic<std::uint64_t> arcane_style_until_ms_{0};
+
+    std::atomic<std::int32_t> skin_{0};
+    std::atomic<std::uint64_t> skin_until_ms_{0};
 
     std::thread thread_;
     std::atomic<bool> running_{false};

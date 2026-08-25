@@ -140,6 +140,12 @@ struct Il2CppApi {
     /// made on the thread that is about to pass it and never kept: a reference
     /// held in native memory is a reference the collector cannot see.
     Il2CppObject* (*il2cpp_string_new)(const char*) = nullptr;
+    std::int32_t (*il2cpp_string_length)(Il2CppObject*) = nullptr;
+    const std::uint16_t* (*il2cpp_string_chars)(Il2CppObject*) = nullptr;
+
+    Il2CppObject* (*il2cpp_runtime_invoke)(const MethodInfo*, void*, void**, Il2CppObject**) =
+        nullptr;
+    void* (*il2cpp_object_unbox)(Il2CppObject*) = nullptr;
 
     Il2CppThread* (*il2cpp_thread_attach)(Il2CppDomain*) = nullptr;
     void (*il2cpp_thread_detach)(Il2CppThread*) = nullptr;

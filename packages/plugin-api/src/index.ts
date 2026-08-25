@@ -24,6 +24,7 @@ export {
   type MultiSelectSettingOptions,
   type NumberSettingOptions,
   type SelectSettingOptions,
+  type SelectHandle,
   type SettingCommon,
   type SettingDescriptor,
   type SettingHandle,

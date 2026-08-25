@@ -56,6 +56,26 @@ func TestByteStaticFieldBindingsHandlesBothInstructionOrdersAndZero(t *testing.T
 	}
 }
 
+func TestPrecedingByteTableRangeHandlesCmpAl(t *testing.T) {
+	data := []byte{0x3c, 0x9f, 0x77, 0x10, 0x8b, 0x8c, 0x82}
+	base, count, ok := precedingByteTableRange(data, 0, len(data)-3)
+	if !ok || base != 0 || count != 160 {
+		t.Fatalf("range = base %d count %d ok %t", base, count, ok)
+	}
+}
+
+func TestDirectDwordTableInstructionForms(t *testing.T) {
+	forms := [][]byte{
+		{0x8b, 0x84, 0x8a}, // mov eax,[rdx+rcx*4+disp32]
+		{0x8b, 0x8c, 0x82}, // mov ecx,[rdx+rax*4+disp32]
+	}
+	for _, form := range forms {
+		if !isDirectDwordTable(form) {
+			t.Fatalf("instruction % X was not recognized", form)
+		}
+	}
+}
+
 func testBinary(data []byte) *Binary {
 	return &Binary{data: data, imageBase: 0x180000000, sections: []section{{rva: 0x1000, virtualSize: uint32(len(data)), rawSize: uint32(len(data)), characteristics: 0x20000000}}}
 }

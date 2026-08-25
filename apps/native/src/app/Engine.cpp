@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -53,6 +54,9 @@ constexpr std::string_view kCursorPointAction = "cursor-at";
 /// The walk-to-cursor chord going down and coming up. See
 /// `Engine::ObserveCursorWalk`.
 constexpr std::string_view kCursorWalkAction = "unstick";
+
+/// The Shift+left-click that picks an ally to follow. See `Engine::ObservePick`.
+constexpr std::string_view kPickAction = "pick";
 
 /// Which way the player is walking under their own power. See
 /// `Engine::ObserveSteer`.
@@ -108,6 +112,24 @@ constexpr float kMaxCursorWalkTiles = 30.0F;
     return GameHasFocus();
 }
 
+/// Whether Shift and the left button are both down, in a window of this process.
+///
+/// **The left button, which the game *does* use to shoot** — unlike the walk
+/// chord's middle button. Polled and never swallowed, so the shot still fires;
+/// the Shift is what tells a deliberate pick from ordinary shooting, and reading
+/// it here rather than intercepting the click is what keeps the two from
+/// fighting over the same button.
+[[nodiscard]] bool ShiftLeftClickHeld() noexcept {
+    constexpr int kDown = 0x8000;
+    if ((::GetAsyncKeyState(VK_SHIFT) & kDown) == 0) {
+        return false;
+    }
+    if ((::GetAsyncKeyState(VK_LBUTTON) & kDown) == 0) {
+        return false;
+    }
+    return GameHasFocus();
+}
+
 /// Which way the movement keys are pointing, in the screen's own terms.
 ///
 /// **Screen terms, not world ones, because the keys have no world meaning on
@@ -152,6 +174,8 @@ constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultipli
 constexpr std::string_view kTintFeature = "scene.healthBarTint";
 constexpr std::string_view kTintColourFeature = "scene.healthBarTintColour";
 constexpr std::string_view kShotNoclipFeature = "shots.noclip";
+constexpr std::string_view kArcaneStyleFeature = "player.arcaneStyle";
+constexpr std::string_view kSkinFeature = "player.skin";
 constexpr std::string_view kFeatureOn = "true";
 
 /// The number a feature value carries, or nothing when it does not carry one.
@@ -174,6 +198,16 @@ constexpr std::string_view kFeatureOn = "true";
     char* end = nullptr;
     const float parsed = std::strtof(text.data(), &end);
     if (end != text.data() + value.size() || !std::isfinite(parsed)) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+[[nodiscard]] std::optional<std::int32_t> FeatureSkin(std::string_view value) noexcept {
+    std::int32_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (value.empty() || result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+        parsed <= 0) {
         return std::nullopt;
     }
     return parsed;
@@ -372,6 +406,23 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     }
     if (key == kShotNoclipFeature) {
         shot_noclip_until_ms_.store(on ? now + kShotNoclipLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kArcaneStyleFeature) {
+        constexpr std::size_t kMaxStyleName = 512;
+        if (value.size() > kMaxStyleName) {
+            return;
+        }
+        arcane_style_.Publish(std::string{value});
+        arcane_style_until_ms_.store(value.empty() ? 0 : now + kArcaneStyleLeaseMs,
+                                     std::memory_order_relaxed);
+        return;
+    }
+    if (key == kSkinFeature) {
+        const auto skin = FeatureSkin(value);
+        skin_.store(skin.value_or(0), std::memory_order_relaxed);
+        skin_until_ms_.store(skin.has_value() ? now + kSkinLeaseMs : 0,
+                             std::memory_order_relaxed);
     }
 }
 
@@ -505,6 +556,7 @@ void Engine::AdvanceSetup() {
     // to them, exactly as it does the game's.
     if (const auto* table = binding_.table(); table != nullptr && binding_.runtime() != nullptr) {
         patches_.AdvanceSetup(*binding_.runtime(), *table);
+        cosmetics_.AdvanceSetup(*binding_.runtime(), *table);
         // Cheap once it has everything, and asked again until it does: the
         // engine's classes are registered when the runtime gets round to them.
         projection_.Bind(*table);
@@ -525,6 +577,7 @@ void Engine::AdvanceSetup() {
             // the local player is where the game's own floating text is reached
             // from.
             patches_.BindPlayer(*route);
+            cosmetics_.BindPlayer(*route);
         }
     }
 
@@ -722,6 +775,19 @@ void Engine::ObserveCursorWalk(bool held) {
     // anything. Queued rather than sent — the pipe belongs to the IPC thread,
     // and a frame is not a place to wait on one.
     actions_.Push(overlay::BuildAction(kCursorWalkAction, {held ? "1" : "0"}));
+}
+
+void Engine::ObservePick(bool held) {
+    // The down edge alone: a held Shift+left-click is one pick, not one a frame,
+    // and there is nothing to say on the way up. The runtime resolves the ally
+    // against the cursor point it is already being sent — see `SendCursorPoint`,
+    // which this frame's `tracking` keeps fresh.
+    const bool rising = held && !frame_pick_;
+    frame_pick_ = held;
+    if (!rising) {
+        return;
+    }
+    actions_.Push(overlay::BuildAction(kPickAction, {"1"}));
 }
 
 void Engine::ObserveSteer(bool steering, float right, float up,
@@ -1145,6 +1211,12 @@ void Engine::DrawFrame() {
     const bool chord = !overlay_.visible() && CursorWalkChordHeld();
     ObserveCursorWalk(chord);
 
+    // And once more for the pick chord: a Shift+left-click while looking at the
+    // game names an ally to follow. Not while a panel is open — a click there is
+    // aimed at a widget, not a player on the map.
+    const bool pick = !overlay_.visible() && ShiftLeftClickHeld();
+    ObservePick(pick);
+
     // And once more for the movement keys. Which way they point is free to ask;
     // what that means in tiles is not, so the decision to *say* it is taken here
     // — before the camera is measured — and only a change of keys or the cadence
@@ -1161,7 +1233,7 @@ void Engine::DrawFrame() {
     // aim ranks enemies by how close they are to it. Both are off by default,
     // and the answer costs three calls into managed code — so nothing is
     // measured until one of them, the markers, or a steering record wants it.
-    const bool tracking = chord || CursorTrackWanted(now);
+    const bool tracking = chord || pick || CursorTrackWanted(now);
     const std::optional<FrameScreen> screen =
         tracking || steer_due || frame_ui_.movement_markers || frame_ui_.aim_markers ||
                 frame_ui_.dodge_markers
@@ -1178,8 +1250,16 @@ void Engine::DrawFrame() {
     // the runtime stops saying them.
     const std::optional<float> collider = ColliderWanted(now);
     const bool tint = TintWanted(now);
+    (void)arcane_style_.Refresh(frame_arcane_style_, frame_arcane_style_version_);
+    const std::string_view arcane_style =
+        ArcaneStyleWanted(now) ? std::string_view{frame_arcane_style_} : std::string_view{};
+    const std::optional<std::int32_t> skin =
+        SkinWanted(now) ? std::optional<std::int32_t>{skin_.load(std::memory_order_relaxed)}
+                        : std::nullopt;
     patches_.Want({tint, game::UnpackColour(TintColour()), collider});
     patches_.Apply(now);
+    cosmetics_.Want(skin, arcane_style);
+    cosmetics_.Apply(now);
 
     // A store rather than a claim acted on once: what the lease says is the
     // whole of what the detours read. Written every frame rather than on a

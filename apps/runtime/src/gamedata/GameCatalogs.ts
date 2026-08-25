@@ -5,6 +5,16 @@ import { readContainerFacts, readItemFacts, type ContainerFacts, type ItemFacts 
 import { readPermanentStatMaxima, type PermanentStatMaxima } from './playerClasses.js';
 import { readProjectiles, type ProjectileDefinition } from './projectiles.js';
 import {
+  readAppearance,
+  readArcaneStyle,
+  readSkin,
+  type AppearanceChoice,
+  type AppearanceDefinition,
+  type AppearanceKind,
+  type PlayerSkin,
+  type SkinDefinition,
+} from './cosmetics.js';
+import {
   attribute,
   childText,
   hasChild,
@@ -46,6 +56,12 @@ export interface ObjectDefinition {
   readonly container: ContainerFacts | undefined;
   /** How high its stats go, for the objects that are playable classes. */
   readonly statMaxima: PermanentStatMaxima | undefined;
+  /** Skin metadata, absent for every object that is not a player skin. */
+  readonly skin: SkinDefinition | undefined;
+  /** Dye or cloth metadata, absent for everything else. */
+  readonly appearance: AppearanceDefinition | undefined;
+  /** Shader id for an Arcane Style item, absent for everything else. */
+  readonly arcaneStyle: string | undefined;
 }
 
 /** What the runtime keeps about one ground type. */
@@ -69,6 +85,10 @@ export class GameObjectCatalog implements ObjectCatalog {
   readonly #byType: ReadonlyMap<number, ObjectDefinition>;
   /** Built once: the option list a portal chooser needs is a fixed catalog fact. */
   readonly #dungeonPortals: readonly DungeonPortal[];
+  readonly #skinsByClass: ReadonlyMap<number, readonly PlayerSkin[]>;
+  readonly #mainAppearances: readonly AppearanceChoice[];
+  readonly #accessoryAppearances: readonly AppearanceChoice[];
+  readonly #arcaneStyles: readonly string[];
 
   constructor(definitions: Iterable<ObjectDefinition>) {
     const byType = new Map<number, ObjectDefinition>();
@@ -77,6 +97,29 @@ export class GameObjectCatalog implements ObjectCatalog {
     this.#dungeonPortals = [...byType.values()]
       .filter((definition) => definition.isDungeonPortal)
       .map((definition) => ({ type: definition.type, name: definition.id }));
+    const skinsByClass = new Map<number, PlayerSkin[]>();
+    for (const definition of byType.values()) {
+      const skin = definition.skin;
+      if (skin === undefined) continue;
+      const skins = skinsByClass.get(skin.playerClassType) ?? [];
+      skins.push({ type: skin.type, name: skin.name });
+      skinsByClass.set(skin.playerClassType, skins);
+    }
+    for (const skins of skinsByClass.values()) skins.sort((a, b) => a.name.localeCompare(b.name));
+    this.#skinsByClass = skinsByClass;
+    const appearances: AppearanceDefinition[] = [];
+    for (const definition of byType.values()) {
+      if (definition.appearance !== undefined) appearances.push(definition.appearance);
+    }
+    this.#mainAppearances = appearanceChoices(appearances, 'main');
+    this.#accessoryAppearances = appearanceChoices(appearances, 'accessory');
+    this.#arcaneStyles = [
+      ...new Set(
+        [...byType.values()].flatMap((definition) =>
+          definition.arcaneStyle === undefined ? [] : [definition.arcaneStyle],
+        ),
+      ),
+    ].sort((a, b) => a.localeCompare(b));
   }
 
   get size(): number {
@@ -151,6 +194,41 @@ export class GameObjectCatalog implements ObjectCatalog {
   statMaxima(objectType: number): PermanentStatMaxima | undefined {
     return this.#byType.get(objectType)?.statMaxima;
   }
+
+  skinsForClass(objectType: number): readonly PlayerSkin[] {
+    return this.#skinsByClass.get(objectType) ?? [];
+  }
+
+  mainAppearances(): readonly AppearanceChoice[] {
+    return this.#mainAppearances;
+  }
+
+  accessoryAppearances(): readonly AppearanceChoice[] {
+    return this.#accessoryAppearances;
+  }
+
+  arcaneStyles(): readonly string[] {
+    return this.#arcaneStyles;
+  }
+}
+
+function appearanceChoices(
+  definitions: readonly AppearanceDefinition[],
+  layer: AppearanceDefinition['layer'],
+): readonly AppearanceChoice[] {
+  const byValue = new Map<number, { names: string[]; kind: AppearanceKind }>();
+  for (const definition of definitions) {
+    if (definition.layer !== layer) continue;
+    const existing = byValue.get(definition.value);
+    if (existing === undefined) {
+      byValue.set(definition.value, { names: [definition.name], kind: definition.kind });
+    } else if (!existing.names.includes(definition.name)) {
+      existing.names.push(definition.name);
+    }
+  }
+  return [...byValue.entries()]
+    .map(([value, entry]) => ({ value, name: entry.names.sort().join(' / '), kind: entry.kind }))
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
 }
 
 export class GameTileCatalog implements TileCatalog {
@@ -307,6 +385,9 @@ export async function readObjectDefinitions(
       item: readItemFacts(element),
       container: readContainerFacts(element, objectClass),
       statMaxima: readPermanentStatMaxima(element, objectClass),
+      skin: readSkin(element, type, id, objectClass),
+      appearance: readAppearance(element, id, objectClass),
+      arcaneStyle: readArcaneStyle(element, id, objectClass),
     });
   }
   return definitions;

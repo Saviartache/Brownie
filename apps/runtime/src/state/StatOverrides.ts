@@ -57,7 +57,7 @@ export class StatOverrides {
    * @param announced true for a status out of `UPDATE.newObjs`, where the
    *   client is *creating* the object: everything it was previously told is
    *   gone with the old object, so an injected stat has to be injected again.
-   *   Without this, re-entering a map would leave the glow behind.
+   *   Without this, re-entering a map would leave the override behind.
    * @returns whether the status was edited — a packet that would re-encode to
    *   the bytes it arrived as should forward as those bytes instead.
    */
@@ -93,6 +93,16 @@ export class StatOverrides {
   reset(): void {
     this.#originals.clear();
     this.#applied.clear();
+  }
+
+  /** Remembers server values before an override is first selected. */
+  remember(status: MutableStatus, ids: readonly number[]): void {
+    if (!Array.isArray(status.data)) return;
+    const stats = status.data as unknown as MutableStat[];
+    for (const id of ids) {
+      const value = findStat(stats, id)?.value;
+      if (typeof value === 'number') this.#originals.set(id, value);
+    }
   }
 
   #write(stats: MutableStat[], id: number, wanted: number): boolean {

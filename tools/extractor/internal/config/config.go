@@ -79,6 +79,9 @@ type Cpp2IL struct {
 	Dir string `yaml:"dir"`
 	// Binary, when set, overrides OS-specific binary resolution.
 	Binary string `yaml:"binary"`
+	// UnityVersion forces Cpp2IL's Unity version when archived inputs do not
+	// include globalgamemanagers.
+	UnityVersion string `yaml:"unity_version"`
 	// FullDump lists Cpp2IL output formats at runtime and runs every format it
 	// reports. If listing fails, Formats is used as a fallback.
 	FullDump bool `yaml:"full_dump"`
