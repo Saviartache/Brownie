@@ -352,7 +352,7 @@ on.
 
 **And it has to be able to end without being told to.** A hold left standing is
 a plugin running with nothing left able to say stop, and one of them holds the
-client's entire uplink. Three things end one, and none of them depends on the
+client's entire socket. Three things end one, and none of them depends on the
 others: the key coming up; the module finding the player is no longer looking at
 the game, which reads every key as up; and the link going down, which the
 runtime treats as every hold released.

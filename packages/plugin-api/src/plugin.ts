@@ -38,7 +38,7 @@ export interface PluginMeta {
    * every plugin. **A string names a boolean setting to bind instead**, for the
    * plugin whose switch is not the thing a player turns on and off: a plugin
    * cannot observe its own switch moving, so one that has to *undo* something
-   * when it stops — noclip lets go of the client's uplink — carries its own
+   * when it stops — noclip lets go of the client's socket — carries its own
    * armed/disarmed setting, and that is what a key has to move.
    *
    * **A list offers more than one key**, for the plugin where switching it on

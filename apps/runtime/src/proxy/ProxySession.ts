@@ -147,7 +147,7 @@ export class ProxySession {
   }
 
   /**
-   * Holds everything the client sends, or lets it go again.
+   * Holds everything this session carries, or lets it go again.
    *
    * A lag switch, and the one thing in this class that is a *gameplay*
    * capability rather than plumbing — player noclip needs it, because silencing
@@ -155,10 +155,12 @@ export class ProxySession {
    * back, and the only way to stop that is for the server not to hear about the
    * move. See `features/noclip`.
    *
-   * **One direction only.** What the server sends still arrives, so the client
-   * keeps ticking, keeps rendering and keeps queueing its answers; it is our
-   * answers the server does not get. Held, never dropped — see
-   * {@link Transport.pause}.
+   * **Both directions, which is the whole socket and not half of one.** Holding
+   * only the uplink leaves the client hearing a server that is still telling it
+   * where it thinks the player is, so the correction lands on screen anyway and
+   * the client answers each of those ticks — which only makes the burst on
+   * release longer. The reference implementation held both, and this is that.
+   * Held, never dropped — see {@link Transport.pause}.
    *
    * Held traffic goes out in order the moment this is called with `false`, and
    * the session closing throws it away with everything else. There is no cap
@@ -166,11 +168,19 @@ export class ProxySession {
    * is not something this layer can know, and it is whoever asked for the hold
    * that has to keep an eye on the clock.
    */
-  holdClientTraffic(held: boolean): void {
+  holdTraffic(held: boolean): void {
     const uplink = this.#server?.transport;
-    if (uplink === undefined) return;
-    if (held) uplink.pause();
-    else uplink.resume();
+    const downlink = this.#client.transport;
+    if (held) {
+      uplink?.pause();
+      downlink.pause();
+      return;
+    }
+    // The uplink first: what the client queued up answers ticks it has already
+    // seen, and the server should hear those before the client is handed the
+    // backlog of ticks it has not answered yet.
+    uplink?.resume();
+    downlink.resume();
   }
 
   #inject(link: PeerLink | undefined, packet: DecodedPacket, side: string): void {

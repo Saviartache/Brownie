@@ -122,12 +122,12 @@ describe('ProxySession', () => {
     h.client.receive(h.gameClient.encipher(teleportFrame(0, 'open-the-link')));
     expect(h.server().sent).toHaveLength(1);
 
-    h.session.holdClientTraffic(true);
+    h.session.holdTraffic(true);
     h.client.receive(h.gameClient.encipher(teleportFrame(1, 'held-1')));
     h.client.receive(h.gameClient.encipher(teleportFrame(2, 'held-2')));
     expect(h.server().sent).toHaveLength(1);
 
-    h.session.holdClientTraffic(false);
+    h.session.holdTraffic(false);
 
     // In order and complete. Nothing may be dropped: the frames are enciphered
     // in the order they were handed over, so a missing one leaves the server
@@ -142,16 +142,24 @@ describe('ProxySession', () => {
     ]);
   });
 
-  it('keeps letting the server through while the client is held', () => {
+  it('holds what the server sends too, and lets that go in order as well', () => {
     const h = harness();
     h.client.receive(h.gameClient.encipher(teleportFrame(0, 'open-the-link')));
-    h.session.holdClientTraffic(true);
+    h.session.holdTraffic(true);
 
-    // Only one direction is held. The client has to keep hearing the server, or
-    // it has nothing to answer and nothing to draw.
-    h.server().receive(h.gameServer.encipher(frameOf(200, Buffer.from('tick'))));
+    // Both directions, which is what makes this the whole socket rather than
+    // half of one: a client that keeps hearing the server keeps being told
+    // where the server thinks it is, and that correction is the very thing the
+    // hold exists to keep off the screen.
+    h.server().receive(h.gameServer.encipher(frameOf(200, Buffer.from('tick-1'))));
+    h.server().receive(h.gameServer.encipher(frameOf(200, Buffer.from('tick-2'))));
+    expect(h.client.sent).toHaveLength(0);
 
-    expect(h.client.sent).toHaveLength(1);
+    h.session.holdTraffic(false);
+
+    const toClient = h.client.sent.map((frame) => h.gameClient.decipher(frame));
+    expect(toClient).toHaveLength(2);
+    expect(toClient.map((frame) => frame.subarray(5).toString())).toEqual(['tick-1', 'tick-2']);
   });
 
   it('forwards an untouched packet as the exact bytes that arrived', () => {

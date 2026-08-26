@@ -83,7 +83,7 @@ describe('the noclip plugin', () => {
     showText: (text) => {
       shown.push(text);
     },
-    holdUplink: (held) => {
+    holdSocket: (held) => {
       holds.push(held);
     },
   };
@@ -141,7 +141,7 @@ describe('the noclip plugin', () => {
     expect(shown).toEqual([]);
   });
 
-  it('claims the module’s half and holds the uplink once switched on', () => {
+  it('claims the module’s half and holds the socket once switched on', () => {
     const { host, settings } = load();
     settings.apply('active', true);
 
@@ -154,7 +154,7 @@ describe('the noclip plugin', () => {
     expect(packet.verdict).toBe(Verdict.Forward);
   });
 
-  it('lets the uplink go before it drops the claim', () => {
+  it('lets the socket go before it drops the claim', () => {
     const { settings } = load();
     settings.apply('active', true);
     holds.length = 0;
@@ -213,7 +213,7 @@ describe('the noclip plugin', () => {
     expect(shown.at(-1)).toBe('Noclip: 17s left');
   });
 
-  it('switches itself off when the budget is spent, and lets the uplink go', () => {
+  it('switches itself off when the budget is spent, and lets the socket go', () => {
     const { settings } = load();
     settings.apply('active', true);
 

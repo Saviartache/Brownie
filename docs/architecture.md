@@ -150,16 +150,17 @@ implementation kept an unbounded map for the life of the process.
 Nothing is a module-level singleton. The composition root builds the object
 graph in `Application`; anything that needs a collaborator is given it.
 
-A session can **hold** what the client sends — `holdClientTraffic`, one
-direction only, which is a lag switch and the one gameplay capability on this
-class. It is the transport's own gate and its own ordered queue, the same pair
-that covers the TCP connect window, so a hold is held and never dropped: these
-are enciphered frames, and RC4 does not survive a gap. Neither does the game's
-protocol — the client answers each server tick with a `MOVE` carrying that
-tick's number, and a missing one is a gap the server counts. Player noclip is
-what needs this, and `features/noclip` is where the clock on it lives: this
-layer cannot know how long a hold the server will tolerate, so it enforces
-nothing but order.
+A session can **hold** everything it carries — `holdTraffic`, both directions,
+which is a lag switch and the one gameplay capability on this class. It is the
+transport's own gate and its own ordered queue, the same pair that covers the
+TCP connect window, so a hold is held and never dropped: these are enciphered
+frames, and RC4 does not survive a gap. Neither does the game's protocol — the
+client answers each server tick with a `MOVE` carrying that tick's number, and a
+missing one is a gap the server counts. Holding the uplink alone is half a hold:
+the server keeps telling the client where it thinks the player is, so the
+correction lands anyway. Player noclip is what needs this, and `features/noclip`
+is where the clock on it lives: this layer cannot know how long a hold the server
+will tolerate, so it enforces nothing but order.
 
 ## World model — what it keeps, and for how long
 

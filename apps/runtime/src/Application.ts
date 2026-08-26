@@ -812,7 +812,7 @@ export class Application {
 
     // Built here for the same reason as dodge, twice over: it needs a way to
     // say something the player will read without looking away from the game,
-    // and it needs to hold the uplink — a lag switch over the whole session,
+    // and it needs to hold the socket — a lag switch over the whole session,
     // which is not a thing a packet handler can do and not a thing the plugin
     // surface should carry. The switch that turns the module's half on *is* on
     // that surface, through `setFeature`.
@@ -823,8 +823,8 @@ export class Application {
             ['text', colour.red, colour.green, colour.blue, text].join('|'),
           );
         },
-        holdUplink: (held) => {
-          this.#proxy.holdClientTraffic(held);
+        holdSocket: (held) => {
+          this.#proxy.holdTraffic(held);
         },
       }),
     );

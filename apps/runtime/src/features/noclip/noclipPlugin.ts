@@ -9,8 +9,15 @@
  * walkability check, so the player walks where the client would have stopped
  * them; the server keeps its own idea of where they are and pulls them back,
  * which is the rubber-banding that makes the first half useless on its own. So
- * while noclip is on this holds everything the client sends, and the server is
- * never told about the move.
+ * while noclip is on this holds the whole socket, in both directions, and the
+ * server is never told about the move.
+ *
+ * **Both directions, because half a hold is not a hold.** Holding only what the
+ * client sends leaves the server still talking, and what it is saying is where
+ * it thinks the player is — so the correction lands on screen regardless, and
+ * the client answers every one of those ticks into a queue that then has to be
+ * flushed. The reference implementation held both, the same lag switch its
+ * socket plugin used, and this is that.
  *
  * **Held, not dropped, and that is the correction this file was built on.** The
  * first version dropped the client's `MOVE` packets, which looked like the same
@@ -18,7 +25,7 @@
  * carries that tick's number. Dropping them leaves a gap in the numbers, and the
  * first one to arrive after the hold is a tick the server was not waiting for —
  * so switching noclip *off* kicked you off the server, every time. Holding the
- * uplink and letting it go in order leaves no gap: the server hears every tick,
+ * socket and letting it go in order leaves no gap: the server hears every tick,
  * late and all at once. This is what the reference implementation did, and now
  * it is clear why it did it.
  *
@@ -65,13 +72,13 @@ export interface NoclipOutput {
   showText(text: string, colour: HoldColour): void;
 
   /**
-   * Holds everything the client sends to its game server, or lets it go.
+   * Holds everything the session carries, in both directions, or lets it go.
    *
    * Not a packet handler's job, and deliberately not on the plugin surface: it
-   * is the whole uplink, in order, and letting it go is a burst the server has
-   * to accept. See `ProxySession.holdClientTraffic`.
+   * is the whole socket, in order, and letting it go is a burst both ends have
+   * to accept. See `ProxySession.holdTraffic`.
    */
-  holdUplink(held: boolean): void;
+  holdSocket(held: boolean): void;
 }
 
 export function createNoclipPlugin(output: NoclipOutput): Plugin {
@@ -80,9 +87,9 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
       id: 'player-noclip',
       name: 'Player Noclip',
       category: PluginCategory.Movement,
-      description: 'Walks through what stands on the map, holding the uplink while it does.',
+      description: 'Walks through what stands on the map, holding the socket while it does.',
       // The setting, not the switch. A plugin cannot see its own switch move,
-      // and this one has to let go of the client's uplink when it stops — so
+      // and this one has to let go of the client's socket when it stops — so
       // what a key moves is the control that has a listener behind it.
       bindable: 'active',
     },
@@ -96,7 +103,7 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
       // than merely defaulted to it: a longer hold is not a setting somebody
       // wants, it is a disconnection they have not had yet.
       const budgetSeconds = context.settings.range('holdSeconds', {
-        label: 'Hold the uplink for (s)',
+        label: 'Hold the socket for (s)',
         default: 20,
         min: 1,
         max: 20,
@@ -150,13 +157,13 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
       const start = (): void => {
         if (heldSince !== undefined) return;
         heldSince = Date.now();
-        output.holdUplink(true);
+        output.holdSocket(true);
         claim(true);
         say(holdState(0, budgetSeconds.get()));
         stopTicking = context.timers.setInterval(tick, TICK_MS);
       };
 
-      // **The uplink is let go before the claim is dropped, not after.**
+      // **The socket is let go before the claim is dropped, not after.**
       // Releasing is what puts the client's own account of where it walked back
       // on the wire; the module's half staying on for another frame changes
       // nothing the server can see. The other order would send that burst while
@@ -166,7 +173,7 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
         heldSince = undefined;
         stopTicking?.();
         stopTicking = undefined;
-        output.holdUplink(false);
+        output.holdSocket(false);
         claim(false);
       };
 

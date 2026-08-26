@@ -82,8 +82,8 @@ export class SocketTransport implements Transport {
    * Whether sends go out or queue up.
    *
    * Closed at birth for the server side, and closed again by `pause()` for as
-   * long as something wants the uplink held. Either way what is behind it is
-   * one queue with one bound.
+   * long as something wants this link held. Either way what is behind it is one
+   * queue with one bound.
    */
   #gateOpen: boolean;
   /** Set while Node has told us to wait for `drain`. */

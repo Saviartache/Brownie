@@ -149,7 +149,7 @@ export class ProxyServer implements SessionApi {
   }
 
   /**
-   * Holds, or releases, what every live session sends to its game server.
+   * Holds, or releases, everything every live session carries.
    *
    * Across all of them rather than one, because the thing that asks for this is
    * a switch on a feature and not a statement about a session — and a hold left
@@ -157,10 +157,10 @@ export class ProxyServer implements SessionApi {
    * session that connects while this is on is *not* held: it is a new
    * connection, and whoever wanted the hold gets told the old one ended.
    *
-   * See {@link ProxySession.holdClientTraffic} for what a hold is and is not.
+   * See {@link ProxySession.holdTraffic} for what a hold is and is not.
    */
-  holdClientTraffic(held: boolean): void {
-    for (const { session } of this.#sessions.values()) session.holdClientTraffic(held);
+  holdTraffic(held: boolean): void {
+    for (const { session } of this.#sessions.values()) session.holdTraffic(held);
   }
 
   // ── SessionApi ────────────────────────────────────────────────────────────

@@ -2,10 +2,11 @@
  * The arithmetic of a hold that is on a clock.
  *
  * Noclip stops the client's own walkability check, and the server pulls the
- * player back anyway — so the runtime stops telling it, by dropping the `MOVE`
- * packets while noclip is on. A server that hears nothing for long enough drops
- * the connection instead, which is why the hold is on a budget, and why what is
- * left of that budget has to be readable at a glance from inside the game.
+ * player back anyway — so the runtime stops the two of them talking, by holding
+ * the whole socket while noclip is on. A server that hears nothing for long
+ * enough drops the connection instead, which is why the hold is on a budget, and
+ * why what is left of that budget has to be readable at a glance from inside the
+ * game.
  *
  * Kept apart from the plugin because this is the part worth testing: a colour
  * that never reaches red, or a countdown that reads one second late, is a
