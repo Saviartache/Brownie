@@ -267,6 +267,8 @@ export class DodgeSearch {
   #fromG = 0;
   #fromImpact = Infinity;
   #fromRoom = NO_THREAT_TILES;
+  /** How far the node being expanded is from its own moment's anchor. */
+  #fromAnchor = 0;
   #step = 0;
   #next = 0;
   #stepsLeft = 0;
@@ -449,6 +451,13 @@ export class DodgeSearch {
       this.#arriveMs = this.#startsMs + request.tickMs;
       this.#anchorX = request.anchorX + request.anchorStepX * next;
       this.#anchorY = request.anchorY + request.anchorStepY * next;
+      // Where this step began, against the anchor of the slice it began on —
+      // the same comparison the search makes, so a run and a route are priced
+      // by one rule. See {@link stepCost}.
+      this.#fromAnchor = Math.hypot(
+        x - (request.anchorX + request.anchorStepX * step),
+        y - (request.anchorY + request.anchorStepY * step),
+      );
 
       const wasGap = request.ground.hazardGapTiles(x, y);
       let toX = x + dirX * request.stepTiles;
@@ -588,6 +597,13 @@ export class DodgeSearch {
     this.#arriveMs = this.#startsMs + request.tickMs;
     this.#anchorX = request.anchorX + request.anchorStepX * this.#next;
     this.#anchorY = request.anchorY + request.anchorStepY * this.#next;
+    // Measured against the anchor as it was on *this* node's own slice, which
+    // is the only comparison that means anything while the player is walking
+    // and the anchor is walking with them. Once per expansion, not per move.
+    this.#fromAnchor = Math.hypot(
+      this.#fromX - (request.anchorX + request.anchorStepX * slice),
+      this.#fromY - (request.anchorY + request.anchorStepY * slice),
+    );
     const wasGap = request.ground.hazardGapTiles(this.#fromX, this.#fromY);
 
     // Standing still first, and it can never be refused: a node exists only
@@ -676,6 +692,7 @@ export class DodgeSearch {
     let cost = stepCost(
       request.weights,
       anchorTiles,
+      this.#fromAnchor,
       travelTiles,
       clearance,
       request.ground.crowdingAt(toX, toY, this.#arriveMs),

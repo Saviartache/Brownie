@@ -142,14 +142,16 @@ export interface DodgeSettings {
    * a dodge tighter and more reluctant to travel; lowering it makes the planner
    * willing to walk further to be safer.
    *
-   * **Small against the room a shot needs, and that ordering is the point.**
-   * Coming back is a convenience; not being hit is not. The enemy aims at where
-   * the server last saw the character, which after a sidestep is the very ground
-   * the planner would be walking back to — so an anchor strong enough to insist
-   * on the way home is an anchor that walks people into the next volley.
-   * Measured across a dozen fights, quartering it took about a third off the
-   * hits at every preset. Live report: "we catch shots because you try to
-   * return; the priority is the dodge."
+   * **It cannot buy a tight step, whatever it is set to, and that is what
+   * makes it safe to ask for.** The enemy aims at where the server last saw the
+   * character, which after a sidestep is the very ground the planner would be
+   * walking back to — so a pull that could pay for the shortest way home was a
+   * pull that walked people into the next volley. A step short of comfortable
+   * is now charged on the ground it left instead of the ground it reached, so
+   * closing the gap is only ever worth anything by way of steps that keep their
+   * room: round the fire, in the other direction, or not at all. See
+   * `StepCost`. Live report: "hold position and come back at the slightest
+   * opportunity — not through the shots, round them."
    */
   readonly holdGroundWeight: number;
   /**

@@ -237,12 +237,12 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // the player meant to be.** Raising it gives the ground back sooner; lowering
   // it lets the planner walk further to be safer.
   //
-  // **Deliberately small against the room a shot needs**, and that is the whole
-  // of the ordering: coming back is a convenience and not being hit is not.
-  // Measured at one, the character was walking home into fire a monster had
-  // already aimed at the ground it left — a quarter of that is a third fewer
-  // hits across a dozen fights, at every preset. Live report: "we catch shots
-  // because you try to return; the priority is the dodge."
+  // **Turn it up as far as you like: it cannot buy a tight step.** A step short
+  // of comfortable is charged on the ground it left rather than the ground it
+  // reached, so the way home is only ever worth anything by way of steps that
+  // keep their room — round the fire, in the other direction, or not at all.
+  // See `StepCost`. What this actually decides is how much *walking* is worth
+  // doing to be back where you were.
   const holdGroundWeight = settings.range('holdGroundWeight', {
     label: 'Hold your ground',
     group: 'Control',

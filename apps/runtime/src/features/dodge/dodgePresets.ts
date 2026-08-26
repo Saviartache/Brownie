@@ -82,9 +82,9 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     driftTilesPerSecond: 0.15,
     safeClearanceTiles: 0.18,
     // The highest of the three, because holding their ground is what "leave me
-    // alone" comes to — but still far under the room a shot needs, for the
-    // reason every preset shares. See `DodgeSettings.holdGroundWeight`.
-    holdGroundWeight: 0.3,
+    // alone" comes to. Safe to ask for now that the pull cannot be spent on a
+    // tight step at all — see `DodgeSettings.holdGroundWeight`.
+    holdGroundWeight: 0.4,
     greed: 2,
     maxExpansions: 300,
     keepAwayTiles: 2,
@@ -98,7 +98,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.1,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.25,
-    holdGroundWeight: 0.25,
+    holdGroundWeight: 0.35,
     greed: 1.6,
     maxExpansions: 400,
     keepAwayTiles: 2.5,
@@ -112,7 +112,11 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.16,
     driftTilesPerSecond: 0.3,
     safeClearanceTiles: 0.35,
-    holdGroundWeight: 0.15,
+    // **The lowest of the three and no longer by much.** Its wide margins are
+    // what a step is measured against before the pull is credited at all, so
+    // this is the preset the pull costs least: measured across four fights and
+    // five firing phases, doubling it changed its hits not at all.
+    holdGroundWeight: 0.3,
     greed: 1.4,
     // **Measured, not chosen.** A screen with six ranks of fire on it is what
     // spends a budget, and this is what keeps that plan inside a few

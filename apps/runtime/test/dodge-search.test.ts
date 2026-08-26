@@ -290,17 +290,43 @@ describe('the open list', () => {
 
 describe('what a step is worth', () => {
   it('charges for standing away from where the player meant to be', () => {
-    const near = stepCost(WEIGHTS, 1, 0, Infinity, 0, Infinity, 5);
-    const far = stepCost(WEIGHTS, 3, 0, Infinity, 0, Infinity, 5);
+    const near = stepCost(WEIGHTS, 1, 1, 0, Infinity, 0, Infinity, 5);
+    const far = stepCost(WEIGHTS, 3, 3, 0, Infinity, 0, Infinity, 5);
     expect(far - near).toBeCloseTo(2 * WEIGHTS.anchorPerTile, 6);
+  });
+
+  // **The rule that lets the pull be strong without being dangerous.** The
+  // enemy aims at the ground the character was standing on, so the way home is
+  // exactly where the next shot is going — and an anchor that can pay for a
+  // tight step is an anchor that walks people into the volley. A step short of
+  // comfortable is charged on the ground it left instead, so closing the gap is
+  // only ever worth anything by way of steps that keep their room.
+  it('gives a step no credit for getting nearer home unless it kept its room', () => {
+    const roomy = WEIGHTS.safeClearanceTiles;
+    const tight = WEIGHTS.safeClearanceTiles / 2;
+
+    // Two tiles closer to home, with room to spare: charged where it arrived.
+    const around = stepCost(WEIGHTS, 1, 3, 0, roomy, 0, Infinity, 5);
+    // The same two tiles, threading a shot: charged where it started, so the
+    // walk buys nothing at all and the risk is still charged on top.
+    const through = stepCost(WEIGHTS, 1, 3, 0, tight, 0, Infinity, 5);
+    const stood = stepCost(WEIGHTS, 3, 3, 0, roomy, 0, Infinity, 5);
+
+    expect(around).toBeCloseTo(stood - 2 * WEIGHTS.anchorPerTile, 6);
+    expect(through).toBeGreaterThan(stood);
+
+    // And it is not a penalty for being tight *while leaving*: a step that ends
+    // further off pays for where it ends, whatever room it had.
+    const away = stepCost(WEIGHTS, 3, 1, 0, tight, 0, Infinity, 5);
+    expect(away).toBeGreaterThan(stepCost(WEIGHTS, 1, 1, 0, tight, 0, Infinity, 5));
   });
 
   // Without it the anchor term is indifferent between standing at the anchor
   // and orbiting it, and an indifferent planner picks whichever way the
   // arithmetic rounded.
   it('charges for walking at all, so standing still is the default', () => {
-    expect(stepCost(WEIGHTS, 0, 0.6, Infinity, 0, Infinity, 5)).toBeGreaterThan(
-      stepCost(WEIGHTS, 0, 0, Infinity, 0, Infinity, 5),
+    expect(stepCost(WEIGHTS, 0, 0, 0.6, Infinity, 0, Infinity, 5)).toBeGreaterThan(
+      stepCost(WEIGHTS, 0, 0, 0, Infinity, 0, Infinity, 5),
     );
   });
 
@@ -310,16 +336,16 @@ describe('what a step is worth', () => {
   // blank. Flat, a route straight through a body was outvoted by a tile of
   // anchor.
   it('charges for being deep inside a monster far more than twice as much', () => {
-    const edge = stepCost(WEIGHTS, 0, 0, Infinity, 0.5, Infinity, 5);
-    const deep = stepCost(WEIGHTS, 0, 0, Infinity, 1, Infinity, 5);
+    const edge = stepCost(WEIGHTS, 0, 0, 0, Infinity, 0.5, Infinity, 5);
+    const deep = stepCost(WEIGHTS, 0, 0, 0, Infinity, 1, Infinity, 5);
 
     expect(deep).toBeGreaterThan(edge * 2);
   });
 
   it('pays for room right up to the point where there is enough of it', () => {
-    const roomy = stepCost(WEIGHTS, 0, 0, WEIGHTS.safeClearanceTiles, 0, Infinity, 5);
-    const ample = stepCost(WEIGHTS, 0, 0, 5, 0, Infinity, 5);
-    const tight = stepCost(WEIGHTS, 0, 0, 0.05, 0, Infinity, 5);
+    const roomy = stepCost(WEIGHTS, 0, 0, 0, WEIGHTS.safeClearanceTiles, 0, Infinity, 5);
+    const ample = stepCost(WEIGHTS, 0, 0, 0, 5, 0, Infinity, 5);
+    const tight = stepCost(WEIGHTS, 0, 0, 0, 0.05, 0, Infinity, 5);
 
     expect(roomy).toBe(ample);
     expect(tight).toBeGreaterThan(roomy);
@@ -329,11 +355,11 @@ describe('what a step is worth', () => {
   // answer when there is no good one. And later is better than sooner, because
   // that is the only thing still worth saying.
   it('puts a hit beyond anything the other terms can buy, and prefers a late one', () => {
-    const soon = stepCost(WEIGHTS, 0, 0, -0.1, 0, Infinity, 7);
-    const late = stepCost(WEIGHTS, 0, 0, -0.1, 0, Infinity, 1);
+    const soon = stepCost(WEIGHTS, 0, 0, 0, -0.1, 0, Infinity, 7);
+    const late = stepCost(WEIGHTS, 0, 0, 0, -0.1, 0, Infinity, 1);
     // The worst the rest of the model can charge for one step: several tiles
     // off the anchor, in lava, inside a boss, having walked the whole way.
-    const worstOtherwise = stepCost(WEIGHTS, 8, 0.6, Infinity, 3, -0.1, 7);
+    const worstOtherwise = stepCost(WEIGHTS, 8, 8, 0.6, Infinity, 3, -0.1, 7);
 
     expect(late).toBeLessThan(soon);
     expect(late).toBeGreaterThan(worstOtherwise);
@@ -636,6 +662,50 @@ describe('the search', () => {
     // A run for the horizon would end four or five tiles out. Getting out of
     // the way of one bullet is worth about one.
     expect(route.driftTiles).toBeLessThan(2);
+  });
+
+  // **Round the fire, in the other direction.** The way home is exactly where
+  // the enemy is aiming — it is the ground they last saw the character on — so
+  // a pull strong enough to insist on the shortest way back is a pull that
+  // walks people into the next volley. Going round costs a longer walk; going
+  // through earns nothing at all.
+  it('comes home round a shot rather than through it', () => {
+    // Two tiles east of the ground it wants back, with a shot parked on the
+    // line between the two. Straight west is the short way and it is blocked;
+    // north and back down is a walk the horizon can just afford.
+    const { threats } = fieldOf([straightShot({ x: 11, y: 10 }, 0, 0.01, 0, 3000)]);
+    const route = new DodgeSearch().run(
+      searchFor({ startX: 12, startY: 10, anchorX: 10, anchorY: 10, threats }),
+    );
+
+    // It does go home — the pull is what this whole file is about. Not all the
+    // way inside one horizon, because going round is a longer walk than the
+    // eight steps cover, and the next plan carries on with it.
+    expect(route.driftTiles).toBeLessThan(1.5);
+    // And it is never touched on the way, which is what "round" means.
+    expect(route.impactMs).toBe(Infinity);
+  });
+
+  // The other half of the same rule, and the one that needs the gate: a gap it
+  // could *just* squeeze through earns nothing for squeezing, so the way home
+  // stays shut and standing where it is safe wins.
+  it('will not thread a tight gap to get home, however far off it is', () => {
+    // A wall of parked fire at x = 12, packed too tightly to pass anywhere —
+    // except between the fifth and the sixth, where a step through has a
+    // seventh of a tile of room. That is a miss, and it is not enough.
+    const wall: DodgeShot[] = [];
+    for (const y of [4, 5.2, 6.4, 7.6, 8.8, 10, 11.72, 12.92, 14.12, 15.32]) {
+      wall.push(straightShot({ x: 12, y }, 0, 0.01, 0, 3000));
+    }
+    const { threats } = fieldOf(wall, { selfX: 14, selfY: 10 });
+    // Four tiles east of its ground, which is as much pull as the anchor ever
+    // has: if anything could buy a tight step, this would.
+    const route = new DodgeSearch().run(
+      searchFor({ startX: 14, startY: 10, anchorX: 10, anchorY: 10, threats }),
+    );
+
+    expect(route.driftTiles).toBeGreaterThan(3);
+    expect(route.impactMs).toBe(Infinity);
   });
 
   // **A harder rule than the one geometry gets.** Walking into a wall costs a

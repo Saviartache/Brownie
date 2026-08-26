@@ -22,6 +22,15 @@
  * returns costs two steps of deviation, a retreat costs every remaining step of
  * it, and no amount of extra safety at the far end pays for the difference.
  *
+ * **And the way home is only ever credited to steps that keep their room.** The
+ * enemy aims at the ground the character was standing on, so the way back is
+ * exactly where the next shot is going — which is why an anchor strong enough
+ * to insist on it used to be an anchor that walked people into the volley.
+ * Charging a step that is short of comfortable as though it had not moved at
+ * all separates the two questions: the pull can be as strong as anybody likes,
+ * and it still cannot buy a single tight step. Going round costs a longer walk;
+ * going through costs the whole distance twice over.
+ *
  * **The estimate below it has to be a lower bound, or the search stops being
  * correct.** {@link remainingAnchorCost} is the least the anchor term can still
  * cost from here — the character closing on the anchor as fast as it is
@@ -29,6 +38,19 @@
  * at all. Anything larger would let A* return a path it has not shown to be
  * best; anything smaller is merely slower.
  */
+
+/**
+ * How many steps of the horizon a tight one is charged against.
+ *
+ * **Bounded, unlike the hit it is a milder version of.** Charged flat, shaving
+ * the margin once paid for itself with every free step it bought afterwards —
+ * which is how squeezing through a gap became the way home. Charged against the
+ * *whole* remaining horizon it swung the other way and had the widest preset
+ * refusing to move at all. Three steps is what a plan can honestly claim: the
+ * first is the one that will be commanded, the second and third are what the
+ * next plan will still be looking at, and everything past them is provisional.
+ */
+const RISK_SPAN_STEPS = 2;
 
 /** How a step is priced. Every one of these is in the same made-up unit. */
 export interface StepWeights {
@@ -112,6 +134,8 @@ export interface StepWeights {
  *
  * @param anchorTiles How far the step *ends* from where the character should
  *   have been at that moment.
+ * @param fromAnchorTiles How far it *began* from the same ground. What the
+ *   anchor term is charged on when the step is not comfortable — see below.
  * @param travelTiles How far it walked.
  * @param clearanceTiles The least room it had at any instant, from
  *   {@link ThreatIndex.clearanceOf}. `Infinity` when nothing came near.
@@ -124,13 +148,24 @@ export interface StepWeights {
 export function stepCost(
   weights: StepWeights,
   anchorTiles: number,
+  fromAnchorTiles: number,
   travelTiles: number,
   clearanceTiles: number,
   crowdingTiles: number,
   hazardGapTiles: number,
   stepsLeft: number,
 ): number {
-  let cost = weights.anchorPerTile * anchorTiles + weights.travelPerTile * travelTiles;
+  // **A step that is short of comfortable earns no credit for getting nearer
+  // home**, and that one rule is what lets the pull be strong without being
+  // dangerous. Charged on wherever it *began* instead, so the arithmetic of
+  // going home is exactly the arithmetic of standing still: the only way to
+  // close the gap is by steps that keep their room, which is the difference
+  // between coming back round the fire and coming back through it.
+  const charged =
+    clearanceTiles >= weights.safeClearanceTiles || fromAnchorTiles < anchorTiles
+      ? anchorTiles
+      : fromAnchorTiles;
+  let cost = weights.anchorPerTile * charged + weights.travelPerTile * travelTiles;
 
   if (clearanceTiles < weights.safeClearanceTiles) {
     if (clearanceTiles < 0) {
@@ -138,7 +173,16 @@ export function stepCost(
       // worth distinguishing is how much of the horizon was survived first.
       cost += weights.hitPerStep * (stepsLeft + 1);
     } else {
-      cost += weights.riskPerTile * (weights.safeClearanceTiles - clearanceTiles);
+      // **Charged per step still to come, exactly as a hit is.** A plan is
+      // remade fifty times a second and only its *first* step is ever
+      // commanded, so a route that shaves its margin now is spending the one
+      // step that will actually happen — while everything it buys with that is
+      // provisional. Charged flat, the saving spread over the rest of the
+      // horizon outbid it: squeezing through a gap cost one tight step and paid
+      // for itself with every free step after it, which is the way home going
+      // straight through the fire.
+      const soon = stepsLeft + 1 < RISK_SPAN_STEPS ? stepsLeft + 1 : RISK_SPAN_STEPS;
+      cost += weights.riskPerTile * (weights.safeClearanceTiles - clearanceTiles) * soon;
     }
   }
 
