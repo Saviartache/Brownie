@@ -13,20 +13,10 @@
  * warning that arrives after the thing it was warning about.
  */
 
-/** A colour as the three channels the module's text record carries. */
-export interface HoldColour {
-  readonly red: number;
-  readonly green: number;
-  readonly blue: number;
-}
+import { OFF_COLOUR, ON_COLOUR, type FloatingTextColour } from '../../overlay/floatingText.js';
 
-/** Plenty of budget left. */
-const START: HoldColour = { red: 0x20, green: 0xdc, blue: 0x00 };
-
-/** None of it left. Also what the last message is shown in. */
-const END: HoldColour = { red: 0xff, green: 0x00, blue: 0x19 };
-
-export const SPENT_COLOUR = END;
+/** None of the budget left. Also what the last message is shown in. */
+export const SPENT_COLOUR = OFF_COLOUR;
 
 /**
  * Green at the start of the budget, red at the end of it, and the straight line
@@ -35,13 +25,13 @@ export const SPENT_COLOUR = END;
  * `spent` is the share of the budget gone, and is clamped rather than refused:
  * a colour is not worth failing a countdown over.
  */
-export function rampColour(spent: number): HoldColour {
+export function rampColour(spent: number): FloatingTextColour {
   const share = Math.min(1, Math.max(0, Number.isFinite(spent) ? spent : 1));
   const channel = (from: number, to: number): number => Math.round(from + (to - from) * share);
   return {
-    red: channel(START.red, END.red),
-    green: channel(START.green, END.green),
-    blue: channel(START.blue, END.blue),
+    red: channel(ON_COLOUR.red, OFF_COLOUR.red),
+    green: channel(ON_COLOUR.green, OFF_COLOUR.green),
+    blue: channel(ON_COLOUR.blue, OFF_COLOUR.blue),
   };
 }
 
@@ -50,7 +40,7 @@ export interface HoldState {
   readonly secondsLeft: number;
   readonly spent: boolean;
   readonly text: string;
-  readonly colour: HoldColour;
+  readonly colour: FloatingTextColour;
 }
 
 /**

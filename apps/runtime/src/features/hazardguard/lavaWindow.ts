@@ -22,7 +22,8 @@
  * walking out and back rather than on a timer of its own.
  */
 
-import { rampColour, SPENT_COLOUR, type HoldColour } from '../noclip/holdBudget.js';
+import type { FloatingTextColour } from '../../overlay/floatingText.js';
+import { rampColour, SPENT_COLOUR } from '../noclip/holdBudget.js';
 
 /**
  * The longest a window may be, in seconds.
@@ -99,7 +100,7 @@ export interface CountdownLine {
   readonly secondsLeft: number;
   readonly spent: boolean;
   readonly text: string;
-  readonly colour: HoldColour;
+  readonly colour: FloatingTextColour;
 }
 
 /**

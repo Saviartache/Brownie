@@ -11,6 +11,7 @@ import {
   type PacketHandler,
   type Plugin,
   type PluginContext,
+  type PluginMeta,
   type PluginStatus,
   type SessionApi,
   type SessionView,
@@ -157,6 +158,11 @@ export class PluginHost {
   status(pluginId: string): PluginStatus | undefined {
     const entry = this.#plugins.get(pluginId);
     return entry === undefined ? undefined : this.#statusOf(entry);
+  }
+
+  /** How a plugin describes itself, for anything that has to name it. */
+  meta(pluginId: string): PluginMeta | undefined {
+    return this.#plugins.get(pluginId)?.plugin.meta;
   }
 
   settingsOf(pluginId: string): SettingsRegistry | undefined {

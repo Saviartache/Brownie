@@ -5,7 +5,9 @@ import {
   MutablePacket,
   type Plugin,
   PluginCategory,
+  SWITCH_SLOT,
   Verdict,
+  bindAnnouncement,
   clampToBounds,
   definePlugin,
   humaniseKey,
@@ -116,6 +118,45 @@ describe('definePlugin', () => {
     expect(() =>
       definePlugin({ meta: ok.meta, setup: undefined as unknown as Plugin['setup'] }),
     ).toThrow(/no setup function/);
+  });
+});
+
+describe('what a bind says when a key moves it', () => {
+  // The plugin's own name, not the bind's label: over the character there is no
+  // list of rows to tell one key from another, and `Hotkey: On` names nothing.
+  it('is the plugin and On or Off unless the plugin said otherwise', () => {
+    const meta = { id: 'auto-aim', name: 'Auto Aim', category: PluginCategory.Combat };
+
+    expect(bindAnnouncement({ ...meta, bindable: true }, SWITCH_SLOT)).toEqual({
+      name: 'Auto Aim',
+      on: 'On',
+      off: 'Off',
+    });
+    // The setting-named bind is still the plugin being on, so it reads as one.
+    expect(bindAnnouncement({ ...meta, bindable: 'active' }, 'active')).toEqual({
+      name: 'Auto Aim',
+      on: 'On',
+      off: 'Off',
+    });
+    expect(
+      bindAnnouncement(
+        {
+          ...meta,
+          bindable: [{ setting: 'anchor', announce: { name: 'Anchor', on: 'set', off: 'unset' } }],
+        },
+        'anchor',
+      ),
+    ).toEqual({ name: 'Anchor', on: 'set', off: 'unset' });
+  });
+
+  // Nothing rather than a default, so a key the module reports for a slot this
+  // build does not have is a press that says nothing instead of naming a switch
+  // that was never moved.
+  it('is nothing at all for a slot the plugin offers no key for', () => {
+    const meta = { id: 'chat-filter', name: 'Chat Filter', category: PluginCategory.Utility };
+
+    expect(bindAnnouncement(meta, SWITCH_SLOT)).toBeUndefined();
+    expect(bindAnnouncement({ ...meta, bindable: true }, 'anchor')).toBeUndefined();
   });
 });
 

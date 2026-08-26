@@ -45,7 +45,8 @@
  */
 
 import { PluginCategory, definePlugin, type Plugin, type Unsubscribe } from '@brownie/plugin-api';
-import { holdState, SPENT_COLOUR, type HoldColour } from './holdBudget.js';
+import type { FloatingTextColour } from '../../overlay/floatingText.js';
+import { holdState, SPENT_COLOUR } from './holdBudget.js';
 
 /**
  * The feature key the module listens for. It is a lease, not a flag — see the
@@ -69,7 +70,7 @@ export interface NoclipOutput {
    * not the runtime's to say, and briefly was — a setting for a number nobody
    * could know. The module copies the kind the game itself last used.
    */
-  showText(text: string, colour: HoldColour): void;
+  showText(text: string, colour: FloatingTextColour): void;
 
   /**
    * Holds everything the session carries, in both directions, or lets it go.
@@ -119,7 +120,7 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
         context.native.setFeature(FEATURE_KEY, on);
       };
 
-      const say = (state: { text: string; colour: HoldColour }): void => {
+      const say = (state: { text: string; colour: FloatingTextColour }): void => {
         output.showText(state.text, state.colour);
       };
 

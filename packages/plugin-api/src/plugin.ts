@@ -79,6 +79,32 @@ export interface PluginBindable {
    * for what it is.
    */
   readonly label?: string;
+  /**
+   * What the game's floating text says when this switch moves, for the switch
+   * whose two states do not read as on and off. See {@link BindAnnouncement}.
+   */
+  readonly announce?: BindAnnouncement;
+}
+
+/**
+ * What a press says over the player.
+ *
+ * **A key that says nothing is a key you have to verify**, and the only place
+ * to verify it is the panel the bind exists to avoid opening. So every bind
+ * reports where it just left its switch, in the game's own text, over the
+ * character — the same surface noclip's countdown uses and for the same reason.
+ *
+ * Declared rather than derived because the two states of a switch do not all
+ * read as on and off: the ground auto-dodge holds you to is *set* and *unset*,
+ * and `Anchor: On` is a sentence about a feature rather than about the place
+ * the key just took.
+ */
+export interface BindAnnouncement {
+  /** What the line calls this switch. */
+  readonly name: string;
+  /** What its two states read as. */
+  readonly on: string;
+  readonly off: string;
 }
 
 /** The plugin's own switch, as a slot. Empty because it is not a setting. */
@@ -86,6 +112,9 @@ export const SWITCH_SLOT = '';
 
 /** The default name of a bind that did not choose one. */
 const DEFAULT_BIND_LABEL = 'Hotkey';
+
+/** How a switch that did not say otherwise reads when a key moves it. */
+const DEFAULT_ANNOUNCEMENT = { on: 'On', off: 'Off' } as const;
 
 /**
  * Every key a plugin offers, in the order it declared them.
@@ -111,6 +140,23 @@ export function bindSlot(target: PluginBindable): string {
 /** What to call it on a panel. */
 export function bindLabel(target: PluginBindable): string {
   return target.label ?? DEFAULT_BIND_LABEL;
+}
+
+/**
+ * What to say when one of a plugin's switches moves, or nothing when the plugin
+ * offers no key for that slot.
+ *
+ * **The plugin's own name by default, not the bind's label.** A label answers
+ * "which of this plugin's keys is this row", which is a question somebody has
+ * while looking at a panel listing all of them; over the character there is no
+ * list, and `Hotkey: On` names nothing at all. That default is right for the
+ * setting-named bind too — noclip's `active` *is* what the plugin being on
+ * means. See {@link PluginBindable.announce} for the bind where it is not.
+ */
+export function bindAnnouncement(meta: PluginMeta, slot: string): BindAnnouncement | undefined {
+  const target = bindTargets(meta).find((candidate) => bindSlot(candidate) === slot);
+  if (target === undefined) return undefined;
+  return target.announce ?? { name: meta.name, ...DEFAULT_ANNOUNCEMENT };
 }
 
 /**

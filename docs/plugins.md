@@ -220,6 +220,32 @@ the key the user chose. Two entries naming one slot is refused at
 `definePlugin`, because two rows writing one stored key is one press moving
 whichever of them the host kept.
 
+**Every press says what it did**, over the character, in the game's own floating
+text — `Auto Aim: On`, `Auto Loot: Off`. A key exists so that switching mid-fight
+does not mean opening a panel, and a key you then have to open the panel to
+verify is not that key.
+
+The line is the plugin's **name** and its two states, which default to `On` and
+`Off`. A bind whose switch does not read that way says so:
+
+```ts
+bindable: [
+  { label: 'Hotkey' },
+  {
+    setting: 'anchor',
+    label: 'Anchor here',
+    announce: { name: 'Anchor', on: 'set', off: 'unset' },
+  },
+],
+```
+
+The plugin declares the words and nothing else — the line is said by the host,
+because the host is the only side that knows what a press actually did. A plugin
+cannot watch its own switch, a hold puts a switch back with nobody pressing
+anything, and a key bound to a plugin that cannot be switched moves nothing at
+all; a plugin announcing its own state would be announcing what it was asked
+for. The state is read back after the move for the same reason.
+
 **A hold puts back what it found.** A plugin that was already running comes back
 running when the key comes up, rather than being switched off by a key that only
 meant to switch it on. Each slot is remembered separately, so holding two of one

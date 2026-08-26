@@ -9,6 +9,7 @@
 
 import {
   MutablePacket,
+  bindAnnouncement,
   bindSlot,
   bindTargets,
   type EntityView,
@@ -2126,6 +2127,18 @@ describe('when the plugin decides', () => {
     const meta = [...host.statuses()].find((status) => status.meta.id === 'auto-dodge')?.meta;
 
     expect(meta === undefined ? [] : bindTargets(meta).map(bindSlot)).toEqual(['', 'anchor']);
+  });
+
+  // What the key says over the player when it lands. The switch reads as any
+  // other plugin's does; the anchor does not, because taking a place and
+  // letting go of one are not a feature being on and off.
+  it('says which of the two the anchor key just did', () => {
+    const { host } = underFire(0);
+    const meta = [...host.statuses()].find((status) => status.meta.id === 'auto-dodge')?.meta;
+    if (meta === undefined) throw new Error('the plugin under test did not load');
+
+    expect(bindAnnouncement(meta, '')).toEqual({ name: 'Auto Dodge', on: 'On', off: 'Off' });
+    expect(bindAnnouncement(meta, 'anchor')).toEqual({ name: 'Anchor', on: 'set', off: 'unset' });
   });
 
   // **The place is where they were standing when the key went down**, and it is

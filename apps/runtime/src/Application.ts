@@ -42,6 +42,7 @@ import {
   revokeSessionKey,
   sessionKeyPath,
 } from './native/SessionKey.js';
+import { floatingTextRecord } from './overlay/floatingText.js';
 import { OverlayControlPlane } from './overlay/OverlayControlPlane.js';
 import { PacketCensus } from './observe/PacketCensus.js';
 import { WorldStatusStage } from './overlay/WorldStatusStage.js';
@@ -469,11 +470,17 @@ export class Application {
     overlayHolder.plane = this.#overlay;
 
     // The other half of the overlay's plugin list: it publishes what is bound,
-    // and this applies what the module saw somebody press.
+    // and this applies what the module saw somebody press. It is handed the
+    // same floating text noclip and the hazard guard take, and for the reason
+    // the bind exists at all: a key pressed mid-fight is a key whose answer has
+    // to arrive without the panel being opened to look for it.
     this.#hotkeys = new PluginHotkeys({
       host: this.#plugins,
       native: this.#native,
       log: this.#log,
+      showText: (text, colour) => {
+        this.#native.publishRecord(floatingTextRecord(text, colour));
+      },
     });
 
     this.#loader = new PluginLoader({
@@ -819,9 +826,7 @@ export class Application {
     this.#plugins.load(
       createNoclipPlugin({
         showText: (text, colour) => {
-          this.#native.publishRecord(
-            ['text', colour.red, colour.green, colour.blue, text].join('|'),
-          );
+          this.#native.publishRecord(floatingTextRecord(text, colour));
         },
         holdSocket: (held) => {
           this.#proxy.holdTraffic(held);
@@ -848,9 +853,7 @@ export class Application {
     this.#plugins.load(
       createHazardGuardPlugin({
         showText: (text, colour) => {
-          this.#native.publishRecord(
-            ['text', colour.red, colour.green, colour.blue, text].join('|'),
-          );
+          this.#native.publishRecord(floatingTextRecord(text, colour));
         },
       }),
     );

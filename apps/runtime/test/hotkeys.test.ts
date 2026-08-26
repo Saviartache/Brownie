@@ -10,6 +10,7 @@ import {
   type Unsubscribe,
 } from '@brownie/plugin-api';
 import { describe, expect, it } from 'vitest';
+import { OFF_COLOUR, ON_COLOUR, type FloatingTextColour } from '../src/overlay/floatingText.js';
 import { OverlayControlPlane, type OverlayTransport } from '../src/overlay/OverlayControlPlane.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import { PluginHotkeys, type HotkeyEvent } from '../src/plugins/PluginHotkeys.js';
@@ -68,6 +69,21 @@ function twoKeyed(id: string, onChange?: (on: boolean) => void): Plugin {
   });
 }
 
+/** A plugin whose switch does not read as on and off, which the anchor is. */
+function declaredWording(id: string): Plugin {
+  return definePlugin({
+    meta: {
+      id,
+      name: `The ${id}`,
+      category: PluginCategory.Movement,
+      bindable: [{ setting: 'anchor', announce: { name: 'Anchor', on: 'set', off: 'unset' } }],
+    },
+    setup: (ctx: PluginContext) => {
+      ctx.settings.boolean('anchor', { default: false });
+    },
+  });
+}
+
 function host(store?: PluginPreferences): PluginHost {
   return new PluginHost({
     log: testLogger(new RecordingSink()),
@@ -105,15 +121,29 @@ class FakeHotkeys {
   }
 }
 
-function router(plugins: PluginHost): { native: FakeHotkeys; hotkeys: PluginHotkeys } {
+/** One line of the game's own floating text, as a press left it. */
+interface Announced {
+  readonly text: string;
+  readonly colour: FloatingTextColour;
+}
+
+function router(plugins: PluginHost): {
+  native: FakeHotkeys;
+  hotkeys: PluginHotkeys;
+  said: Announced[];
+} {
   const native = new FakeHotkeys();
+  const said: Announced[] = [];
   const hotkeys = new PluginHotkeys({
     host: plugins,
     native,
     log: testLogger(new RecordingSink()),
+    showText: (text, colour) => {
+      said.push({ text, colour });
+    },
   });
   hotkeys.start();
-  return { native, hotkeys };
+  return { native, hotkeys, said };
 }
 
 describe('a bind', () => {
@@ -415,6 +445,98 @@ describe('a key the module saw', () => {
     hotkeys.stop();
     expect(plugins.isActive('auto-dodge', 'anchor')).toBe(false);
     expect(plugins.isEnabled('auto-dodge')).toBe(false);
+  });
+});
+
+describe('what a press says over the player', () => {
+  it('names the plugin and where the key just left it', () => {
+    const plugins = host();
+    plugins.load(switched('auto-aim'));
+    const { native, said } = router(plugins);
+
+    native.press('auto-aim', 'toggle');
+    native.press('auto-aim', 'toggle');
+
+    expect(said).toEqual([
+      { text: 'The auto-aim: On', colour: ON_COLOUR },
+      { text: 'The auto-aim: Off', colour: OFF_COLOUR },
+    ]);
+  });
+
+  // The case a plugin could not report for itself: nobody presses anything on
+  // the way up, and what comes back is what the press found rather than the
+  // opposite of what it did.
+  it('says it on the way down and again on the way back', () => {
+    const plugins = host();
+    plugins.load(switched('auto-dodge'));
+    const { native, said } = router(plugins);
+
+    native.press('auto-dodge', 'hold', true);
+    native.press('auto-dodge', 'hold', false);
+
+    expect(said.map((line) => line.text)).toEqual(['The auto-dodge: On', 'The auto-dodge: Off']);
+  });
+
+  it('names the plugin for the setting one of its keys moves', () => {
+    const plugins = host();
+    plugins.load(armed('player-noclip'));
+    const { native, said } = router(plugins);
+
+    native.press('player-noclip', 'toggle', true, 'active');
+    native.press('player-noclip', 'toggle', true, 'active');
+
+    expect(said.map((line) => line.text)).toEqual([
+      'The player-noclip: On',
+      'The player-noclip: Off',
+    ]);
+  });
+
+  it('says what the plugin declared, for a switch that is not on and off', () => {
+    const plugins = host();
+    plugins.load(declaredWording('auto-dodge'));
+    plugins.setEnabled('auto-dodge', true);
+    const { native, said } = router(plugins);
+
+    native.press('auto-dodge', 'toggle', true, 'anchor');
+    native.press('auto-dodge', 'toggle', true, 'anchor');
+
+    expect(said).toEqual([
+      { text: 'Anchor: set', colour: ON_COLOUR },
+      { text: 'Anchor: unset', colour: OFF_COLOUR },
+    ]);
+  });
+
+  // A line naming a state nobody is in is worse than no line: it is the state
+  // the player stops checking for.
+  it('says nothing for a key that moved nothing', () => {
+    const plugins = host();
+    plugins.load(
+      definePlugin({
+        meta: { id: 'chat-filter', name: 'Chat', category: PluginCategory.Utility },
+        setup: () => undefined,
+      }),
+    );
+    const { native, said } = router(plugins);
+
+    native.press('chat-filter', 'toggle');
+    expect(said).toEqual([]);
+  });
+
+  // Both ways a hold ends without a key coming up, and in neither is there
+  // anything left to draw a line over the player with.
+  it('says nothing when a hold ends with nothing left to read it', () => {
+    const plugins = host();
+    plugins.load(switched('auto-dodge'));
+    const first = router(plugins);
+
+    first.native.press('auto-dodge', 'hold', true);
+    first.native.drop();
+    expect(first.said.map((line) => line.text)).toEqual(['The auto-dodge: On']);
+
+    const second = router(plugins);
+    second.native.press('auto-dodge', 'hold', true);
+    second.hotkeys.stop();
+    expect(second.said.map((line) => line.text)).toEqual(['The auto-dodge: On']);
   });
 });
 

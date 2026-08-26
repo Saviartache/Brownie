@@ -78,7 +78,7 @@
  */
 
 import { PluginCategory, definePlugin, type Plugin, type Unsubscribe } from '@brownie/plugin-api';
-import type { HoldColour } from '../noclip/holdBudget.js';
+import type { FloatingTextColour } from '../../overlay/floatingText.js';
 import { MAX_HOLD_SECONDS, countdownFor, windowFor } from './lavaWindow.js';
 
 /** The one thing this needs that the plugin surface does not carry. */
@@ -90,7 +90,7 @@ export interface HazardGuardOutput {
    * a clock has to say how much of the clock is left without the player looking
    * away from the fight.
    */
-  showText(text: string, colour: HoldColour): void;
+  showText(text: string, colour: FloatingTextColour): void;
 }
 
 /**

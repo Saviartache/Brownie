@@ -112,7 +112,18 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // thing a person says a dozen times inside one fight — stand here, hold
       // this doorway — and it is worth a key of its own for exactly the reason
       // the switch is: reaching for a panel mid-fight is not an option.
-      bindable: [{ label: 'Hotkey' }, { setting: 'anchor', label: 'Anchor here' }],
+      bindable: [
+        { label: 'Hotkey' },
+        {
+          setting: 'anchor',
+          label: 'Anchor here',
+          // The one switch here whose states are not on and off. `Anchor: On`
+          // is a sentence about a feature; what the key does is take a place or
+          // let go of one, and which of the two just happened is the whole
+          // question somebody presses it asking.
+          announce: { name: 'Anchor', on: 'set', off: 'unset' },
+        },
+      ],
     },
 
     setup(context) {
