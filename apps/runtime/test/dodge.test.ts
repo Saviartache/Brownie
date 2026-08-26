@@ -57,6 +57,7 @@ import {
 import { nearestOtherPlayer } from '../src/features/dodge/hitRedirect.js';
 import {
   DEFAULT_PROJECTILE_HALF_TILES,
+  PLAYER_ENVIRONMENT_HALF_TILES,
   PLAYER_HALF_TILES,
   effectiveHalf,
   minChebyshevOnSegment,
@@ -120,7 +121,7 @@ function sized(tiles: number): (enemy: EntityView) => BodySighting {
 /** Nothing in the way, nothing that hurts, nobody to bump into. */
 const OPEN_GROUND: DodgeGround = {
   canStand: () => true,
-  isDamaging: () => false,
+  hazardGapTiles: () => Infinity,
   crowdingAt: () => 0,
   contactAt: () => 0,
 };
@@ -129,7 +130,7 @@ const OPEN_GROUND: DodgeGround = {
 function standingOff(bodies: EnemyBodies, keepAwayTiles: number): DodgeGround {
   return {
     canStand: () => true,
-    isDamaging: () => false,
+    hazardGapTiles: () => Infinity,
     crowdingAt: (x, y, aheadMs) => bodies.crowdingAt(x, y, keepAwayTiles, aheadMs),
     contactAt: (x, y, aheadMs) => bodies.contactAt(x, y, aheadMs),
   };
@@ -146,6 +147,7 @@ const SETTINGS: DodgeSettings = {
   leadMs: 60,
   driftTilesPerSecond: 0.2,
   safeClearanceTiles: 0.25,
+  hazardClearTiles: 0.5,
   holdGroundWeight: 1,
   greed: 1.6,
   maxExpansions: 500,
@@ -537,7 +539,7 @@ describe('where it refuses to go', () => {
   function lavaEastOf(edge: number): DodgeGround {
     return {
       canStand: () => true,
-      isDamaging: (x) => x >= edge,
+      hazardGapTiles: (x) => edge - x,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -584,7 +586,7 @@ describe('where it refuses to go', () => {
     ];
     const lavaSouth: DodgeGround = {
       canStand: () => true,
-      isDamaging: (_x, y) => y > 10.05,
+      hazardGapTiles: (_x, y) => 10.05 - y,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -595,13 +597,45 @@ describe('where it refuses to go', () => {
     expect(plan.dirY).toBeLessThanOrEqual(0);
   });
 
+  // **Walking into a pool is a mistake worth answering on its own**, with
+  // nothing in the air at all — and it is the one case where the planner has to
+  // overrule a player who is not under fire.
+  it('takes the wheel from a player walking into a pool', () => {
+    const plan = new DodgePlanner().plan(
+      // East, and the pool starts a tile that way.
+      situation({ intentX: 1, intentY: 0 }),
+      SETTINGS,
+      lavaEastOf(11),
+      [],
+    );
+
+    expect(plan.steer).toBe(true);
+    // Not necessarily away from it — following the edge is a fine answer to
+    // somebody walking along one — but never inside the margin it keeps.
+    expect(11 - (10 + plan.dirX * plan.stepTiles)).toBeGreaterThanOrEqual(
+      SETTINGS.hazardClearTiles - 1e-9,
+    );
+  });
+
+  it('leaves them alone while their own walking keeps clear of it', () => {
+    const plan = new DodgePlanner().plan(
+      situation({ intentX: -1, intentY: 0 }),
+      SETTINGS,
+      lavaEastOf(11),
+      [],
+    );
+
+    expect(plan.verdict).toBe('intent-safe');
+    expect(plan.steer).toBe(false);
+  });
+
   // The complaint, end to end: a shot forces a sidestep and one of the two sides
   // is a pool the planner used to be happy to stop at the edge of.
   it('takes the sidestep that is not into the lava', () => {
     const shot = straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000);
     const lavaSouth: DodgeGround = {
       canStand: () => true,
-      isDamaging: (_x, y) => y >= 10.4,
+      hazardGapTiles: (_x, y) => 10.4 - y,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -616,7 +650,7 @@ describe('where it refuses to go', () => {
     const shot = straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000);
     const wallNorth: DodgeGround = {
       canStand: (_x, y) => y > 9.6,
-      isDamaging: () => false,
+      hazardGapTiles: () => Infinity,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -914,6 +948,30 @@ describe('the ground, one tile at a time', () => {
   it('refuses a place the margin reaches into', () => {
     expect(pool().isDamaging(4.5, 5.5, 0)).toBe(false);
     expect(pool().isDamaging(4.5, 5.5, 0.5)).toBe(true);
+  });
+
+  // **A distance rather than a verdict, and that is what a hard rule needs.**
+  // Refusing to enter a pool says nothing about hugging its edge, so the
+  // planner has to be able to ask how far off one a place is.
+  it('says how far the body is from the nearest ground that hurts', () => {
+    // The pool is tile (5, 5); the body is a shade under half a tile across.
+    const clear = 0.5 - PLAYER_ENVIRONMENT_HALF_TILES;
+
+    // Squarely on it.
+    expect(pool().hazardGap(5.5, 5.5, 2)).toBeCloseTo(-PLAYER_ENVIRONMENT_HALF_TILES - 0.5, 6);
+    // One tile west, so the gap is the tile edge less the body's own reach.
+    expect(pool().hazardGap(4.5, 5.5, 2)).toBeCloseTo(clear, 6);
+    // Two tiles west, a whole tile further off.
+    expect(pool().hazardGap(3.5, 5.5, 2)).toBeCloseTo(clear + 1, 6);
+    // And nothing at all when the pool is past the distance asked about.
+    expect(pool().hazardGap(30, 30, 2)).toBe(Infinity);
+  });
+
+  it('measures the diagonal the way the collision does, by the wider axis', () => {
+    // A tile up and a tile across: the gap is the larger of the two, not the
+    // straight-line distance, because that is the shape both boxes are.
+    const straightOn = pool().hazardGap(4.5, 5.5, 3);
+    expect(pool().hazardGap(4.5, 4.5, 3)).toBeCloseTo(straightOn, 6);
   });
 
   it('sweeps the whole box rather than its corners', () => {

@@ -117,6 +117,16 @@ export interface DodgeSettings {
   /** How fast confidence in a prediction decays. See {@link ShotTracks}. */
   readonly driftTilesPerSecond: number;
   /**
+   * How far from ground that hurts counts as far enough, in tiles.
+   *
+   * **A distance the planner prefers, not one it demands.** Walking *into* a
+   * pool is refused outright whatever this says; what this buys is the route
+   * that keeps its footing rather than the one that threads a shot with a heel
+   * on the boundary. Nought turns the preference off and leaves only the
+   * refusal.
+   */
+  readonly hazardClearTiles: number;
+  /**
    * How much room counts as safe, in tiles.
    *
    * **Not zero, and the difference is the whole feel of the feature.** Zero
@@ -335,8 +345,18 @@ const RISK_PER_TILE = 40;
  */
 const CROWD_PER_TILE = 4;
 
-/** For a step ending on ground that hurts. Whole tiles' worth, because it is. */
-const HAZARD_COST = 8;
+/**
+ * Per tile of the keep-clear distance a step is short of, before the curve in
+ * `StepCost` steepens it.
+ *
+ * **Above the room a shot leaves, deliberately.** Room from a bullet is a bet on
+ * a prediction; distance from a pool is a fact about the map, and standing in
+ * one costs health every tick with nothing left to dodge. The planner should
+ * give up a graze before it gives up its footing — which is what this ordering
+ * says, and what the live report asked for: never mind the projectiles, do not
+ * end up in the lava.
+ */
+const HAZARD_PER_TILE = 60;
 
 /**
  * Per remaining step, for a step that is hit.
@@ -385,7 +405,8 @@ export class DodgePlanner {
     riskPerTile: RISK_PER_TILE,
     safeClearanceTiles: 0,
     crowdPerTile: CROWD_PER_TILE,
-    hazard: HAZARD_COST,
+    hazardPerTile: HAZARD_PER_TILE,
+    hazardClearTiles: 0,
     hitPerStep: HIT_PER_STEP,
   };
 
@@ -393,6 +414,8 @@ export class DodgePlanner {
   #probeImpactMs = Infinity;
   #probeRoomTiles = Infinity;
   #probeUrgentTiles = Infinity;
+  /** The least room the probed course leaves itself from ground that hurts. */
+  #probeHazardTiles = Infinity;
 
   readonly #plan = {
     verdict: 'clear' as DodgeVerdict,
@@ -500,6 +523,11 @@ export class DodgePlanner {
       !situation.onDamagingGround &&
       crowding <= CROWD_ACT_TILES &&
       offGround <= RETURN_TILES &&
+      // **Walking into a pool is a mistake worth answering on its own**, with
+      // nothing in the air at all. The search will not walk into one, so the
+      // whole of what this decides is whether the planner is allowed to keep
+      // quiet while the player does.
+      this.#probeHazardTiles >= 0 &&
       this.#probeImpactMs > settings.reactWithinMs &&
       this.#probeUrgentTiles >= settings.safeClearanceTiles * PROBE_MARGIN_FRACTION
     ) {
@@ -524,6 +552,7 @@ export class DodgePlanner {
       ? 0
       : Math.max(0, settings.holdGroundWeight);
     this.#weights.safeClearanceTiles = settings.safeClearanceTiles;
+    this.#weights.hazardClearTiles = Math.max(0, settings.hazardClearTiles);
 
     const holding =
       (this.#holdDirX !== 0 || this.#holdDirY !== 0) &&
@@ -728,6 +757,7 @@ export class DodgePlanner {
       tiles: Math.min(MAX_HOP_TILES, settings.hopTiles),
       headings: settings.headings,
       safeClearanceTiles: settings.safeClearanceTiles,
+      hazardClearTiles: Math.max(0, settings.hazardClearTiles),
       ground: world,
       threats: this.#threats,
       blasts: this.#blasts.count > 0 ? this.#blasts : undefined,
@@ -784,6 +814,9 @@ export class DodgePlanner {
     this.#probeImpactMs = Infinity;
     this.#probeRoomTiles = Infinity;
     this.#probeUrgentTiles = Infinity;
+    // Where they are now counts: a player standing in a pool is one the planner
+    // has to answer for whether or not they are walking anywhere.
+    this.#probeHazardTiles = world.hazardGapTiles(x, y);
 
     for (let step = 0; step < ticks; step += 1) {
       const startsMs = settings.leadMs + step * tickMs;
@@ -806,6 +839,14 @@ export class DodgePlanner {
         this.#probeUrgentTiles = room;
       }
       if (room < 0 && this.#probeImpactMs === Infinity) this.#probeImpactMs = startsMs;
+
+      // Only while the window is open. A course that walks into a pool two
+      // seconds from now is somebody walking somewhere, and the plan that is
+      // made when they get there is the one that has to answer for it.
+      if (startsMs < settings.reactWithinMs) {
+        const gap = world.hazardGapTiles(endX, endY);
+        if (gap < this.#probeHazardTiles) this.#probeHazardTiles = gap;
+      }
 
       x = endX;
       y = endY;
@@ -837,7 +878,7 @@ function anchorScoreOf(world: DodgeGround, x: number, y: number): number {
   if (!world.canStand(x, y)) return Infinity;
   // Ground that hurts is worth more than any amount of crowding to be off,
   // because standing on it costs health for as long as the planner aims there.
-  return world.crowdingAt(x, y, 0) + (world.isDamaging(x, y) ? UNFIT_HAZARD_SCORE : 0);
+  return world.crowdingAt(x, y, 0) + (world.hazardGapTiles(x, y) < 0 ? UNFIT_HAZARD_SCORE : 0);
 }
 
 /** What damaging ground is worth, against a tile of somebody standing on you. */

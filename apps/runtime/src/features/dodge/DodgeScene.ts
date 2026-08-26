@@ -152,8 +152,8 @@ export class DodgeScene {
     };
     this.world = {
       canStand: (x, y) => !this.#wallsMatter || this.#ground.canStand(x, y, this.#clearance),
-      isDamaging: (x, y) =>
-        this.#damagingMatters && this.#ground.isDamaging(x, y, this.#hazardClearance),
+      hazardGapTiles: (x, y) =>
+        this.#damagingMatters ? this.#ground.hazardGap(x, y, this.#hazardClearance) : Infinity,
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
       contactAt: (x, y, aheadMs) => this.#bodies.contactAt(x, y, aheadMs),
     };
@@ -223,16 +223,18 @@ export class DodgeScene {
       wallClearance > 0 && this.#ground.canStand(self.x, self.y, wallClearance) ? wallClearance : 0;
 
     this.#damagingMatters = controls.hazards.avoid.get();
-    // **And the same rule for the margin around lava**, for the same reason: a
-    // player who has chosen to fight at the edge of a pool is inside it, and a
-    // margin that refuses every square they could step to is a margin that holds
-    // them there. Measured against the body alone, so being inside the *margin*
-    // drops it and being inside the *pool* is a different question.
-    const hazardClearance = controls.hazards.clearanceTiles.get();
-    this.#hazardClearance =
-      hazardClearance > 0 && !this.#ground.isDamaging(self.x, self.y, hazardClearance)
-        ? hazardClearance
-        : 0;
+    // **The margin around lava is not dropped, and that is what changed.** It
+    // used to be, for the reason the wall's is: a margin that refuses every
+    // square a player at the edge of a pool could step to is a margin holding
+    // them there. But the answer is no longer a refusal — how far off the pool a
+    // place is is a *distance* now, priced and preferred rather than demanded
+    // (see `StepCost`), and only the pool itself is refused. A preference cannot
+    // pin anybody, so the margin can say what it means at every distance, which
+    // is the whole of what stops a dodge finishing with a heel in the lava.
+    //
+    // How far to look, therefore, rather than how far to insist on: past this
+    // the answer is "nothing near", and it is what one query costs.
+    this.#hazardClearance = Math.max(0, controls.hazards.clearanceTiles.get());
     this.#onDamagingGround =
       this.#damagingMatters && (map.tileAt(self.x, self.y)?.damaging ?? false);
 

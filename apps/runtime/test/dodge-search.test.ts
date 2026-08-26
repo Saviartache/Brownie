@@ -88,7 +88,7 @@ function fieldOf(
 /** Nothing in the way, nothing that hurts, nobody to bump into. */
 const OPEN_GROUND: DodgeGround = {
   canStand: () => true,
-  isDamaging: () => false,
+  hazardGapTiles: () => Infinity,
   crowdingAt: () => 0,
   contactAt: () => 0,
 };
@@ -99,7 +99,8 @@ const WEIGHTS: StepWeights = {
   riskPerTile: 10,
   safeClearanceTiles: 0.25,
   crowdPerTile: 2.5,
-  hazard: 8,
+  hazardPerTile: 60,
+  hazardClearTiles: 0.5,
   hitPerStep: 400,
 };
 
@@ -287,8 +288,8 @@ describe('the open list', () => {
 
 describe('what a step is worth', () => {
   it('charges for standing away from where the player meant to be', () => {
-    const near = stepCost(WEIGHTS, 1, 0, Infinity, 0, false, 5);
-    const far = stepCost(WEIGHTS, 3, 0, Infinity, 0, false, 5);
+    const near = stepCost(WEIGHTS, 1, 0, Infinity, 0, Infinity, 5);
+    const far = stepCost(WEIGHTS, 3, 0, Infinity, 0, Infinity, 5);
     expect(far - near).toBeCloseTo(2 * WEIGHTS.anchorPerTile, 6);
   });
 
@@ -296,8 +297,8 @@ describe('what a step is worth', () => {
   // and orbiting it, and an indifferent planner picks whichever way the
   // arithmetic rounded.
   it('charges for walking at all, so standing still is the default', () => {
-    expect(stepCost(WEIGHTS, 0, 0.6, Infinity, 0, false, 5)).toBeGreaterThan(
-      stepCost(WEIGHTS, 0, 0, Infinity, 0, false, 5),
+    expect(stepCost(WEIGHTS, 0, 0.6, Infinity, 0, Infinity, 5)).toBeGreaterThan(
+      stepCost(WEIGHTS, 0, 0, Infinity, 0, Infinity, 5),
     );
   });
 
@@ -307,16 +308,16 @@ describe('what a step is worth', () => {
   // blank. Flat, a route straight through a body was outvoted by a tile of
   // anchor.
   it('charges for being deep inside a monster far more than twice as much', () => {
-    const edge = stepCost(WEIGHTS, 0, 0, Infinity, 0.5, false, 5);
-    const deep = stepCost(WEIGHTS, 0, 0, Infinity, 1, false, 5);
+    const edge = stepCost(WEIGHTS, 0, 0, Infinity, 0.5, Infinity, 5);
+    const deep = stepCost(WEIGHTS, 0, 0, Infinity, 1, Infinity, 5);
 
     expect(deep).toBeGreaterThan(edge * 2);
   });
 
   it('pays for room right up to the point where there is enough of it', () => {
-    const roomy = stepCost(WEIGHTS, 0, 0, WEIGHTS.safeClearanceTiles, 0, false, 5);
-    const ample = stepCost(WEIGHTS, 0, 0, 5, 0, false, 5);
-    const tight = stepCost(WEIGHTS, 0, 0, 0.05, 0, false, 5);
+    const roomy = stepCost(WEIGHTS, 0, 0, WEIGHTS.safeClearanceTiles, 0, Infinity, 5);
+    const ample = stepCost(WEIGHTS, 0, 0, 5, 0, Infinity, 5);
+    const tight = stepCost(WEIGHTS, 0, 0, 0.05, 0, Infinity, 5);
 
     expect(roomy).toBe(ample);
     expect(tight).toBeGreaterThan(roomy);
@@ -326,11 +327,11 @@ describe('what a step is worth', () => {
   // answer when there is no good one. And later is better than sooner, because
   // that is the only thing still worth saying.
   it('puts a hit beyond anything the other terms can buy, and prefers a late one', () => {
-    const soon = stepCost(WEIGHTS, 0, 0, -0.1, 0, false, 7);
-    const late = stepCost(WEIGHTS, 0, 0, -0.1, 0, false, 1);
+    const soon = stepCost(WEIGHTS, 0, 0, -0.1, 0, Infinity, 7);
+    const late = stepCost(WEIGHTS, 0, 0, -0.1, 0, Infinity, 1);
     // The worst the rest of the model can charge for one step: several tiles
     // off the anchor, in lava, inside a boss, having walked the whole way.
-    const worstOtherwise = stepCost(WEIGHTS, 8, 0.6, Infinity, 3, true, 7);
+    const worstOtherwise = stepCost(WEIGHTS, 8, 0.6, Infinity, 3, -0.1, 7);
 
     expect(late).toBeLessThan(soon);
     expect(late).toBeGreaterThan(worstOtherwise);
@@ -581,7 +582,7 @@ describe('the search', () => {
     const { threats } = fieldOf([straightShot({ x: 8.5, y: 10 }, 0, 8, 0, 3000)]);
     const lavaNorth: DodgeGround = {
       canStand: () => true,
-      isDamaging: (_x, y) => y < 10,
+      hazardGapTiles: (_x, y) => y - 10,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -593,7 +594,7 @@ describe('the search', () => {
     // character already standing in it has to be able to walk.
     const lavaWest: DodgeGround = {
       canStand: () => true,
-      isDamaging: (x) => x <= 10,
+      hazardGapTiles: (x) => x - 10,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -602,10 +603,54 @@ describe('the search', () => {
     expect(leaving.dirX).toBeGreaterThan(0);
   });
 
+  // **The live report: it still runs up to the lava while dodging.** Refusing
+  // to walk *into* a pool says nothing about hugging its edge, and a route
+  // planned to the last millimetre is one a server correction puts inside. The
+  // rule is a ratchet: never end a step nearer than the better of where you
+  // already are and the margin you are meant to keep.
+  it('never ends a step nearer a pool than the margin it keeps', () => {
+    // A pool covering everything north of y = 9, and a shot pressing from the
+    // south so that going north is what the fire wants.
+    const lavaNorth: DodgeGround = {
+      canStand: () => true,
+      hazardGapTiles: (_x, y) => y - 9,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    const { threats } = fieldOf([straightShot({ x: 10, y: 13 }, -Math.PI / 2, 8, 0, 3000)]);
+
+    const route = new DodgeSearch().run(searchFor({ threats, ground: lavaNorth }));
+
+    // The first step ends no nearer than the half tile the weights ask for.
+    expect(10 + route.dirY * route.stepTiles - 9).toBeGreaterThanOrEqual(
+      WEIGHTS.hazardClearTiles - 1e-9,
+    );
+  });
+
+  // The other half of the ratchet, and the half that stops it being a cage: a
+  // character already inside the margin may move within it and outwards, and
+  // standing still always qualifies.
+  it('lets a character already inside the margin hold or open the gap', () => {
+    const lavaNorth: DodgeGround = {
+      canStand: () => true,
+      // Standing at y = 10 leaves a fifth of a tile, well inside the margin.
+      hazardGapTiles: (_x, y) => y - 9.8,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    const { threats } = fieldOf([straightShot({ x: 10, y: 13 }, -Math.PI / 2, 8, 0, 3000)]);
+
+    const route = new DodgeSearch().run(searchFor({ threats, ground: lavaNorth }));
+
+    expect(route.depth).toBe(8);
+    // Never nearer than the fifth of a tile it started with.
+    expect(10 + route.dirY * route.stepTiles - 9.8).toBeGreaterThanOrEqual(-1e-9);
+  });
+
   it('stops a straight run at the edge of a pool rather than pricing it through', () => {
     const lavaNorth: DodgeGround = {
       canStand: () => true,
-      isDamaging: (_x, y) => y < 9.5,
+      hazardGapTiles: (_x, y) => y - 9.5,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -623,7 +668,7 @@ describe('the search', () => {
   it('refuses a step into a wall and finds the way that is open', () => {
     const wallNorth: DodgeGround = {
       canStand: (_x, y) => y > 9.6,
-      isDamaging: () => false,
+      hazardGapTiles: () => Infinity,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -804,6 +849,7 @@ describe('the emergency step', () => {
       tiles: MAX_HOP_TILES,
       headings: 12,
       safeClearanceTiles: 0.25,
+      hazardClearTiles: 0.5,
       ground: OPEN_GROUND,
       threats: empty.threats,
       blasts: undefined,
@@ -825,7 +871,7 @@ describe('the emergency step', () => {
     }));
     return {
       canStand: () => true,
-      isDamaging: () => false,
+      hazardGapTiles: () => Infinity,
       crowdingAt: (px, py, aheadMs) => bodies.crowdingAt(px, py, keepAwayTiles, aheadMs),
       contactAt: (px, py, aheadMs) => bodies.contactAt(px, py, aheadMs),
     };
@@ -902,13 +948,33 @@ describe('the emergency step', () => {
     );
   });
 
+  // **The hop is the easier way through a barrier, so it obeys the same one.**
+  // A landing a hair from a pool is a landing a correction puts in one, and
+  // unlike a step there is no next moment in which the planner could think
+  // again.
+  it('will not hop nearer a pool than the margin either', () => {
+    const lavaNorth: DodgeGround = {
+      canStand: () => true,
+      hazardGapTiles: (_x, y) => y - 9,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    const { threats } = fieldOf([straightShot({ x: 10, y: 12 }, -Math.PI / 2, 8, 0, 3000)]);
+
+    const hop = chooseHop(hopFor({ threats, ground: lavaNorth }));
+
+    if (hop !== undefined) {
+      expect(10 + hop.offsetY - 9).toBeGreaterThanOrEqual(0.5 - 1e-9);
+    }
+  });
+
   // A hop out of a shot and into lava is not an escape, and unlike a walk there
   // is no next step to take back out before the ground bites.
   it('refuses to land in a wall or on ground that hurts', () => {
     const { threats } = fieldOf([straightShot({ x: 9.6, y: 10 }, 0, 8, 0, 3000)]);
     const lavaNorth: DodgeGround = {
       canStand: () => true,
-      isDamaging: (_x, y) => y < 10,
+      hazardGapTiles: (_x, y) => y - 10,
       crowdingAt: () => 0,
       contactAt: () => 0,
     };
@@ -975,6 +1041,7 @@ describe('what a plan costs', () => {
     return {
       ...DODGE_PRESETS[preset],
       leadMs: 60,
+      hazardClearTiles: 0.5,
       hopEnabled: true,
       hopTiles: MAX_HOP_TILES,
       hopCooldownMs: 400,

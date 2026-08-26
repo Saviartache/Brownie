@@ -56,8 +56,17 @@ import { NO_THREAT_TILES, type ThreatIndex } from './ThreatIndex.js';
 export interface DodgeGround {
   /** Whether the player's whole body fits here — walls, objects, unknown map. */
   canStand(x: number, y: number): boolean;
-  /** Whether a body here would be standing on ground that costs health. */
-  isDamaging(x: number, y: number): boolean;
+  /**
+   * How far a body standing here is from ground that costs health, in tiles.
+   *
+   * **A distance and not a verdict, which is the whole of what stops a dodge
+   * ending with a heel in the lava.** Refusing to walk *into* a pool says
+   * nothing about hugging its edge, and a route planned to the last millimetre
+   * is a route that a server correction or a frame of latency puts inside it.
+   * Negative once the body is actually on some, and `Infinity` when there is
+   * none near enough for the difference to decide anything.
+   */
+  hazardGapTiles(x: number, y: number): number;
   /**
    * How far inside a monster's keep-away distance a place is, and nought
    * anywhere with room to spare.
@@ -441,33 +450,39 @@ export class DodgeSearch {
       this.#anchorX = request.anchorX + request.anchorStepX * next;
       this.#anchorY = request.anchorY + request.anchorStepY * next;
 
-      const wasDamaging = request.ground.isDamaging(x, y);
+      const wasGap = request.ground.hazardGapTiles(x, y);
       let toX = x + dirX * request.stepTiles;
       let toY = y + dirY * request.stepTiles;
       let travel = dirX === 0 && dirY === 0 ? 0 : request.stepTiles;
-      let damaging = wasDamaging;
+      let gap = wasGap;
       if (travel > 0) {
-        damaging = request.ground.isDamaging(toX, toY);
+        gap = request.ground.hazardGapTiles(toX, toY);
         // **A run stops at the edge of a pool exactly as it stops at a wall**,
         // and for a stronger reason: a walk into ground that hurts is refused
         // outright, so a run that would enter one simply ends there rather than
         // being priced as though it had gone in. See {@link #expand}.
+        const entering = entersHazard(
+          wasGap,
+          gap,
+          request.ground.hazardGapTiles((x + toX) / 2, (y + toY) / 2),
+          request.weights.hazardClearTiles,
+        );
         if (
-          (damaging && !wasDamaging) ||
+          entering ||
           !request.ground.canStand(toX, toY) ||
           !request.ground.canStand((x + toX) / 2, (y + toY) / 2)
         ) {
           toX = x;
           toY = y;
           travel = 0;
-          damaging = wasDamaging;
+          gap = wasGap;
         }
       }
 
       const anchorX = toX - this.#anchorX;
       const anchorY = toY - this.#anchorY;
       const anchorTiles = Math.sqrt(anchorX * anchorX + anchorY * anchorY);
-      total += this.#priceOf(request, toX, toY, dirX, dirY, travel, anchorTiles, damaging);
+      total += this.#priceOf(request, toX, toY, dirX, dirY, travel, anchorTiles, gap);
       if (this.#priced < 0 && this.#startsMs < impact) impact = this.#startsMs;
       if (this.#priced < room) room = this.#priced;
 
@@ -573,12 +588,12 @@ export class DodgeSearch {
     this.#arriveMs = this.#startsMs + request.tickMs;
     this.#anchorX = request.anchorX + request.anchorStepX * this.#next;
     this.#anchorY = request.anchorY + request.anchorStepY * this.#next;
-    const wasDamaging = request.ground.isDamaging(this.#fromX, this.#fromY);
+    const wasGap = request.ground.hazardGapTiles(this.#fromX, this.#fromY);
 
     // Standing still first, and it can never be refused: a node exists only
     // because its own place was walkable, so the horizon is always reachable
     // from wherever the search has got to.
-    this.#offer(request, node, this.#fromX, this.#fromY, 0, 0, 0, wasDamaging);
+    this.#offer(request, node, this.#fromX, this.#fromY, 0, 0, 0, wasGap);
 
     for (let i = 0; i < this.#headings; i += 1) {
       const dirX = this.#headingX[i] ?? 0;
@@ -595,19 +610,33 @@ export class DodgeSearch {
       if (!request.ground.canStand(toX, toY)) continue;
       if (!request.ground.canStand((this.#fromX + toX) / 2, (this.#fromY + toY) / 2)) continue;
 
-      // **And ground that hurts is refused outright, not merely charged for.**
-      // A wall costs a step; a pool costs health every tick you are in it, with
-      // nothing left to dodge — so there is no arrangement of shots for which
-      // *walking* into one is the answer. What is left when the only way out
-      // runs across it is the hop, which covers the same ground on one frame and
+      // **Ground that hurts is refused outright, not merely charged for — and
+      // the margin around it is refused too.** A wall costs a step; a pool costs
+      // health every tick you are in it, with nothing left to dodge, so there is
+      // no arrangement of shots for which *walking* in is the answer. And a
+      // route planned to the last millimetre of the edge is one that a server
+      // correction or a frame of latency puts inside, which is the same loss
+      // arriving by a different road — so the keep-clear distance is a wall in
+      // its own right, not a preference. What is left when the only way out runs
+      // across a pool is the hop, which covers the same ground on one frame and
       // lands on the far side. See `Hop` and `DodgePlanner`.
       //
-      // Only on the way in. A character already standing in a pool has to be
-      // able to walk out of it, and every step of that walk starts inside.
-      const damaging = request.ground.isDamaging(toX, toY);
-      if (damaging && !wasDamaging) continue;
+      // **Every one of these is conditional on where the step starts**, which is
+      // what makes a rule this hard safe: whatever band the character is already
+      // in, they may move inside it and outwards, and a margin can therefore
+      // never be the thing holding somebody in a pool.
+      //
+      // **The midpoint as well as the end**, because a step is most of a tile: a
+      // route that clips the corner of a pool between two clear places is
+      // exactly the one a player reports as "it ran me through the lava".
+      const gap = request.ground.hazardGapTiles(toX, toY);
+      const middle = request.ground.hazardGapTiles(
+        (this.#fromX + toX) / 2,
+        (this.#fromY + toY) / 2,
+      );
+      if (entersHazard(wasGap, gap, middle, request.weights.hazardClearTiles)) continue;
 
-      this.#offer(request, node, toX, toY, dirX, dirY, request.stepTiles, damaging);
+      this.#offer(request, node, toX, toY, dirX, dirY, request.stepTiles, gap);
     }
   }
 
@@ -632,7 +661,7 @@ export class DodgeSearch {
     dirY: number,
     travelTiles: number,
     anchorTiles: number,
-    damaging: boolean,
+    hazardGapTiles: number,
   ): number {
     let clearance = request.threats.clearanceOf(this.#step, this.#fromX, this.#fromY, toX, toY);
     if (request.blasts !== undefined) {
@@ -650,7 +679,7 @@ export class DodgeSearch {
       travelTiles,
       clearance,
       request.ground.crowdingAt(toX, toY, this.#arriveMs),
-      damaging,
+      hazardGapTiles,
       this.#stepsLeft,
     );
 
@@ -672,7 +701,7 @@ export class DodgeSearch {
     dirX: number,
     dirY: number,
     travelTiles: number,
-    damaging: boolean,
+    hazardGapTiles: number,
   ): void {
     const cellX = Math.round((toX - request.startX) / this.#cell);
     const cellY = Math.round((toY - request.startY) / this.#cell);
@@ -701,7 +730,16 @@ export class DodgeSearch {
       if ((this.#g[seen] ?? 0) <= floor) return;
     }
 
-    const cost = this.#priceOf(request, toX, toY, dirX, dirY, travelTiles, anchorTiles, damaging);
+    const cost = this.#priceOf(
+      request,
+      toX,
+      toY,
+      dirX,
+      dirY,
+      travelTiles,
+      anchorTiles,
+      hazardGapTiles,
+    );
     const clearance = this.#priced;
     const g = this.#fromG + cost;
     // No decrease-key and no re-expansion: with a consistent estimate the first
@@ -825,6 +863,38 @@ export class DodgeSearch {
     this.#room = room;
     this.#closed = closed;
   }
+}
+
+/**
+ * Whether a step takes the character nearer a pool than it may go.
+ *
+ * **A ratchet, and one line of it.** The character may never end a step closer
+ * to ground that hurts than the better of where they already are and the margin
+ * they are meant to keep. Above the margin the distance is free; below it, the
+ * only steps left are the ones that hold their ground or open it up.
+ *
+ * **Why a refusal and not a charge.** Room from a bullet is a bet on a
+ * prediction and is worth trading; distance from a pool is a fact about the map,
+ * and a route planned to the last millimetre of an edge is one that a server
+ * correction or a frame of latency puts inside — the same loss arriving by a
+ * different road. The live report is the plain one: *never mind the projectiles,
+ * do not end up in the lava*.
+ *
+ * **And it can never hold anybody in one.** The floor is what they already have,
+ * so a character standing in a pool may take any step that is not deeper, and
+ * standing still always qualifies.
+ *
+ * @param clearTiles How far from a pool counts as far enough. Nought leaves only
+ *   the pool itself refused, which is what switching the margin off should mean.
+ */
+function entersHazard(
+  fromGap: number,
+  toGap: number,
+  middleGap: number,
+  clearTiles: number,
+): boolean {
+  const worst = toGap < middleGap ? toGap : middleGap;
+  return worst < (fromGap < clearTiles ? fromGap : clearTiles);
 }
 
 /** One state — a cell and a moment — as a single number the map can key on. */

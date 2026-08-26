@@ -122,6 +122,46 @@ export class GroundCache {
   }
 
   /**
+   * How far the body standing here is from the nearest ground that hurts, in
+   * tiles. Negative once it is standing on some.
+   *
+   * **A distance rather than a verdict, and that is what the planner was
+   * missing.** Refusing to *enter* a pool says nothing about hugging its edge,
+   * so a dodge would thread a shot with the character's heel on the boundary —
+   * and then a server correction, a frame of latency or the player's own input
+   * put them in it. A distance gives the route somewhere to prefer, which is
+   * what keeps the margin off the edge instead of merely off the tile.
+   *
+   * Measured between two squares, because that is what both of them are: the
+   * body is an axis-aligned box and so is a tile, so the gap between them is the
+   * larger of the two axis gaps.
+   *
+   * @param withinTiles How far to bother looking. Past it the answer is
+   *   `Infinity` — nothing near enough for the difference to decide anything,
+   *   and the box scanned is what this costs.
+   */
+  hazardGap(x: number, y: number, withinTiles: number): number {
+    const half = PLAYER_ENVIRONMENT_HALF_TILES;
+    const reach = half + Math.max(0, withinTiles);
+    const fromX = Math.floor(x - reach);
+    const toX = Math.floor(x + reach);
+    const fromY = Math.floor(y - reach);
+    const toY = Math.floor(y + reach);
+
+    let best = Infinity;
+    for (let tileX = fromX; tileX <= toX; tileX += 1) {
+      for (let tileY = fromY; tileY <= toY; tileY += 1) {
+        if ((this.#at(tileX, tileY) & DAMAGING) === 0) continue;
+        const gapX = Math.max(tileX - (x + half), x - half - (tileX + 1));
+        const gapY = Math.max(tileY - (y + half), y - half - (tileY + 1));
+        const gap = gapX > gapY ? gapX : gapY;
+        if (gap < best) best = gap;
+      }
+    }
+    return best;
+  }
+
+  /**
    * Whether any tile the widened body touches carries `flag`.
    *
    * Every tile in the box rather than its four corners: the corners are enough

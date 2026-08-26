@@ -76,8 +76,25 @@ export interface StepWeights {
    * round.
    */
   readonly crowdPerTile: number;
-  /** Flat, for a step that ends on ground that costs health. */
-  readonly hazard: number;
+  /**
+   * Per tile of the keep-clear distance a step is short of, and it steepens.
+   *
+   * **Charged on the distance, not on the tile.** Walking into a pool is refused
+   * outright by the search, so a flat charge for standing in one was a term that
+   * almost never fired — and it left the planner perfectly content to thread a
+   * shot with the character's heel on the boundary, where a correction from the
+   * server or a frame of latency puts them in it. Curved for the same reason the
+   * crowding is: the outer half of the margin is where an ordinary fight
+   * happens, and the last hand's breadth of it is health.
+   */
+  readonly hazardPerTile: number;
+  /**
+   * How far from ground that hurts counts as far enough, in tiles.
+   *
+   * Above it the distance stops mattering, exactly as room from a shot does
+   * above {@link safeClearanceTiles}.
+   */
+  readonly hazardClearTiles: number;
   /**
    * Charged per step still to come, for a step that is actually hit.
    *
@@ -99,7 +116,8 @@ export interface StepWeights {
  * @param clearanceTiles The least room it had at any instant, from
  *   {@link ThreatIndex.clearanceOf}. `Infinity` when nothing came near.
  * @param crowdingTiles How far inside a monster's bubble it ends.
- * @param damaging Whether it ends on ground that hurts.
+ * @param hazardGapTiles How far the step ends from ground that hurts. Negative
+ *   once it is standing on some, which is charged hardest of all.
  * @param stepsLeft How many steps of the horizon are still ahead of it, which
  *   is what makes an early hit worse than a late one.
  */
@@ -109,7 +127,7 @@ export function stepCost(
   travelTiles: number,
   clearanceTiles: number,
   crowdingTiles: number,
-  damaging: boolean,
+  hazardGapTiles: number,
   stepsLeft: number,
 ): number {
   let cost = weights.anchorPerTile * anchorTiles + weights.travelPerTile * travelTiles;
@@ -127,7 +145,10 @@ export function stepCost(
   if (crowdingTiles > 0) {
     cost += weights.crowdPerTile * crowdingTiles * (1 + crowdingTiles);
   }
-  if (damaging) cost += weights.hazard;
+  if (hazardGapTiles < weights.hazardClearTiles) {
+    const shortfall = weights.hazardClearTiles - hazardGapTiles;
+    cost += weights.hazardPerTile * shortfall * (1 + shortfall);
+  }
   return cost;
 }
 

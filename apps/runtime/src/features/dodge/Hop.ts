@@ -73,6 +73,17 @@ export interface HopRequest {
   readonly headings: number;
   /** How much room a landing place needs before more of it stops being better. */
   readonly safeClearanceTiles: number;
+  /**
+   * How far from ground that hurts a landing place has to be, in tiles.
+   *
+   * **The same barrier the walk respects, because a hop is the easier way
+   * through it.** A hop that lands a hair from a pool is a hop that a server
+   * correction puts in one, and it is worse than a walk doing the same: there is
+   * no next step in which the planner could change its mind. Refused from
+   * outside the margin only — a character already inside one has to be able to
+   * hop *within* it, and outwards.
+   */
+  readonly hazardClearTiles: number;
   readonly ground: DodgeGround;
   readonly threats: ThreatIndex;
   readonly blasts: BlastField | undefined;
@@ -126,9 +137,9 @@ export function chooseHop(request: HopRequest): Hop | undefined {
   // it is damaging, so anywhere that survives the ring is somewhere better —
   // and ranked on their own ground alone, standing in the pool would win every
   // time, because it is by definition nought tiles from where they are.
-  let bestAnchor = request.ground.isDamaging(request.x, request.y)
-    ? Infinity
-    : Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
+  const fromGap = request.ground.hazardGapTiles(request.x, request.y);
+  let bestAnchor =
+    fromGap < 0 ? Infinity : Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
   let found = false;
 
   for (const fraction of HOP_FRACTIONS) {
@@ -143,7 +154,19 @@ export function chooseHop(request: HopRequest): Hop | undefined {
       if (!request.ground.canStand((request.x + toX) / 2, (request.y + toY) / 2)) continue;
       // A hop out of a shot and into lava is not an escape, and unlike a walk
       // there is no next step to take back out of it before the ground bites.
-      if (request.ground.isDamaging(toX, toY)) continue;
+      // The midpoint too, for the same reason a walk checks it: a hop that
+      // clips the corner of a pool is a hop through it.
+      const gap = request.ground.hazardGapTiles(toX, toY);
+      const middle = request.ground.hazardGapTiles((request.x + toX) / 2, (request.y + toY) / 2);
+      const worstGap = gap < middle ? gap : middle;
+      // **The same ratchet the walk obeys, and it has to be**: a hop is the
+      // easier way through a barrier, and it is the one movement with no next
+      // step in which the planner could change its mind. Never nearer a pool
+      // than the better of where they already are and the margin they keep, and
+      // never into one at all.
+      if (worstGap < 0) continue;
+      const floor = fromGap < request.hazardClearTiles ? fromGap : request.hazardClearTiles;
+      if (worstGap < floor) continue;
       // **Nor into a monster.** A hop is instant, so unlike a step there is no
       // moment in which the planner could change its mind about the landing —
       // and landing inside a body is contact damage and a shot fired from

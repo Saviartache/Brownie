@@ -78,6 +78,10 @@ export function planningSettings(controls: DodgeControls): DodgeSettings {
     leadMs: controls.leadMs.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
+    // Nought when the whole idea is switched off, so the search stops preferring
+    // a distance nobody asked it to keep. Withdrawing the *refusal* to walk in
+    // is the scene's, and it does that with the same switch.
+    hazardClearTiles: controls.hazards.avoid.get() ? controls.hazards.clearanceTiles.get() : 0,
     holdGroundWeight: tuning.holdGroundWeight.get(),
     greed: tuning.greed.get(),
     maxExpansions: tuning.maxExpansions.get(),
@@ -339,9 +343,16 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // The margin exists because the planner has no way to be sure where the
   // character will actually end up — the server has its own opinion, the command
   // lands a frame late — so a route planned to stop exactly at the edge is a
-  // route that gets a toe in it. Dropped when the player is already standing
-  // that close, exactly as the wall margin is, and for a reason a hard refusal
-  // makes sharper: it must never be the thing holding them in there.
+  // route that gets a toe in it.
+  //
+  // **Not dropped when the player is already inside it, unlike the wall's**, and
+  // that difference is what the live report was about. The rule is a ratchet
+  // rather than a fence: a step may never end nearer a pool than the better of
+  // where the character already is and this distance. Somebody who has been
+  // pushed inside can therefore still move — within the band, and outwards — so
+  // it can never hold them in there, and it never quietly turns itself off the
+  // moment it is most needed. The emergency step obeys the same rule, because a
+  // hop is the easier way through a barrier.
   const hazardClearanceTiles = settings.range('hazardClearanceTiles', {
     label: 'Keep clear of lava and damaging ground by (tiles)',
     group: 'Safety',
