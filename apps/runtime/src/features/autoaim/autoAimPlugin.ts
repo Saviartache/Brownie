@@ -213,6 +213,28 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       });
 
       const tracker = new MotionTracker();
+      /**
+       * Where the *player* is going, tracked exactly as the enemies are.
+       *
+       * **A shot is fired from the player, and the player is not where the
+       * last packet put them.** The client states its position once a server
+       * tick, so between two of those the world model holds a character that
+       * has since run up to two tiles — and an intercept is a distance divided
+       * by a shot's speed, so a shooter two tiles too far back is a flight a
+       * hundred milliseconds too long and a lead that far past the enemy.
+       *
+       * It errs the same way every time, which is what makes it visible:
+       * running *at* something is the common case, and a stale position is
+       * always further from the target than the real one, so the aim is always
+       * ahead of the monster rather than on it.
+       */
+      const walking = new MotionTracker();
+      /**
+       * What the last tick said it lasted, so the player's own sightings are
+       * divided by the same interval the enemies' are. `MOVE` is the client's
+       * reply to `NEWTICK`, so the two arrive at one cadence.
+       */
+      let tickLengthMs: number | undefined;
 
       // **The module keeps the detours in only while somebody is asking**, so
       // this has to ask — and keep asking. The claim expires on the far side,
@@ -233,14 +255,18 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
       context.onDispose(() => {
         tracker.clear();
+        walking.clear();
         claimPassWalls(false, Date.now());
       });
 
       // Object ids are unique within a map and re-used across one, so a
       // tracker carried over would derive a velocity from two positions of two
-      // different monsters.
+      // different monsters. The player's own is dropped for a plainer reason:
+      // a map change is a character put somewhere else, and the step across is
+      // not a direction they were walking in.
       context.packets.on('MAPINFO', () => {
         tracker.clear();
+        walking.clear();
       });
 
       // **Sampling is packet work.** A position is only news when the server
@@ -260,23 +286,62 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       // aim led by that goes to the far side of the room. See `MotionTracker`.
       context.packets.on('NEWTICK', (packet, session) => {
         const world = session.world;
-        tracker.tick(world.gameTimeMs, packet.number('tickTime'));
+        tickLengthMs = packet.number('tickTime');
+        tracker.tick(world.gameTimeMs, tickLengthMs);
         for (const enemy of world.enemies()) {
           if (enemy.hp > 0) tracker.observe(enemy.objectId, enemy.x, enemy.y);
         }
+      });
+
+      // **Where the player is, from the one packet that says so.** `MOVE` is
+      // the character's own statement of where it has been this tick and it is
+      // the only thing that moves the world model's copy of it, so this is the
+      // moment that copy is worth a sighting. The state stage has already
+      // applied it — the pipeline puts that first — so the position read here
+      // is the reading the packet carried, before any plugin rewrites what
+      // goes out on the wire.
+      //
+      // A packet whose body did not decode moved nothing, and sampling the
+      // same position twice would blend the character to a standstill.
+      context.packets.on('MOVE', (packet, session) => {
+        if (packet.opaque) return;
+        const self = session.self;
+        walking.tick(session.world.gameTimeMs, tickLengthMs);
+        walking.observe(self.objectId, self.x, self.y);
       });
 
       /** Points the shots at whatever is worth shooting, or at nothing. */
       const aim = (session: SessionView): void => {
         const self = session.self;
         if (!self.alive) return;
-        // Everything below is measured from here, so a position that is not a
-        // number is a whole plan's worth of `NaN` — ending at a point handed to
-        // the module that points the shots.
+        // What the shot is measured from falls back to this, so a position that
+        // is not a number is a whole plan's worth of `NaN` — ending at a point
+        // handed to the module that points the shots.
         if (!Number.isFinite(self.x) || !Number.isFinite(self.y)) return;
 
         const world = session.world;
         const now = world.gameTimeMs;
+
+        // **Where the shot leaves from, which is where the player is now.**
+        // The client says where it is once a server tick and this is asked
+        // eight times in one, so the position on the packet is a character
+        // standing where they were up to two tiles ago. Everything below is
+        // measured from this point: which enemies are in reach, how long a shot
+        // takes to cross to one, and therefore how far ahead of it to aim.
+        //
+        // **A tick of that error does not average out, it accumulates in one
+        // direction.** A player running at something is always further from it
+        // in the world model than in the game, so the flight is always
+        // over-estimated and the lead is always past the enemy — which is the
+        // aim sitting in the empty floor ahead of a monster being charged.
+        // Running away is the same error mirrored, and under-leads.
+        //
+        // Nothing to fall back to on the first tick of a session, which is
+        // exactly when the player has not been seen to move yet — and standing
+        // still is what the last packet says.
+        const stride = walking.motionAt(self.objectId, now);
+        const shooterX = stride?.x ?? self.x;
+        const shooterY = stride?.y ?? self.y;
 
         // **No weapon, no aim.** How fast a shot travels and how long it lives
         // are properties of the item in the first slot, and both are needed to
@@ -322,8 +387,8 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             return { x: enemy.x, y: enemy.y };
           }
           const intercept = solveIntercept({
-            shooterX: self.x,
-            shooterY: self.y,
+            shooterX,
+            shooterY,
             targetX: motion.x,
             targetY: motion.y,
             targetVelocityX: motion.velocityX,
@@ -371,9 +436,11 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const cursor =
           chosen === TargetPriority.ClosestToCursor ? options.cursorPoint() : undefined;
 
+        // Ranked and reached from the same place the shot leaves from, so an
+        // enemy the player has just run into reach of is one this can see.
         const target = selectTarget(world.enemies(), {
-          shooterX: self.x,
-          shooterY: self.y,
+          shooterX,
+          shooterY,
           maxRangeTiles: range,
           priority: chosen,
           cursorPoint: cursor,

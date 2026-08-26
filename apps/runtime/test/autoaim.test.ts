@@ -634,8 +634,12 @@ describe('the auto-aim plugin', () => {
     session: SessionView;
     enemies: EntityView[];
     setTime: (ms: number) => void;
+    /** Where the character stands, as the world model holds it. */
+    setSelf: (x: number, y: number) => void;
     /** One sighting followed by one decision, which is a server tick's worth. */
     tick: () => void;
+    /** The client's own statement of where it has been this tick. */
+    move: () => void;
     /** A decision with no packet behind it, which is the usual case now. */
     plan: () => void;
   } {
@@ -643,6 +647,8 @@ describe('the auto-aim plugin', () => {
     const enemies: EntityView[] = [];
     let gameTimeMs = 0;
     let cursorPoint: Position | undefined;
+    let selfX = 0;
+    let selfY = 0;
 
     const session = {
       id: 's1',
@@ -650,8 +656,12 @@ describe('the auto-aim plugin', () => {
         objectId: 1,
         hp: 100,
         maxHp: 100,
-        x: 0,
-        y: 0,
+        get x() {
+          return selfX;
+        },
+        get y() {
+          return selfY;
+        },
         alive: true,
         weaponType: options.weaponType ?? 0x0a00,
       },
@@ -700,6 +710,10 @@ describe('the auto-aim plugin', () => {
       setTime: (ms: number) => {
         gameTimeMs = ms;
       },
+      setSelf: (x: number, y: number) => {
+        selfX = x;
+        selfY = y;
+      },
       setCursor: (point: Position | undefined) => {
         cursorPoint = point;
       },
@@ -708,8 +722,26 @@ describe('the auto-aim plugin', () => {
         host.dispatchPacket(newtick(), session);
         plan();
       },
+      move: () => {
+        host.dispatchPacket(movement(), session);
+      },
     };
   }
+
+  /**
+   * The client's reply to a tick.
+   *
+   * The records carry nothing the plugin reads — the state stage has already
+   * applied them, so what it samples is the world model's own position — but
+   * the packet has to be a real one, because an empty body is an opaque packet
+   * and this deliberately ignores those.
+   */
+  const movement = () =>
+    packetOf('MOVE', {
+      tickId: 0,
+      serverRealTimeMSofLastNewTick: 0,
+      records: [{ time: 0, x: 0, y: 0 }],
+    });
 
   const newtick = () =>
     packetOf('NEWTICK', {
@@ -840,6 +872,56 @@ describe('the auto-aim plugin', () => {
     // which is the bound a lead cannot argue with.
     expect(y).toBeGreaterThan(1.6);
     expect(Math.hypot(x, y)).toBeLessThanOrEqual(WEAPON.reachTiles);
+  });
+
+  // **The other half of the same complaint, and the one that shows.** A shot
+  // leaves from the player, the client says where the player is once a server
+  // tick, and this decides eight times in one — so the position it measures
+  // from is a character standing where they were up to two tiles ago. The
+  // error does not average out: running *at* something always puts the world
+  // model further from it than the game is, so the flight is always
+  // over-estimated and the aim always lands past the monster.
+  it('measures the shot from where the player is, not from their last report', () => {
+    /** The same fight, with the player having covered `stepTiles` this tick. */
+    const leadAfterHalfATick = (stepTiles: number): number => {
+      const scene = harness();
+      const walker = { ...enemy(1, 5, 0) };
+      scene.enemies.push(walker);
+
+      scene.setSelf(1.6 - stepTiles, 0);
+      scene.tick();
+      scene.move();
+
+      // Both runs end the tick reported in the same place, so the only thing
+      // that differs below is whether the character is known to be moving.
+      scene.setTime(200);
+      scene.setSelf(1.6, 0);
+      walker.y = 0.8;
+      scene.tick();
+      scene.move();
+
+      // Half a tick on, and nobody has said anything about anybody since.
+      scene.setTime(300);
+      scene.plan();
+      return Number(scene.aimAt.mock.calls.at(-1)?.[1]);
+    };
+
+    // The runner has closed the best part of a tile the world model does not
+    // know about, so the shot has less ground to cross and the enemy less of
+    // the flight to walk through.
+    expect(leadAfterHalfATick(1.6)).toBeLessThan(leadAfterHalfATick(0));
+  });
+
+  it('stands still until the player has been seen to move', () => {
+    // Nothing to carry forward on the first report of a session, and where the
+    // last packet put them is the only answer there is.
+    const { aimAt, enemies, setSelf, tick, move } = harness();
+    enemies.push(enemy(1, 3, 0));
+    setSelf(1, 0);
+    move();
+    tick();
+    expect(aimAt.mock.calls.at(-1)?.[0]).toBeCloseTo(3);
+    expect(aimAt.mock.calls.at(-1)?.[1]).toBeCloseTo(0);
   });
 
   it('drops a track the server moved rather than leading where it was thrown', () => {
