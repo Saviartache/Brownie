@@ -445,7 +445,7 @@ everything else. `ZIG=<path>` overrides it.
 ## Packaging a release
 
 ```bash
-npm run build:release    # release/Brownie/ and release/Brownie-<version>-win-x64.zip
+npm run build:release    # release/Brownie/ and release/Brownie-<version>-win-x64.7z
 ```
 
 Builds the module and the runtime, then assembles a folder somebody can
@@ -463,7 +463,9 @@ Brownie/
 ```
 
 `brownie.exe` is the whole Node binary with the runtime bundled into it, so it
-is about 90 MB and only ever as new as the Node that built it.
+is about 90 MB and only ever as new as the Node that built it. That binary is
+what decides the download's size: 7z's LZMA takes it to 23 MB where a zip's
+deflate leaves it at 33, which is why a release is `.7z` and not `.zip`.
 
 **The data stays beside the executable rather than inside it.** Both directories
 are read at startup and neither is cached, which is what keeps them data: a game

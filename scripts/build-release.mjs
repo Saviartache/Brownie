@@ -64,13 +64,21 @@ function step(message) {
 /**
  * Deletes a directory this script owns.
  *
- * Retried, because a 90 MB executable that was just written is a 90 MB
- * executable something else is still reading — a virus scanner, most often —
- * and Windows answers a delete during that with EPERM rather than waiting.
- * Observed here on a rebuild, which is exactly when it matters.
+ * Windows refuses to remove a directory anything still holds — a shell sitting
+ * in it, a scanner reading the executable that was just written — and answers
+ * EPERM rather than waiting. The retries cover the case that passes on its own;
+ * the message covers the case that does not, because the bare errno says only
+ * that a build "failed" and names a path that looks perfectly ordinary.
  */
 function discard(directory) {
-  rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  try {
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (cause) {
+    throw new Error(
+      `could not delete ${directory}: ${cause.message}. Something is holding it open — most ` +
+        'often a terminal whose working directory is inside it.',
+    );
+  }
 }
 
 /**
@@ -270,13 +278,18 @@ function writeReadme(version) {
 }
 
 /**
- * Zips the package.
+ * Archives the package.
  *
- * Windows ships bsdtar, which writes a real zip when the name says zip. A
- * dependency for one archive would be a dependency to keep updated.
+ * Windows ships bsdtar, which picks the format and the compressor from the
+ * name. A dependency for one archive would be a dependency to keep updated.
+ *
+ * **7z rather than zip, for the executable's sake.** Nearly all of this is a
+ * 90 MB Node binary, and zip's deflate leaves it at 33 MB where LZMA takes it
+ * to 23 — the difference between a 38 MB download and a 25 MB one. Nothing
+ * else in here is big enough to change the answer.
  *
  * **By full path, not by name.** A machine with Git installed has GNU tar in
- * front of it on PATH, and GNU tar does not know what a zip is: it writes an
+ * front of it on PATH, and GNU tar knows neither format: it writes an
  * uncompressed tar under the name it was given and exits 0. Nothing downstream
  * can tell the difference until somebody tries to open it.
  *
@@ -287,7 +300,7 @@ function archive(version) {
   const bsdtar = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'tar.exe');
   if (!existsSync(bsdtar)) throw new Error(`no bsdtar at ${bsdtar} to write the archive with`);
 
-  const name = `Brownie-${version}-win-x64.zip`;
+  const name = `Brownie-${version}-win-x64.7z`;
   const result = spawnSync(bsdtar, ['-a', '-c', '-f', name, 'Brownie'], {
     cwd: RELEASE,
     stdio: 'inherit',
