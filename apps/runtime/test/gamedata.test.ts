@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GameObjectCatalog,
   GameTileCatalog,
+  bodyTilesFromPercent,
   readObjectDefinitions,
   readTileDefinitions,
 } from '../src/gamedata/GameCatalogs.js';
@@ -331,6 +332,25 @@ describe('object catalog', () => {
     expect(catalog.bodyTiles(0x5)).toBe(1);
     // Told apart from a type nobody has heard of, so a caller can fall back.
     expect(catalog.bodyTiles(0xffff)).toBeUndefined();
+  });
+
+  // **The file states a default, and the wire states the truth.** Three hundred
+  // and eighty of the game's monsters roll their size per instance, and a boss
+  // that grows says so with the same stat — so whatever reads the live one has
+  // to turn it into tiles exactly as the file's own figure is turned, or the
+  // same monster is two different sizes depending on which was read.
+  it('turns a stated size into tiles the same way wherever it came from', () => {
+    expect(bodyTilesFromPercent(100)).toBe(1);
+    expect(bodyTilesFromPercent(400)).toBe(4);
+    // The same clamps, because a backdrop is a backdrop on the wire too.
+    expect(bodyTilesFromPercent(4000)).toBe(6);
+    expect(bodyTilesFromPercent(10)).toBe(0.25);
+    // Nothing to convert, so the caller falls back rather than being handed a
+    // body of nothing.
+    expect(bodyTilesFromPercent(undefined)).toBeUndefined();
+    expect(bodyTilesFromPercent(0)).toBeUndefined();
+    expect(bodyTilesFromPercent(-4)).toBeUndefined();
+    expect(bodyTilesFromPercent(Number.NaN)).toBeUndefined();
   });
 
   // What a lever is, and the game's own answer for it: a health bar, no attack,

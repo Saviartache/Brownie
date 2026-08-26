@@ -49,6 +49,7 @@
  */
 
 import type { EntityView } from '@brownie/plugin-api';
+import { MAX_BODY_TILES } from '../../gamedata/GameCatalogs.js';
 import type { Motion } from '../../state/MotionTracker.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
@@ -156,7 +157,14 @@ export class EnemyBodies {
   }
 
   /**
-   * Takes everything within `withinTiles` of a point, and forgets the rest.
+   * Takes everything whose body comes within `withinTiles` of a point, and
+   * forgets the rest.
+   *
+   * From the body's edge rather than its middle, so one number means the same
+   * thing whatever is standing there. The cheap first pass allows for the widest
+   * body the catalog can state; a caller that widens a sighting past that — as
+   * this one's does, by the age of the reading — is spending its own margin,
+   * which is what that margin is for.
    *
    * @param read What this one is doing, or `undefined` for something that is
    *   not a body worth keeping away from at all.
@@ -182,10 +190,21 @@ export class EnemyBodies {
     read: (enemy: EntityView) => BodySighting | undefined,
   ): void {
     this.#count = 0;
+    // **Cheap first, and generously, because this runs for every enemy in the
+    // realm.** How big one is, is not known until it has been read, so the box
+    // has to allow for the widest body the catalog will describe — anything past
+    // that is out of reach whatever it turns out to be.
+    const box = withinTiles + MAX_BODY_TILES / 2;
     for (const enemy of enemies) {
-      if (Math.abs(enemy.x - x) > withinTiles || Math.abs(enemy.y - y) > withinTiles) continue;
+      if (Math.abs(enemy.x - x) > box || Math.abs(enemy.y - y) > box) continue;
       const sighting = read(enemy);
       if (sighting === undefined) continue;
+      // **Then exactly, from the body's own edge.** A boss six tiles across
+      // reaches three tiles into the room from outside it, and one dropped for
+      // the distance to its middle is one the planner walks straight at — the
+      // same mistake a distance cull makes about a wide shot.
+      const near = sighting.halfTiles + withinTiles;
+      if (Math.abs(sighting.x - x) > near || Math.abs(sighting.y - y) > near) continue;
       if (this.#count >= this.#x.length) this.#grow();
       // The caller's reading rather than the packet's: the cull above is about
       // which monsters are near enough to matter, and a prediction cannot move
@@ -214,9 +233,14 @@ export class EnemyBodies {
    * to nobody. The worst offender decides it, because being crowded by the
    * second-nearest of two is being crowded.
    *
-   * Distance is measured centre to centre and round, unlike the square the
-   * game's collision uses (see `hitbox.ts`): the room a dodge needs is a bubble
-   * rather than a hitbox.
+   * **A round gap held from a square body**, which is two decisions and not
+   * one. The body is the axis-aligned square the game collides with — see
+   * `hitbox.ts` — because where a monster *is* is not a matter of taste; the
+   * room wanted beyond it is a bubble, because that part is a preference and a
+   * dodge needs it in every direction alike. Measuring both round put the
+   * corners of a four-tile boss most of a tile inside the distance the setting
+   * asked for, which is the same "they walk right up to me" report as the size
+   * itself was, in the direction nobody had measured.
    *
    * @param keepAwayTiles How much room to insist on, stated from the middle of
    *   an ordinary monster. See {@link nearEdgeOf} for what it becomes against a
@@ -231,13 +255,13 @@ export class EnemyBodies {
     if (this.#count === 0) return 0;
 
     const ahead = Math.min(Math.max(aheadMs, 0), MAX_BODY_LOOKAHEAD_MS);
+    const wanted = keepAwayGapOf(keepAwayTiles);
     let worst = 0;
     for (let i = 0; i < this.#count; i += 1) {
-      const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
-      const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
-      const inside =
-        nearEdgeOf(this.#half[i] ?? ENEMY_CONTACT_HALF_TILES, keepAwayTiles) -
-        Math.sqrt(dx * dx + dy * dy);
+      const half = this.#half[i] ?? ENEMY_CONTACT_HALF_TILES;
+      const dx = Math.abs((this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x) - half;
+      const dy = Math.abs((this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y) - half;
+      const inside = wanted - boxDistance(dx, dy);
       if (inside > worst) worst = inside;
     }
     return worst;
@@ -256,6 +280,13 @@ export class EnemyBodies {
    *
    * Nought everywhere the bodies are apart, so a caller can treat it as "is
    * this place occupied" without a second threshold.
+   *
+   * **Measured as a square, unlike {@link crowdingAt}, and the difference is
+   * not a rounding.** Every collision in this game is axis-aligned — see
+   * `hitbox.ts` — so two bodies a tile apart on both axes are overlapping, which
+   * a circle of the same reach calls a clean miss. Room to dodge in is a bubble
+   * somebody chose the size of; this is the shape the game itself uses, and on
+   * the bodies worth being told about the two disagree by more than a tile.
    */
   contactAt(x: number, y: number, aheadMs = 0): number {
     if (this.#count === 0) return 0;
@@ -263,12 +294,10 @@ export class EnemyBodies {
     const ahead = Math.min(Math.max(aheadMs, 0), MAX_BODY_LOOKAHEAD_MS);
     let worst = 0;
     for (let i = 0; i < this.#count; i += 1) {
-      const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
-      const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
+      const dx = Math.abs((this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x);
+      const dy = Math.abs((this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y);
       const inside =
-        (this.#half[i] ?? ENEMY_CONTACT_HALF_TILES) +
-        PLAYER_HALF_TILES -
-        Math.sqrt(dx * dx + dy * dy);
+        (this.#half[i] ?? ENEMY_CONTACT_HALF_TILES) + PLAYER_HALF_TILES - (dx > dy ? dx : dy);
       if (inside > worst) worst = inside;
     }
     return worst;
@@ -295,7 +324,26 @@ export class EnemyBodies {
 }
 
 /**
- * How near a body of this size is too near, from its centre, in tiles.
+ * How far a place is from a body's square, given how far outside it lies on
+ * each axis.
+ *
+ * **Negative inside it, and that is the half worth explaining.** Outside, this
+ * is the plain distance to the nearest point of the square. Inside, the two
+ * overlap on both axes and the distance is nought whatever the arrangement — so
+ * a cost built on it would be flat across the whole body and give a search no
+ * direction out of one. Reporting how deep in it is instead keeps the slope
+ * pointing at the nearest way out, which is what a monster standing on somebody
+ * needs it to do.
+ */
+function boxDistance(outsideX: number, outsideY: number): number {
+  const outX = outsideX > 0 ? outsideX : 0;
+  const outY = outsideY > 0 ? outsideY : 0;
+  const deepest = outsideX > outsideY ? outsideX : outsideY;
+  return Math.sqrt(outX * outX + outY * outY) + (deepest < 0 ? deepest : 0);
+}
+
+/**
+ * How much room the setting asks for beyond the body itself, in tiles.
  *
  * **The setting names a gap, and is stated as a distance.** `keepAwayTiles` has
  * always meant "from the middle of an ordinary monster", which is what the
@@ -307,6 +355,19 @@ export class EnemyBodies {
  * Floored at contact, so a keep-away of nought still means "not overlapping"
  * rather than "as close as you like".
  */
+function keepAwayGapOf(keepAwayTiles: number): number {
+  return Math.max(keepAwayTiles - ENEMY_CONTACT_HALF_TILES, PLAYER_HALF_TILES);
+}
+
+/**
+ * How near a body of this size is too near, measured from its centre.
+ *
+ * **What to draw, rather than what is scored.** {@link EnemyBodies.crowdingAt}
+ * holds the gap from the body's square, so the region it refuses is that square
+ * grown by the gap — a rounded square, and a circle of this radius is the fair
+ * drawing of one: right on both axes, and inside the true region only at the
+ * body's own corners.
+ */
 export function nearEdgeOf(halfTiles: number, keepAwayTiles: number): number {
-  return halfTiles + Math.max(keepAwayTiles - ENEMY_CONTACT_HALF_TILES, PLAYER_HALF_TILES);
+  return halfTiles + keepAwayGapOf(keepAwayTiles);
 }

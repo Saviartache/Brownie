@@ -64,6 +64,7 @@ import {
   overlaps,
   projectileHalfTiles,
 } from '../src/features/dodge/hitbox.js';
+import { StatType } from '../src/constants/StatType.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
 import { testLogger } from './fakes.js';
@@ -1225,6 +1226,21 @@ describe('the room a place leaves to dodge in', () => {
     expect(bodies.count).toBe(0);
   });
 
+  // **Too far is measured from the body, not from the middle of it.** A boss
+  // six tiles across reaches three tiles into the room from outside it, so one
+  // dropped on the distance to its centre is one the planner walks straight at
+  // — the same mistake the shots' own distance cull used to make.
+  it('keeps a wide body reaching in from beyond the distance', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 12, y: 0 } as EntityView], 0, 0, 10, sized(6));
+    expect(bodies.count).toBe(1);
+
+    // And an ordinary one at the same place is still forgotten, so the wider
+    // look is the body's own and not a wider distance for everybody.
+    bodies.collect([{ x: 12, y: 0 } as EntityView], 0, 0, 10, ANY_BODY);
+    expect(bodies.count).toBe(0);
+  });
+
   // **Better than a quarter of what the catalog marks as an enemy is scenery.**
   // A wall in this game is an object with hit points and the enemy flag, and
   // spawners, emitters and room controllers all answer to it — so a three-tile
@@ -1254,6 +1270,26 @@ describe('the room a place leaves to dodge in', () => {
 
     expect(bodies.crowdingAt(0, 0, KEEP_AWAY)).toBe(0);
     expect(bodies.crowdingAt(0, 0, KEEP_AWAY, 600)).toBeCloseTo(0.6, 6);
+  });
+
+  // **The gap is held from the body, and a body is a square.** Measuring it to
+  // the middle and calling the difference round leaves the corners unguarded by
+  // most of a tile on the bodies that matter — which is the same "they walk
+  // right up to me" report, in the direction nobody thought to measure.
+  it('holds the same gap on the diagonal as it does head-on', () => {
+    const KEEP = 2.5;
+    const gap = KEEP - ENEMY_CONTACT_HALF_TILES;
+
+    // Four tiles across. Head-on, its edge is the gap away and it is content.
+    const ahead = new EnemyBodies();
+    ahead.collect([{ x: 2 + gap, y: 0 } as EntityView], 0, 0, 12, sized(4));
+    expect(ahead.crowdingAt(0, 0, KEEP)).toBe(0);
+
+    // Diagonally, a corner half a tile from the player is half a tile from the
+    // player whichever way it is measured.
+    const corner = new EnemyBodies();
+    corner.collect([{ x: 2.5, y: 2.5 } as EntityView], 0, 0, 12, sized(4));
+    expect(corner.crowdingAt(0, 0, KEEP)).toBeCloseTo(gap - Math.hypot(0.5, 0.5), 6);
   });
 
   // **The live report: "they walk right up to me and I die."** The setting that
@@ -1291,6 +1327,22 @@ describe('the room a place leaves to dodge in', () => {
     // second threshold — and unchanged by a keep-away distance it never reads.
     expect(bodies.contactAt(3, 0)).toBe(0);
     expect(bodies.crowdingAt(0, 0, 6)).toBeGreaterThan(bodies.contactAt(0, 0));
+  });
+
+  // **Two bodies overlap as squares, because everything in this game does.**
+  // The corner is where the shapes disagree, and a circle disagrees there by
+  // more than a tile on the bodies worth being told about — so a boss standing
+  // on the character diagonally read as a clean miss, and the one movement that
+  // gets out from under one was never reached for.
+  it('measures a body as the square it is, not as a circle', () => {
+    const bodies = new EnemyBodies();
+    // Two tiles across and a tile off on each axis: the squares overlap by the
+    // player's own half, and a circle of the same reach calls it a clean miss.
+    bodies.collect([{ x: 1, y: 1 } as EntityView], 0, 0, 10, sized(2));
+
+    expect(bodies.contactAt(0, 0)).toBeCloseTo(PLAYER_HALF_TILES, 6);
+    // And still nothing where they genuinely are apart.
+    expect(bodies.contactAt(-1, -1)).toBe(0);
   });
 
   it('carries a body forward before asking whether it is touching', () => {
@@ -1520,6 +1572,35 @@ describe('when the plugin decides', () => {
 
   /** Longer than the plugin's planning interval, so one call is one decision. */
   const A_PLAN_MS = 30;
+
+  /** The world's own record of a monster, with nothing left off and nothing frozen. */
+  type SightedEnemy = { -readonly [K in keyof EntityView]: EntityView[K] };
+
+  /**
+   * An ordinary monster standing somewhere.
+   *
+   * Complete rather than cast from a handful of fields, because the scene asks
+   * it questions a partial fake cannot answer — how big the server says this one
+   * is, most of all, which is a stat like any other.
+   */
+  function monsterAt(x: number, y: number, over: Partial<EntityView> = {}): SightedEnemy {
+    return {
+      objectId: 9,
+      objectType: 500,
+      name: 'monster',
+      x,
+      y,
+      hp: 4000,
+      maxHp: 4000,
+      isEnemy: true,
+      isPlayer: false,
+      conditions: 0,
+      guildName: '',
+      stat: () => undefined,
+      text: () => undefined,
+      ...over,
+    };
+  }
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1854,9 +1935,9 @@ describe('when the plugin decides', () => {
   // estimate ten times before the next tick arrives.
   it('learns which way a monster is going, and draws it where it is', () => {
     // Walked by hand between ticks, which is the whole subject of the test.
-    const monster = { objectId: 9, objectType: 500, x: 16, y: 10, hp: 4000, maxHp: 4000 };
+    const monster = monsterAt(16, 10);
     const { plan, tick, clock, showPicture, view } = underFire(0, {
-      enemies: [monster as EntityView],
+      enemies: [monster],
     });
     view.on = true;
 
@@ -1883,9 +1964,9 @@ describe('when the plugin decides', () => {
   // stops a route being planned through a place the runtime merely *believes*
   // is empty, and drawing it that wide is what makes the two agree.
   it('draws a monster wider the older the reading behind it is', () => {
-    const monster = { objectId: 9, objectType: 500, x: 14, y: 10, hp: 4000, maxHp: 4000 };
+    const monster = monsterAt(14, 10);
     const { plan, tick, clock, showPicture, view } = underFire(0, {
-      enemies: [monster as EntityView],
+      enemies: [monster],
     });
     view.on = true;
 
@@ -1901,6 +1982,34 @@ describe('when the plugin decides', () => {
     plan();
 
     expect(bodyRadius(showPicture)).toBeGreaterThan(fresh);
+  });
+
+  // **`<Size>` in the file is a default, and the server overrules it.** Three
+  // hundred and eighty of the game's monsters roll their size per instance, and
+  // a boss that grows mid-fight says so with the same stat — so a body sized
+  // from the file alone is the wrong size for both, and the direction it is
+  // wrong in is the one that puts the player inside it.
+  it('takes a monster at the size the server sent, not the size of its kind', () => {
+    // Four tiles across, which the file says nothing about.
+    const grown = monsterAt(14, 10, {
+      stat: (id: number): number | undefined => (id === StatType.Size ? 400 : undefined),
+    });
+    const { plan, tick, showPicture, view } = underFire(0, { enemies: [grown] });
+    view.on = true;
+    tick();
+    plan();
+
+    // Two tiles from the middle to the edge, give or take the doubt a fresh
+    // reading carries.
+    expect(bodyRadius(showPicture)).toBeGreaterThan(1.9);
+    expect(bodyRadius(showPicture)).toBeLessThan(2.5);
+
+    // And the ordinary body it would have been without the stat, for contrast.
+    const ordinary = underFire(0, { enemies: [monsterAt(14, 10)] });
+    ordinary.view.on = true;
+    ordinary.tick();
+    ordinary.plan();
+    expect(bodyRadius(ordinary.showPicture)).toBeLessThan(1);
   });
 
   it('clears what is drawn once, when the switch goes up', () => {
@@ -1925,8 +2034,8 @@ describe('when the plugin decides', () => {
   // decoration in the room. The rule that answers it is the one auto-aim already
   // uses to decide what is worth shooting: the two lists are the same list.
   it('keeps its distance from monsters and not from the scenery', () => {
-    const decoration = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 0 } as EntityView;
-    const monster = { objectId: 9, objectType: 500, x: 11, y: 10, maxHp: 4000 } as EntityView;
+    const decoration = monsterAt(11, 10, { maxHp: 0 });
+    const monster = monsterAt(11, 10);
 
     // Nothing near enough to dodge, so the only thing that could move the
     // player is the room being taken. Standing beside a torch is not a mistake.
@@ -1946,7 +2055,7 @@ describe('when the plugin decides', () => {
   // auto-aim uses cannot answer this one, because a lever is shot on purpose;
   // the catalog's own word for it is what does.
   it('keeps no distance from a lever it is meant to shoot', () => {
-    const lever = { objectId: 9, objectType: 600, x: 11, y: 10, maxHp: 5000 } as EntityView;
+    const lever = monsterAt(11, 10, { objectType: 600, maxHp: 5000 });
 
     const beside = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
     beside.plan();
@@ -1966,14 +2075,7 @@ describe('when the plugin decides', () => {
   // places where there was nobody. What gives it away is that it has no attack
   // in the game's own data *and* has never gone anywhere.
   it('keeps no distance from a spawner that has never moved and cannot fire', () => {
-    const spawner = {
-      objectId: 9,
-      objectType: 700,
-      x: 11,
-      y: 10,
-      hp: 4000,
-      maxHp: 4000,
-    } as EntityView;
+    const spawner = monsterAt(11, 10, { objectType: 700 });
 
     const beside = underFire(0, { enemies: [spawner], shots: (type) => type !== 700 });
     beside.view.on = true;
@@ -1998,9 +2100,9 @@ describe('when the plugin decides', () => {
   // shots of its own, and anything at all has yet to move on the tick it comes
   // into view. So one step is all it takes to become a body again.
   it('starts keeping its distance the moment the thing takes a step', () => {
-    const walker = { objectId: 9, objectType: 700, x: 12, y: 10, hp: 4000, maxHp: 4000 };
+    const walker = monsterAt(12, 10, { objectType: 700 });
     const { plan, tick, clock, showPicture, view } = underFire(0, {
-      enemies: [walker as EntityView],
+      enemies: [walker],
       shots: () => false,
     });
     view.on = true;

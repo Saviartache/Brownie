@@ -16,6 +16,8 @@
  */
 
 import type { BlastView, EntityView, SessionView, WorldView } from '@brownie/plugin-api';
+import { StatType } from '../../constants/StatType.js';
+import { bodyTilesFromPercent } from '../../gamedata/GameCatalogs.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
 import type { DodgeSettings } from './DodgePlanner.js';
@@ -336,10 +338,19 @@ export class DodgeScene {
     this.#sighting.y = seen?.y ?? enemy.y;
     this.#sighting.velocityX = seen?.velocityX ?? 0;
     this.#sighting.velocityY = seen?.velocityY ?? 0;
-    // Halved, because the catalog states a width and the distance works in
-    // half-extents. The ordinary body for anything it cannot describe, widened
+    // Halved, because both sources state a width and the distance works in
+    // half-extents. The ordinary body for anything neither can describe, widened
     // by however old the reading behind it is — see {@link BODY_DOUBT_TILES_PER_SECOND}.
-    const width = this.#catalog.bodyTiles(enemy.objectType);
+    //
+    // **The size the server sent for this one, ahead of the size of its kind.**
+    // `<Size>` in the file is a default: three hundred and eighty of the game's
+    // monsters roll their size per instance between a minimum and a maximum, and
+    // a boss that grows mid-fight says so with this stat and nothing else. The
+    // file's figure is the right answer only until the wire disagrees with it —
+    // and against a randomised type it is the *largest* roll, so every ordinary
+    // one of them carried a bubble sized for a monster it is not.
+    const width =
+      bodyTilesFromPercent(enemy.stat(StatType.Size)) ?? this.#catalog.bodyTiles(enemy.objectType);
     this.#sighting.halfTiles =
       (width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2) + this.#bodyDoubtTiles;
     return this.#sighting;

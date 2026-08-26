@@ -274,23 +274,39 @@ const STANDARD_SIZE_PERCENT = 100;
  * reporting a body of nothing at all.
  */
 const MIN_BODY_TILES = 0.25;
-const MAX_BODY_TILES = 6;
+export const MAX_BODY_TILES = 6;
+
+/**
+ * How wide a body of a stated size is, in tiles, or nothing when it states none.
+ *
+ * **The file states a default and the wire states the truth, so both are turned
+ * into tiles here.** `<Size>` is a percentage of the standard one-tile sprite;
+ * the server sends the same percentage per entity as a stat, which is the only
+ * thing that knows which size a randomised monster rolled or that a boss has
+ * grown. Converted in one place so that the same monster cannot come out two
+ * different sizes depending on which of the two was read.
+ *
+ * Nothing rather than a fallback, so a caller with a second source can use it —
+ * see {@link ObjectCatalog.bodyTiles}.
+ */
+export function bodyTilesFromPercent(percent: number | undefined): number | undefined {
+  if (percent === undefined || !Number.isFinite(percent) || percent <= 0) return undefined;
+  return Math.min(MAX_BODY_TILES, Math.max(MIN_BODY_TILES, percent / STANDARD_SIZE_PERCENT));
+}
 
 /**
  * How wide one object is, from what the file says about its size.
  *
- * `<Size>` is a percentage of the standard one-tile sprite. A few hundred
- * objects randomise it between `<MinSize>` and `<MaxSize>` instead; the larger
- * of those is taken, because this feeds a distance something is kept at and the
- * cost of guessing small is being stood on.
+ * A few hundred objects randomise it between `<MinSize>` and `<MaxSize>`
+ * instead; the larger of those is taken, because this feeds a distance
+ * something is kept at and the cost of guessing small is being stood on.
  */
 function readBodyTiles(element: string): number {
   const stated =
     parseGameNumber(childText(element, 'Size')) ??
     parseGameNumber(childText(element, 'MaxSize')) ??
     STANDARD_SIZE_PERCENT;
-  if (!Number.isFinite(stated) || stated <= 0) return 1;
-  return Math.min(MAX_BODY_TILES, Math.max(MIN_BODY_TILES, stated / STANDARD_SIZE_PERCENT));
+  return bodyTilesFromPercent(stated) ?? 1;
 }
 
 /** What the file's kill counter is called for the things that are not monsters. */
