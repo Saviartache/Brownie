@@ -212,6 +212,7 @@ constexpr const char* kTintStatus = "Health bar tint";
 /// line reports whichever arrived.
 constexpr const char* kColliderStatus = "Collision radius";
 constexpr const char* kShotWallStatus = "Shots pass walls";
+constexpr const char* kShotShieldStatus = "Shot hitboxes";
 constexpr const char* kMarkerStatus = "Show where we are walking";
 constexpr const char* kAimMarkerStatus = "Show where we are aiming";
 constexpr const char* kDodgeMarkerStatus = "Show where we are dodging";
@@ -219,8 +220,8 @@ constexpr const char* kNoclipStatus = "Player noclip";
 constexpr const char* kTextStatus = "Floating text";
 
 constexpr const char* kVisualisationStatuses[] = {
-    kTintStatus,       kColliderStatus,     kShotWallStatus, kMarkerStatus,
-    kAimMarkerStatus,  kDodgeMarkerStatus,  kNoclipStatus,   kTextStatus};
+    kTintStatus,      kColliderStatus,    kShotWallStatus, kShotShieldStatus, kMarkerStatus,
+    kAimMarkerStatus, kDodgeMarkerStatus, kNoclipStatus,   kTextStatus};
 
 /// Where the value column starts: past the longest label there is, and a
 /// couple of characters clear of it.
@@ -319,6 +320,25 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
         StatusLine(column, kShotWallStatus, "waiting for the projectile class - fire a shot");
     } else {
         StatusLine(column, kShotWallStatus, "%u shot(s) let through", model.shots_passed);
+    }
+
+    // Three modes and they are not variations on one thing, so the line says
+    // which — a shield that is silently redirecting rather than shrinking is
+    // one talking to the server on the operator's behalf.
+    if (model.shot_shield_mode == game::ShieldMode::Off) {
+        StatusLine(column, kShotShieldStatus, "off");
+    } else if (!model.shot_shield_installed) {
+        // Not a failure, and the same reason as the line above: the game builds
+        // the projectile class the first time something shoots.
+        StatusLine(column, kShotShieldStatus, "waiting for the projectile class - fire a shot");
+    } else if (model.shot_shield_mode == game::ShieldMode::Shrink) {
+        StatusLine(column, kShotShieldStatus, "x%.2f, %u shot(s) shrunk",
+                   static_cast<double>(model.shot_shield_scale), model.shots_guarded);
+    } else if (model.shot_shield_mode == game::ShieldMode::Disarm) {
+        StatusLine(column, kShotShieldStatus, "%u shot(s) disarmed", model.shots_guarded);
+    } else {
+        StatusLine(column, kShotShieldStatus, "%u shot(s) turned on their own side",
+                   model.shots_guarded);
     }
 
     if (!state.movement_markers) {

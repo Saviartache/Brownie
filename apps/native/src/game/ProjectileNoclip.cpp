@@ -83,10 +83,11 @@ bool TileSwap::Apply(void* projectile, const ProjectileTileRoute& route) noexcep
         return false;
     }
 
-    // Whether this is a shot at all. The guard on everything below, and the
-    // reason a half-resolved route installs nothing.
-    std::uint8_t active = 0;
-    if (!ReadField(projectile, route.active_at, active) || active == 0) {
+    // Whether this is one of the player's own shots. The guard on everything
+    // below, and the reason a half-resolved route installs nothing.
+    std::uint8_t damages_enemies = 0;
+    if (!ReadField(projectile, route.damages_enemies_at, damages_enemies) ||
+        damages_enemies == 0) {
         return false;
     }
 

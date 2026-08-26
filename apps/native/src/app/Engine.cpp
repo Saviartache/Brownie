@@ -175,6 +175,9 @@ constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultipli
 constexpr std::string_view kTintFeature = "scene.healthBarTint";
 constexpr std::string_view kTintColourFeature = "scene.healthBarTintColour";
 constexpr std::string_view kShotNoclipFeature = "shots.noclip";
+constexpr std::string_view kShotShieldFeature = "shots.shield";
+constexpr std::string_view kShotShieldModeFeature = "shots.shieldMode";
+constexpr std::string_view kShotShieldMultiplierFeature = "shots.shieldMultiplier";
 constexpr std::string_view kArcaneStyleFeature = "player.arcaneStyle";
 constexpr std::string_view kSkinFeature = "player.skin";
 constexpr std::string_view kGlowFeature = "player.glow";
@@ -214,6 +217,28 @@ constexpr std::string_view kFeatureOn = "true";
         return std::nullopt;
     }
     return parsed;
+}
+
+/// The projectile shield mode a feature value names, or nothing when it names
+/// none of them.
+///
+/// **Spelled out rather than numbered.** A mode is what the plugin's `select`
+/// setting already carries — a key, not an index — so sending the key is one
+/// less table for the two sides to disagree about, and a build that adds a mode
+/// in the middle cannot silently turn a shrink into a redirect. An unknown
+/// spelling is refused rather than defaulted, because the mode that would be
+/// defaulted to is one somebody has to live through.
+[[nodiscard]] std::optional<game::ShieldMode> FeatureShieldMode(std::string_view value) noexcept {
+    if (value == "shrink") {
+        return game::ShieldMode::Shrink;
+    }
+    if (value == "disarm") {
+        return game::ShieldMode::Disarm;
+    }
+    if (value == "redirect") {
+        return game::ShieldMode::Redirect;
+    }
+    return std::nullopt;
 }
 
 /// How much of a chunk to fill before sending it.
@@ -383,6 +408,35 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     }
     if (key == kShotNoclipFeature) {
         shot_noclip_until_ms_.store(on ? now + kShotNoclipLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kShotShieldFeature) {
+        shot_shield_until_ms_.store(on ? now + kShotShieldLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kShotShieldModeFeature) {
+        // Kept whether or not the claim is live, like the collider's multiplier
+        // and for the same reason: it arrives ahead of the claim. A spelling
+        // this build does not know is dropped, so the shield keeps the last
+        // mode that was one rather than falling back to a mode nobody chose.
+        const auto parsed = FeatureShieldMode(value);
+        if (parsed.has_value()) {
+            shot_shield_mode_.store(*parsed, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (key == kShotShieldMultiplierFeature) {
+        // Clamped rather than trusted, exactly as the player's own collider
+        // multiplier is: above one is a *bigger* shot than the game built, and
+        // the module is not the plugin's to believe. What the shield does with
+        // a number it still cannot use is refuse the whole edit — see
+        // `PlanShotEdit` — so the clamp here is the first of two guards rather
+        // than the only one.
+        const auto parsed = FeatureNumber(value);
+        if (parsed.has_value()) {
+            shot_shield_multiplier_.store(std::clamp(*parsed, 0.0F, 1.0F),
+                                          std::memory_order_relaxed);
+        }
         return;
     }
     if (key == kArcaneStyleFeature) {
@@ -601,6 +655,14 @@ void Engine::AdvanceSetup() {
         InstallProjectileNoclip();
     }
 
+    // The shield's detour, on the same terms and for the same reason — it is
+    // the same class that has to exist first. Asked off the mode rather than
+    // off the lease so that this runs on the IPC thread's turn like its
+    // neighbours: the mode is only ever non-`Off` while a claim is live.
+    if (shot_shield_.mode() != game::ShieldMode::Off && !shot_shield_.installed()) {
+        InstallProjectileShield();
+    }
+
     // And again for the walkability predicates, with one difference: the world
     // manager exists as soon as the game builds a realm, so these resolve early
     // and the retry is for the case of switching the feature on at the login
@@ -662,6 +724,9 @@ void Engine::LetGo() noexcept {
     // with this off they forward every call, which is what they do when nobody
     // wants them.
     shot_noclip_.SetEnabled(false);
+    // And the shield, on the same terms. Its detour stays too, and with the
+    // mode off it builds shots exactly as the game does.
+    shot_shield_.SetMode(game::ShieldMode::Off);
 
     // Deliberately not stopped here: the link is the module's own and outlives
     // the game, and the runtime is told the game went away by the connection
@@ -675,7 +740,7 @@ void Engine::InstallAimHook() {
 
 void Engine::InstallProjectileNoclip() {
     game::ProjectileTileRoute route;
-    route.active_at = binding_.FieldOffset(game::kShotActive).value_or(0);
+    route.damages_enemies_at = binding_.FieldOffset(game::kShotDamagesEnemies).value_or(0);
     route.tile_at = binding_.FieldOffset(game::kMapObjectTile).value_or(0);
     route.layer_at = binding_.FieldOffset(game::kTileCollisionLayer).value_or(0);
 
@@ -683,6 +748,17 @@ void Engine::InstallProjectileNoclip() {
     // the loop is the retry, so it stays out of the runtime's log.
     (void)shot_noclip_.Install(route, binding_.MethodAddress(game::kShotHitsWall).value_or(nullptr),
                                binding_.MethodAddress(game::kShotTileBlocks).value_or(nullptr));
+}
+
+void Engine::InstallProjectileShield() {
+    game::ShotFieldRoute route;
+    route.damages_players_at = binding_.FieldOffset(game::kShotDamagesPlayers).value_or(0);
+    route.damages_enemies_at = binding_.FieldOffset(game::kShotDamagesEnemies).value_or(0);
+    route.collision_half_at = binding_.FieldOffset(game::kShotCollisionHalf).value_or(0);
+
+    // Failure is the ordinary answer until the first shot of the session, and
+    // the loop is the retry, so it stays out of the runtime's log.
+    (void)shot_shield_.Install(route, binding_.MethodAddress(game::kShotInit).value_or(nullptr));
 }
 
 void Engine::InstallPlayerNoclip() {
@@ -1263,6 +1339,13 @@ void Engine::DrawFrame() {
     const bool shots_pass_walls = ShotNoclipWanted(now);
     shot_noclip_.SetEnabled(shots_pass_walls);
 
+    // The same store again, for the shield. The multiplier goes first: the
+    // shield reads both when a shot is built, and a mode published ahead of the
+    // number it scales by would shrink one volley by whatever came before.
+    const game::ShieldMode shield = ShotShieldWanted(now);
+    shot_shield_.SetMultiplier(shot_shield_multiplier_.load(std::memory_order_relaxed));
+    shot_shield_.SetMode(shield);
+
     // The same store again, for the claim that made the pattern.
     const bool walk_wanted = WalkNoclipWanted(now);
     walk_noclip_.SetEnabled(walk_wanted);
@@ -1293,6 +1376,13 @@ void Engine::DrawFrame() {
     frame_model_.shot_noclip_wanted = shots_pass_walls;
     frame_model_.shot_noclip_installed = shot_noclip_.installed();
     frame_model_.shots_passed = shot_noclip_.passed();
+    // What this feature produces is *nothing happening*, so the count is not a
+    // nicety here: a shield that resolved nothing and a realm that has not shot
+    // at the player yet look identical without it.
+    frame_model_.shot_shield_mode = shield;
+    frame_model_.shot_shield_scale = shot_shield_.multiplier();
+    frame_model_.shot_shield_installed = shot_shield_.installed();
+    frame_model_.shots_guarded = shot_shield_.guarded();
     frame_model_.walk_noclip_wanted = walk_wanted;
     frame_model_.walks_allowed = walk_noclip_.allowed();
     frame_model_.walk_gates = walk_noclip_.hooked();

@@ -26,6 +26,7 @@ import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
 import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
+import { createShotShieldPlugin } from './features/shotshield/shotShieldPlugin.js';
 import { createSkinChangerPlugin } from './features/skinchanger/skinChangerPlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
 import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
@@ -789,6 +790,13 @@ export class Application {
     // handed over. Built here rather than dropped in `plugins/` because what it
     // claims — and what expiry puts back — is worth having tests for.
     this.#plugins.load(createColliderPlugin());
+
+    // The collider's sibling, on the other side of the same collision test:
+    // that one shrinks the player, this one shrinks what is shot at them.
+    // Built here for the same reason — it says a mode and a number to the
+    // module and the module does the rest, so nothing has to be handed over,
+    // and what its lease puts back is worth having tests for.
+    this.#plugins.load(createShotShieldPlugin());
 
     // Movement too, but by rewriting the stream rather than by writing into the
     // game. It is built here for the one reason auto-aim and anti-lag are:

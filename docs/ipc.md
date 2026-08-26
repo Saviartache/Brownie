@@ -255,6 +255,10 @@ The resolved keys include:
 | `player.arcaneStyle`        | shader id / empty     | apply a local Arcane Style, or restore the previous one      |
 | `player.glow`               | `true` / `false`     | light the local player's glow, and put it out after          |
 | `player.glowColour`         | `#rrggbbaa`          | what colour to repaint the glow's style, refused if malformed |
+| `shots.noclip`              | `true` / `false`     | let the player's own shots cross walls                       |
+| `shots.shield`              | `true` / `false`     | build the shots aimed at the player harmless                 |
+| `shots.shieldMode`          | `shrink` / `disarm` / `redirect` | which of the three, refused if unknown           |
+| `shots.shieldMultiplier`    | `0` … `1`            | what `shrink` scales a shot's hitbox by, clamped on arrival   |
 
 The boolean switches and the cosmetic selections are leases. These belong
 to plugins or runtime readers that can be disabled, fail, unload, or disappear;
@@ -307,6 +311,22 @@ nobody. It is stored whether or not the claim is live, because a value refused
 for arriving first would leave the claim acting on whatever came before it. The
 module clamps it to `0` … `1` on arrival rather than trusting the slider it came
 from: above one is a *larger* collision circle than the game built.
+
+`shots.shieldMode` and `shots.shieldMultiplier` are the same kind of exception,
+and they go out in that order: the multiplier first, then the mode, then the
+claim. A mode published ahead of the number it scales by would shrink one volley
+by the number before it. The mode is a **key rather than an index** — a build
+that adds one in the middle cannot then silently turn a shrink into a redirect —
+and an unknown spelling is dropped rather than defaulted, because the mode that
+would be defaulted to is one somebody has to live through.
+
+`shots.shield` is the one boolean claim here whose lapse leaves the *game's* own
+behaviour rather than the module's, and that is the direction it fails in: three
+seconds after a runtime goes quiet, the next shot fired is a shot that can hit.
+What it never leaves behind is a half-applied write. Projectiles are pooled and
+every value the shield changes is written by the game's own initialiser on each
+reuse, so an unload at a moment nobody chose costs the shots already in the air
+and nothing else.
 
 ### `playerTelemetry`
 

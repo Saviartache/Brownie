@@ -35,6 +35,7 @@
 #include "game/PlayerMover.h"
 #include "game/PlayerNoclip.h"
 #include "game/ProjectileNoclip.h"
+#include "game/ProjectileShield.h"
 #include "game/ScreenProjection.h"
 #include "hooks/Hook.h"
 #include "hooks/SwapChain.h"
@@ -695,7 +696,7 @@ void ATileSwapPutsBackWhatItTook() {
     };
     struct FakeShot {
         void* header;
-        std::uint8_t active;
+        std::uint8_t damages_enemies;
         void* tile;
     };
 
@@ -703,7 +704,7 @@ void ATileSwapPutsBackWhatItTook() {
     FakeShot shot{nullptr, 1, &tile};
 
     brownie::game::ProjectileTileRoute route;
-    route.active_at = static_cast<std::uint32_t>(offsetof(FakeShot, active));
+    route.damages_enemies_at = static_cast<std::uint32_t>(offsetof(FakeShot, damages_enemies));
     route.tile_at = static_cast<std::uint32_t>(offsetof(FakeShot, tile));
     route.layer_at = static_cast<std::uint32_t>(offsetof(FakeTile, layer));
     Check(route.complete(), "a route with all three offsets is complete");
@@ -720,14 +721,14 @@ void ATileSwapPutsBackWhatItTook() {
     swap.Restore();
     Check(tile.layer == 12, "restoring twice writes nothing");
 
-    // The guard: a shot that is not in flight is not one to change a square for.
-    shot.active = 0;
-    Check(!swap.Apply(&shot, route), "a shot that is not in flight takes nothing");
+    // The guard: a monster's shot is not one to open a square for.
+    shot.damages_enemies = 0;
+    Check(!swap.Apply(&shot, route), "a shot that is not the player's takes nothing");
     Check(tile.layer == 12, "and leaves the square alone");
 
     // Half a route is no route. A feature that wrote at an offset nothing
     // resolved would be writing into whatever happens to be there.
-    shot.active = 1;
+    shot.damages_enemies = 1;
     brownie::game::ProjectileTileRoute partial = route;
     partial.layer_at = 0;
     Check(!partial.complete(), "a route missing an offset is not complete");
@@ -750,7 +751,7 @@ void ProjectileNoclipInstallsBothOrNeither() {
     // for anything.
     int method = 0;
     brownie::game::ProjectileTileRoute route;
-    route.active_at = 8;
+    route.damages_enemies_at = 8;
     route.tile_at = 16;
     route.layer_at = 8;
 
@@ -759,6 +760,90 @@ void ProjectileNoclipInstallsBothOrNeither() {
     Check(!noclip.Install(brownie::game::ProjectileTileRoute{}, &method, &method).ok(),
           "nor does a route with nothing resolved");
     Check(!noclip.installed(), "so it stays uninstalled");
+}
+
+/// What each shield mode decides to write, and what it refuses.
+///
+/// The decision is the part worth being sure about: it runs on a shot the game
+/// has just built, and getting it wrong either leaves the player exposed while
+/// the switch says otherwise, or writes into the player's own bullets. Free of
+/// the game, so it is testable at a desk — the same split `PlayerCollision`
+/// makes for the number it writes into the player.
+void EachShieldModeWritesWhatItSays() {
+    using brownie::game::PlanShotEdit;
+    using brownie::game::ShieldMode;
+
+    Check(!PlanShotEdit(ShieldMode::Off, 0.0F).has_value(), "a shield that is off writes nothing");
+
+    const auto shrunk = PlanShotEdit(ShieldMode::Shrink, 0.25F);
+    Check(shrunk.has_value(), "a shrink is an edit");
+    Check(shrunk->scale_collision_half && shrunk->collision_scale == 0.25F,
+          "and it scales the shot's collision square by what was asked");
+    Check(!shrunk->set_flags, "and leaves who the shot may hurt alone");
+
+    const auto gone = PlanShotEdit(ShieldMode::Shrink, 0.0F);
+    Check(gone.has_value() && gone->collision_scale == 0.0F,
+          "a shrink to nought is an edit, not a refusal - it is the whole point");
+
+    // Refused rather than clamped: a scale this cannot make sense of would
+    // otherwise be applied to every shot in the realm.
+    Check(!PlanShotEdit(ShieldMode::Shrink, 1.0F).has_value(),
+          "a scale of one is the game's own shot, so nothing is written");
+    Check(!PlanShotEdit(ShieldMode::Shrink, 1.5F).has_value(), "a scale above one is refused");
+    Check(!PlanShotEdit(ShieldMode::Shrink, -0.5F).has_value(), "so is a negative one");
+    Check(!PlanShotEdit(ShieldMode::Shrink, std::numeric_limits<float>::quiet_NaN()).has_value(),
+          "and so is one that is not a number");
+
+    const auto disarmed = PlanShotEdit(ShieldMode::Disarm, 0.0F);
+    Check(disarmed.has_value() && disarmed->set_flags, "a disarm writes the flags");
+    Check(disarmed->damages_players == 0 && disarmed->damages_enemies == 0,
+          "and leaves the shot hunting nobody");
+    Check(!disarmed->scale_collision_half, "while leaving the shot its own size");
+
+    const auto turned = PlanShotEdit(ShieldMode::Redirect, 0.0F);
+    Check(turned.has_value() && turned->set_flags, "a redirect writes the flags");
+    Check(turned->damages_players == 0 && turned->damages_enemies == 1,
+          "and turns the shot on its own side");
+}
+
+/// The shield installs through a complete route or not at all.
+///
+/// Every write it makes is guarded by an offset, and an offset nothing resolved
+/// is zero — which is a managed object's header. A feature that installed on
+/// half a route would be writing into one.
+void TheShieldInstallsThroughACompleteRouteOnly() {
+    brownie::game::ProjectileShield shield;
+    Check(!shield.installed(), "a fresh shield is not installed");
+    Check(shield.mode() == brownie::game::ShieldMode::Off, "and is switched off");
+    Check(shield.guarded() == 0, "and has taken nothing apart");
+
+    // Never dereferenced: every case below is refused before MinHook is asked
+    // for anything.
+    int method = 0;
+    brownie::game::ShotFieldRoute route;
+    route.damages_players_at = 0x17C;
+    route.damages_enemies_at = 0x17D;
+    route.collision_half_at = 0x1D4;
+    Check(route.complete(), "a route with all three offsets is complete");
+
+    Check(!shield.Install(route, nullptr).ok(), "an unresolved initialiser installs nothing");
+    Check(!shield.Install(brownie::game::ShotFieldRoute{}, &method).ok(),
+          "nor does a route with nothing resolved");
+
+    // Each offset on its own, because "all three or none" is a claim about each
+    // of them and a loop over a copy would only test the last one written.
+    brownie::game::ShotFieldRoute without_players = route;
+    without_players.damages_players_at = 0;
+    brownie::game::ShotFieldRoute without_enemies = route;
+    without_enemies.damages_enemies_at = 0;
+    brownie::game::ShotFieldRoute without_half = route;
+    without_half.collision_half_at = 0;
+
+    for (const auto& partial : {without_players, without_enemies, without_half}) {
+        Check(!partial.complete(), "a route missing any one offset is not complete");
+        Check(!shield.Install(partial, &method).ok(), "and installs nothing");
+    }
+    Check(!shield.installed(), "so it stays uninstalled");
 }
 
 /// What a frame's reads cost, measured rather than argued about.
@@ -2171,6 +2256,8 @@ int main() {
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();
     ProjectileNoclipInstallsBothOrNeither();
+    EachShieldModeWritesWhatItSays();
+    TheShieldInstallsThroughACompleteRouteOnly();
     PlayerNoclipRefusesWhatItCannotDetour();
     UnbindableCallersStayQuiet();
     ReadCostIsMeasured();

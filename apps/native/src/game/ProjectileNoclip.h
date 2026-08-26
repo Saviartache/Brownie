@@ -26,13 +26,11 @@
 // enables the outer first.
 //
 // **What separates the player's shots from everyone else's is one flag**, and
-// what that flag means is the reference implementation's claim rather than
-// anything this project has verified — the metadata's name table is encrypted,
-// so the name says nothing. It is used as a guard and never as a fact: no
-// square is changed for a projectile that does not carry it. If a live run ever
-// shows monsters' shots crossing walls too, that flag is the thing that was
-// wrong, and the feature is off by default and switched off with one click
-// while somebody looks. See `ProjectileFields.h`.
+// it is now known which: the initialiser writes `damagesEnemies = !isEnemy`, so
+// the byte this guards on is set on the player's own shots and on nothing
+// else. The reference implementation read it as "I am in flight" and this file
+// carried that on; the guard was right for the wrong reason, and the reason is
+// in `ProjectileFields.h` under `kShotDamagesEnemies`.
 //
 // **The work is bounded and it is not on the ordinary path.** Every shot in
 // flight reaches the outer detour on every tick, and all that costs is a
@@ -58,15 +56,16 @@ namespace brownie::game {
 /// managed object is its header and never an instance field. That is one flag
 /// rather than three, and it is checked in one place — {@link complete}.
 struct ProjectileTileRoute {
-    /// The projectile's "in flight" flag, which guards everything below.
-    std::uint32_t active_at = 0;
+    /// The projectile's "I may hurt enemies" flag, which guards everything
+    /// below: it is set on the player's own shots and on nothing else.
+    std::uint32_t damages_enemies_at = 0;
     /// The square the projectile is standing on, from the map-object base.
     std::uint32_t tile_at = 0;
     /// That square's collision layer — the one number that decides.
     std::uint32_t layer_at = 0;
 
     [[nodiscard]] bool complete() const noexcept {
-        return active_at != 0 && tile_at != 0 && layer_at != 0;
+        return damages_enemies_at != 0 && tile_at != 0 && layer_at != 0;
     }
 };
 

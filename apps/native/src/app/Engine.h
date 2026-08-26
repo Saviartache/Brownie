@@ -37,6 +37,7 @@
 #include "core/Snapshot.h"
 #include "game/PlayerNoclip.h"
 #include "game/ProjectileNoclip.h"
+#include "game/ProjectileShield.h"
 #include "game/QuitWatch.h"
 #include "game/ScreenProjection.h"
 #include "hooks/Hook.h"
@@ -166,6 +167,12 @@ class Engine {
     /// claimant is a claim nobody can revoke.
     static constexpr std::uint64_t kTintLeaseMs = 3000;
     static constexpr std::uint64_t kShotNoclipLeaseMs = 3000;
+
+    /// The same again, for the runtime's claim on taking the hitbox off the
+    /// shots aimed at the player. **The one lease here that a lapse makes the
+    /// player mortal again for**, which is the direction to fail in: three
+    /// seconds after a runtime goes quiet the next shot fired is the game's own.
+    static constexpr std::uint64_t kShotShieldLeaseMs = 3000;
     static constexpr std::uint64_t kArcaneStyleLeaseMs = 3000;
     static constexpr std::uint64_t kSkinLeaseMs = 3000;
     static constexpr std::uint64_t kGlowLeaseMs = 3000;
@@ -306,6 +313,11 @@ class Engine {
     /// on, and asked again until the game has built a projectile.
     void InstallProjectileNoclip();
 
+    /// Puts the projectile initialiser detour in place. Same story as the one
+    /// above and the same retry: the class does not exist until something has
+    /// shot.
+    void InstallProjectileShield();
+
     /// Puts the walkability detours in place, and says so in the runtime's log.
     /// Only called while the runtime's claim is live, and asked again until
     /// both are in.
@@ -348,6 +360,20 @@ class Engine {
     /// at `now_ms`.
     [[nodiscard]] bool ShotNoclipWanted(std::uint64_t now_ms) const noexcept {
         return now_ms < shot_noclip_until_ms_.load(std::memory_order_relaxed);
+    }
+
+    /// What to do with the next shot aimed at the player at `now_ms`, which is
+    /// `Off` while nothing is claiming it.
+    ///
+    /// The mode is stored whether or not the claim is live, for the reason the
+    /// collider's multiplier is: it arrives ahead of the claim and only when it
+    /// has moved, so a mode refused for arriving first would leave the claim
+    /// acting on the one before it.
+    [[nodiscard]] game::ShieldMode ShotShieldWanted(std::uint64_t now_ms) const noexcept {
+        if (now_ms >= shot_shield_until_ms_.load(std::memory_order_relaxed)) {
+            return game::ShieldMode::Off;
+        }
+        return shot_shield_mode_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] bool ArcaneStyleWanted(std::uint64_t now_ms) const noexcept {
@@ -439,6 +465,7 @@ class Engine {
     ScenePatches patches_;
     PlayerCosmetics cosmetics_;
     game::ProjectileNoclip shot_noclip_;
+    game::ProjectileShield shot_shield_;
     game::PlayerNoclip walk_noclip_;
     game::QuitWatch quit_;
     /// Holds no hook — three method addresses and nothing else — so it needs no
@@ -594,6 +621,18 @@ class Engine {
     ///
     /// Written by the IPC thread, read by the game's on every frame.
     std::atomic<std::uint64_t> shot_noclip_until_ms_{0};
+
+    /// When the runtime's claim on the projectile shield runs out, which mode
+    /// it asked for, and what a shrink scales by.
+    ///
+    /// The mode and the multiplier are kept whether or not the claim is live,
+    /// like the collider's number and the tint's colour: both arrive ahead of
+    /// the claim and only when they have moved.
+    ///
+    /// Written by the IPC thread, read by the game's on every frame.
+    std::atomic<std::uint64_t> shot_shield_until_ms_{0};
+    std::atomic<game::ShieldMode> shot_shield_mode_{game::ShieldMode::Off};
+    std::atomic<float> shot_shield_multiplier_{0.0F};
 
     /// The selected ShaderProperties id and the lease that owns the override.
     /// The IPC thread publishes it only when a claim arrives; the render thread
