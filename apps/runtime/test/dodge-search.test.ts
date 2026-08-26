@@ -24,6 +24,7 @@ import {
   type ShotTrackOptions,
 } from '../src/features/dodge/ShotTracks.js';
 import { NO_THREAT_TILES, ThreatIndex } from '../src/features/dodge/ThreatIndex.js';
+import { PLAYER_HALF_TILES } from '../src/features/dodge/hitbox.js';
 import {
   DodgeSearch,
   type DodgeGround,
@@ -46,6 +47,7 @@ function straightShot(
   extra: Partial<DodgeShot> = {},
 ): DodgeShot {
   return {
+    expiresAtMs: firedAtMs + lifetimeMs,
     ...extra,
     positionAt(gameTimeMs: number): Position | undefined {
       const elapsed = gameTimeMs - firedAtMs;
@@ -462,6 +464,34 @@ describe('where the shots will be', () => {
     // Once, for where it is now — and never for the eight samples after it.
     expect(asked).toBe(1);
   });
+
+  // **That cull reads a distance, and a shot is not a point.** The game's
+  // widest shots are ten times the standard collision multiplier — five tiles
+  // from the middle to the edge — so measuring one from its centre drops it
+  // while the player is standing inside it.
+  it('does not drop a wide shot for the distance to its centre', () => {
+    const wide = (extra: Partial<DodgeShot>): DodgeShot =>
+      straightShot({ x: 18, y: 10 }, 0, 0, 0, 3000, { collisionHalfTiles: 5, ...extra });
+
+    // Eight tiles off with nothing to cull on: the sampled path is kept,
+    // because the square around it reaches five tiles back into the room.
+    expect(fieldOf([wide({})]).tracks.count).toBe(1);
+    // Knowing that it is standing still must not make it invisible.
+    expect(fieldOf([wide({ maxSpeedTilesPerSecond: 0 })]).tracks.count).toBe(1);
+  });
+
+  // **The game's own way of saying "this one cannot hit anybody".** Sixty-two
+  // of its projectiles declare a collision multiplier of nought — the warning
+  // telegraphs that decelerate to a halt, and the invisible markers bosses fire
+  // at themselves — and every one of them does nought damage and carries no
+  // condition. Read as the standard size they are a wall of danger that the
+  // planner gives up its ground for.
+  it('ignores a shot the game gives no collision at all', () => {
+    const warning = straightShot({ x: 10, y: 10 }, 0, 0, 0, 3000, { collisionHalfTiles: 0 });
+
+    expect(fieldOf([warning]).tracks.considered).toBe(1);
+    expect(fieldOf([warning]).tracks.count).toBe(0);
+  });
 });
 
 describe('how much room a step has', () => {
@@ -497,6 +527,40 @@ describe('how much room a step has', () => {
 
     expect(threats.clearanceOf(0, 10, 10, 10, 10)).toBeLessThan(0);
     expect(threats.clearanceOf(3, 10, 10, 10, 10)).toBe(NO_THREAT_TILES);
+  });
+
+  // **A shot's last tick of life was the one nothing looked at.** A step is
+  // swept as a segment against a segment, so a shot without a sample at both
+  // ends of one had no segment — and dropping the step entirely made the end of
+  // every shot's flight invisible. That is the tile a monster's range ends on,
+  // which is where people stand.
+  it('sweeps the part of a step the shot lives for', () => {
+    // Twenty tiles a second, so a step is two tiles: fired four tiles short of
+    // the player and expiring seven tenths of a tick later, on top of them.
+    const { tracks, threats } = fieldOf([straightShot({ x: 6, y: 10 }, 0, 20, 0, 170)]);
+
+    expect(tracks.liveToOf(0)).toBe(1);
+    // Still two tiles off at the end of the first step.
+    expect(threats.clearanceOf(0, 10, 10, 10, 10)).toBeGreaterThan(0);
+    // And inside the player when it dies, part of the way through the second.
+    expect(threats.clearanceOf(1, 10, 10, 10, 10)).toBeLessThan(0);
+    // What it never becomes is a shot parked where it died: the step after the
+    // one it expired in is clear.
+    expect(threats.clearanceOf(2, 10, 10, 10, 10)).toBe(NO_THREAT_TILES);
+  });
+
+  // The walk is clipped to the same slice of the step the shot is, or the two
+  // are being compared at different moments: a player credited with the whole
+  // step's travel has walked away for a tenth of a second the shot was not
+  // there for.
+  it('clips the walk to the part of the step it is being compared over', () => {
+    const { threats } = fieldOf([straightShot({ x: 6, y: 10 }, 0, 20, 0, 170)]);
+
+    // Seven tenths of the second step, so a walk of six tenths of a tile away
+    // from it counts for forty-two hundredths — leaving the shot's last
+    // position, at 9.4, one and two hundredths of a tile behind.
+    const half = 0.5 + PLAYER_HALF_TILES;
+    expect(threats.clearanceOf(1, 10, 10, 10.6, 10)).toBeCloseTo(1.02 - half, 6);
   });
 
   // **Room the caller cannot act on is room not worth measuring**, and this is

@@ -67,11 +67,22 @@ export const DEFAULT_PROJECTILE_HALF_TILES = 0.5;
  * multiplier is in `objects.xml`, so a proxy can compute the same number without
  * being inside the process, which is why nothing here needs the native module.
  *
- * Nonsense is refused rather than propagated: a multiplier that did not parse
- * would otherwise become a shot with no hitbox, and a dodge that sees no danger.
+ * **A declared nought is data, not a failure.** The game's test is
+ * `|dx| < r && |dy| < r`, so a multiplier of nought is a shot nothing can ever
+ * overlap — which is exactly what the sixty-odd projectiles that declare it are:
+ * the warning telegraphs that fly out and stop, and the invisible markers a boss
+ * fires at itself. Every one of them does nought damage and carries no condition
+ * effect, so nothing that reads this has anything to fear from them either way.
+ * Rounded up to the standard size they are a wall of phantom danger that a
+ * planner gives up its ground for, and a nexus a player never needed.
+ *
+ * Nonsense is still refused rather than propagated: a multiplier that did not
+ * parse — or came back negative — would otherwise become a shot with no hitbox,
+ * and a dodge that sees no danger.
  */
 export function projectileHalfTiles(collisionMultiplier: number): number {
-  if (!Number.isFinite(collisionMultiplier) || collisionMultiplier <= 0) {
+  if (collisionMultiplier === 0) return 0;
+  if (!Number.isFinite(collisionMultiplier) || collisionMultiplier < 0) {
     return DEFAULT_PROJECTILE_HALF_TILES;
   }
   return (collisionMultiplier * DEFAULT_PROJECTILE_HALF_TILES) / DEFAULT_COLLISION_MULTIPLIER;

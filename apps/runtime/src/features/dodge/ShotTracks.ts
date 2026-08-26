@@ -39,8 +39,18 @@ export interface DodgeShot {
   positionAt(gameTimeMs: number): Position | undefined;
   /**
    * The shot's own collision half-extent. Omitted means the standard size.
+   *
+   * Nought means the game gives it no collision square at all, and such a shot
+   * is not tracked: see `projectileHalfTiles`.
    */
   readonly collisionHalfTiles?: number;
+  /**
+   * When it stops existing, on the same clock {@link positionAt} is asked in.
+   *
+   * Omitted means the last whole step is all that is swept, which leaves the
+   * final tick of the shot's flight unmodelled. See {@link endFractionOf}.
+   */
+  readonly expiresAtMs?: number;
   /**
    * Whether the motion model describes this shot's whole path. Omitted means it
    * is believed; false earns the extra distrust described above.
@@ -93,12 +103,26 @@ const UNMODELLED_DRIFT_FACTOR = 3;
  */
 const CULL_MARGIN_TILES = 1;
 
+/**
+ * How many numbers describe where a shot ends up: `x, y, half, fraction`.
+ *
+ * **The last tick of a flight, which the lattice has no sample for.** A step is
+ * swept as a segment against a segment, so a shot without a sample at both ends
+ * of one has no segment — and dropping that step is dropping the end of every
+ * shot's path, which is the tile a monster's range finishes on. The fraction is
+ * how much of the step it lives for, so the walk can be clipped to the same
+ * slice of it rather than compared against a moment the shot was not there for.
+ */
+const TAIL_STRIDE = 4;
+
 export class ShotTracks {
   #x = new Float64Array(0);
   #y = new Float64Array(0);
   #half = new Float64Array(0);
   /** The last slice at which each shot still exists, inclusive. */
   #liveTo = new Int32Array(0);
+  /** Where each shot expires, when that falls inside a step. {@link TAIL_STRIDE}. */
+  #tail = new Float64Array(0);
   #capacity = 0;
 
   #slices = 0;
@@ -145,6 +169,31 @@ export class ShotTracks {
     return this.#liveTo[shot] ?? -1;
   }
 
+  /**
+   * How much of the step after {@link liveToOf} the shot still exists for.
+   *
+   * Nought when it expires on the sample itself, when its end is not known, or
+   * when there is no step after it inside the horizon — in every one of those
+   * there is nothing left to sweep and the other three are meaningless.
+   */
+  endFractionOf(shot: number): number {
+    return this.#tail[shot * TAIL_STRIDE + 3] ?? 0;
+  }
+
+  /** Where `shot` is at the instant it expires. */
+  endXOf(shot: number): number {
+    return this.#tail[shot * TAIL_STRIDE] ?? 0;
+  }
+
+  endYOf(shot: number): number {
+    return this.#tail[shot * TAIL_STRIDE + 1] ?? 0;
+  }
+
+  /** Its half-extent there, the player's own already folded in. */
+  endHalfOf(shot: number): number {
+    return this.#tail[shot * TAIL_STRIDE + 2] ?? 0;
+  }
+
   /** Drops everything. A stale track is a shot that expired two maps ago. */
   clear(): void {
     this.#count = 0;
@@ -176,10 +225,21 @@ export class ShotTracks {
     for (const shot of shots) {
       this.#considered += 1;
 
+      const own =
+        shot.collisionHalfTiles === undefined
+          ? DEFAULT_PROJECTILE_HALF_TILES
+          : shot.collisionHalfTiles;
+      // A shot the game gives no collision square to is one nothing can ever
+      // overlap, and predicting it is spending a plan on a decoration.
+      if (!(own > 0)) continue;
+
       const now = shot.positionAt(options.gameTimeMs);
       // No position at the moment of planning means it is already over. The
       // world reports those briefly, and they are not danger.
       if (now === undefined) continue;
+
+      const drift =
+        options.driftTilesPerSecond * (shot.motionModelled === false ? UNMODELLED_DRIFT_FACTOR : 1);
 
       const hereX = Math.abs(now.x - options.selfX);
       const hereY = Math.abs(now.y - options.selfY);
@@ -189,11 +249,20 @@ export class ShotTracks {
       if (top !== undefined && Number.isFinite(top)) {
         // The furthest it could possibly close, which is a bound and not a
         // guess: past it, no arrangement of turns brings it into reach.
-        if (here - (top * horizonMs) / 1000 > keepWithin) continue;
+        //
+        // **Measured from its edge, because a shot is a square.** The widest of
+        // them are ten times the standard multiplier — five tiles from middle to
+        // edge — so a bound read off the distance to the centre threw away shots
+        // the player was standing inside of.
+        const widest =
+          effectiveHalf(own, options.hitScale, options.padTiles) + (drift * horizonMs) / 1000;
+        if (here - (top * horizonMs) / 1000 - widest > keepWithin) continue;
       }
 
       if (this.#count >= this.#capacity) this.#reserve();
-      if (this.#sample(shot, this.#count, options, slices, keepWithin)) this.#count += 1;
+      if (this.#sample(shot, this.#count, options, slices, keepWithin, own, drift)) {
+        this.#count += 1;
+      }
     }
   }
 
@@ -209,14 +278,10 @@ export class ShotTracks {
     options: ShotTrackOptions,
     slices: number,
     keepWithin: number,
+    own: number,
+    drift: number,
   ): boolean {
     const base = index * slices;
-    const own =
-      shot.collisionHalfTiles === undefined
-        ? DEFAULT_PROJECTILE_HALF_TILES
-        : shot.collisionHalfTiles;
-    const drift =
-      options.driftTilesPerSecond * (shot.motionModelled === false ? UNMODELLED_DRIFT_FACTOR : 1);
 
     let liveTo = -1;
     let near = false;
@@ -242,9 +307,62 @@ export class ShotTracks {
     }
 
     this.#liveTo[index] = liveTo;
-    // A shot with a single sample has no segment to sweep, and one that never
+    const tailed = this.#writeTail(shot, index, options, liveTo, own, drift, slices);
+    if (tailed && !near) {
+      const dx = Math.abs(this.endXOf(index) - options.selfX);
+      const dy = Math.abs(this.endYOf(index) - options.selfY);
+      if ((dx > dy ? dx : dy) - this.endHalfOf(index) <= keepWithin) near = true;
+    }
+
+    // A shot with nothing but a single sample has no segment to sweep — unless
+    // its end is known, which gives it the one it dies on — and one that never
     // comes near cannot be walked into by any course this plan could choose.
-    return liveTo >= 1 && near;
+    return near && (liveTo >= 1 || tailed);
+  }
+
+  /**
+   * Records where a shot expires, when it does so part of the way through a
+   * step, and says whether there is anything there to sweep.
+   *
+   * The instant it stops existing is a position the lattice has no sample for:
+   * its clock is the search's, and a shot's lifetime is its own. Asking
+   * `positionAt` once more at exactly that moment is what turns the last part of
+   * a flight from a step nothing looks at into a segment like any other.
+   */
+  #writeTail(
+    shot: DodgeShot,
+    index: number,
+    options: ShotTrackOptions,
+    liveTo: number,
+    own: number,
+    drift: number,
+    slices: number,
+  ): boolean {
+    const at = index * TAIL_STRIDE;
+    this.#tail[at + 3] = 0;
+    // Nothing to add when it never existed, or when the step it would die in is
+    // past the end of the horizon anyway.
+    if (liveTo < 0 || liveTo + 1 >= slices) return false;
+
+    const end = shot.expiresAtMs;
+    if (end === undefined || !Number.isFinite(end)) return false;
+
+    const endMs = end - options.gameTimeMs;
+    const fraction = (endMs - (options.leadMs + liveTo * options.tickMs)) / options.tickMs;
+    // Nought is a shot that expires on the sample itself, and a whole step means
+    // its own prediction gave out before its stated end — which is a shot to
+    // stop believing rather than one to extrapolate past.
+    if (!(fraction > 0) || fraction >= 1) return false;
+
+    const where = shot.positionAt(options.gameTimeMs + endMs);
+    if (where === undefined) return false;
+
+    this.#tail[at] = where.x;
+    this.#tail[at + 1] = where.y;
+    this.#tail[at + 2] =
+      effectiveHalf(own, options.hitScale, options.padTiles) + (drift * endMs) / 1000;
+    this.#tail[at + 3] = fraction;
+    return true;
   }
 
   /**
@@ -271,5 +389,8 @@ export class ShotTracks {
     const liveTo = new Int32Array(capacity);
     liveTo.set(this.#liveTo);
     this.#liveTo = liveTo;
+    const tail = new Float64Array(capacity * TAIL_STRIDE);
+    tail.set(this.#tail);
+    this.#tail = tail;
   }
 }

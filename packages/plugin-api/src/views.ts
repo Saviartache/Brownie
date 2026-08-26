@@ -226,6 +226,11 @@ export interface ProjectileView extends Position {
    * several times the width of a rat's. Anything deciding whether a shot will
    * land needs this one; assuming the standard size dodges the wrong way for
    * exactly the shots worth dodging.
+   *
+   * **Nought means it collides with nothing at all**, which the game says of its
+   * warning telegraphs and the invisible markers a boss fires at itself. They
+   * are still reported, because they are still in flight and still worth
+   * drawing; what they are not is danger.
    */
   readonly collisionHalfTiles: number;
   /**

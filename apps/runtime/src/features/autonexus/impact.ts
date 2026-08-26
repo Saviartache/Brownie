@@ -77,6 +77,10 @@ export function strikesWithin(
 ): boolean {
   const untilMs = Math.min(withinMs, shot.expiresAtMs - gameTimeMs);
   if (!(untilMs >= 0)) return false;
+  // A shot the game gives no collision square to strikes nobody, whatever it
+  // flies through — the warning telegraphs are the ones that say so, and they
+  // fly straight at the player by design.
+  if (!(shot.collisionHalfTiles > 0)) return false;
 
   const half = effectiveHalf(shot.collisionHalfTiles, EXACT_HIT_SCALE, NO_PAD_TILES);
   const step = Math.max(1, sampleStepMs);

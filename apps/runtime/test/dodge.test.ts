@@ -226,9 +226,13 @@ describe('the hit test', () => {
   it('takes a shot at the size its own data declares', () => {
     expect(projectileHalfTiles(1)).toBeCloseTo(0.5, 6);
     expect(projectileHalfTiles(3)).toBeCloseTo(1.5, 6);
-    // A multiplier that did not parse must not become a shot with no hitbox.
-    expect(projectileHalfTiles(0)).toBeCloseTo(0.5, 6);
+    // Nought is the game's own way of saying this one collides with nothing,
+    // and it is declared by every warning telegraph in the file.
+    expect(projectileHalfTiles(0)).toBe(0);
+    // A multiplier that did not parse is a different thing entirely, and must
+    // not become a shot with no hitbox.
     expect(projectileHalfTiles(Number.NaN)).toBeCloseTo(0.5, 6);
+    expect(projectileHalfTiles(-1)).toBeCloseTo(0.5, 6);
   });
 });
 

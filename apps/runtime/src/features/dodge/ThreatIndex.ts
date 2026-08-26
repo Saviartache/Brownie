@@ -55,15 +55,17 @@ export const NO_THREAT_TILES = Infinity;
 /**
  * How many numbers describe one shot's segment over one step.
  *
+ * `fromX, fromY, toX, toY, half, fraction` — the last being how much of the
+ * step the shot is there for, which is one for all but the step it expires in.
+ *
  * **Copied out of the tracks rather than read back through them.** The build
  * touches each of these once; the query touches them a few thousand times, and
  * every read through `ShotTracks` is a private-field load, a multiply for the
- * row stride and a bounds-checked index. Laying the five out side by side turns
- * the innermost loop into contiguous reads off one array, which is the
- * difference between a busy screen costing a fraction of a millisecond and
- * costing several.
+ * row stride and a bounds-checked index. Laying them out side by side turns the
+ * innermost loop into contiguous reads off one array, which is the difference
+ * between a busy screen costing a fraction of a millisecond and costing several.
  */
-const SEGMENT_STRIDE = 5;
+const SEGMENT_STRIDE = 6;
 
 export class ThreatIndex {
   /** One per lattice step. Grown to the deepest search the settings allow. */
@@ -71,7 +73,7 @@ export class ThreatIndex {
   /** How many of {@link #steps} the last build filled. */
   #built = 0;
 
-  /** `fromX, fromY, toX, toY, half` per entry. See {@link SEGMENT_STRIDE}. */
+  /** One entry per shot per step it lives in. See {@link SEGMENT_STRIDE}. */
   #segment = new Float64Array(0);
   #entries = 0;
   /** How far past a shot's own extent a query still looks. */
@@ -92,9 +94,11 @@ export class ThreatIndex {
   /**
    * Indexes every shot over every step of the lattice.
    *
-   * A shot enters a step's tree only when it exists at both ends of it: one that
-   * expires mid-step has no segment to sweep, and treating its last sample as
-   * somewhere it lingers is how a planner comes to dodge a shot that is over.
+   * A shot enters a step's tree when it exists at the start of it, and leaves it
+   * where it actually stops — at the far sample when it survives the whole step,
+   * and at the point it expires when it does not. What it never becomes is a
+   * shot parked at its last sample: past its end there is no entry at all, which
+   * is the difference between a wall and a memory.
    */
   /**
    * @param interestTiles How much room the caller can still act on the
@@ -119,14 +123,24 @@ export class ThreatIndex {
       tree.clear();
 
       for (let shot = 0; shot < tracks.count; shot += 1) {
-        if (tracks.liveToOf(shot) < step + 1) continue;
+        const live = tracks.liveToOf(shot);
+        if (live < step) continue;
         const fromX = tracks.xOf(shot, step);
-        const toX = tracks.xOf(shot, step + 1);
         const fromY = tracks.yOf(shot, step);
-        const toY = tracks.yOf(shot, step + 1);
+
+        const whole = live > step;
+        // The step it expires in is swept over the part of it the shot is there
+        // for, ending where it actually stops rather than at a sample it never
+        // reaches. Without it the last tick of every flight is a step nothing
+        // looks at, which is the tile a monster's range ends on.
+        const fraction = whole ? 1 : tracks.endFractionOf(shot);
+        if (fraction <= 0) continue;
+        const toX = whole ? tracks.xOf(shot, step + 1) : tracks.endXOf(shot);
+        const toY = whole ? tracks.yOf(shot, step + 1) : tracks.endYOf(shot);
         // The wider of the two ends, because a segment is swept against a single
         // half and rounding it down is the one direction that costs a hit.
-        const half = Math.max(tracks.halfOf(shot, step), tracks.halfOf(shot, step + 1));
+        const farHalf = whole ? tracks.halfOf(shot, step + 1) : tracks.endHalfOf(shot);
+        const half = Math.max(tracks.halfOf(shot, step), farHalf);
 
         const at = this.#entries * SEGMENT_STRIDE;
         segment[at] = fromX;
@@ -134,6 +148,7 @@ export class ThreatIndex {
         segment[at + 2] = toX;
         segment[at + 3] = toY;
         segment[at + 4] = half;
+        segment[at + 5] = fraction;
         tree.add(
           (fromX < toX ? fromX : toX) - half,
           (fromY < toY ? fromY : toY) - half,
@@ -177,13 +192,20 @@ export class ThreatIndex {
     let room = NO_THREAT_TILES;
     for (let i = 0; i < hits; i += 1) {
       const at = tree.hit(i) * SEGMENT_STRIDE;
+      // A shot that expires part of the way through the step is compared
+      // against the part of the walk that happens before it does. Credit the
+      // walker with the whole step and the two are being measured at different
+      // moments, which reads as room that nobody ever had.
+      const part = segment[at + 5] ?? 1;
+      const walkX = part < 1 ? fromX + (toX - fromX) * part : toX;
+      const walkY = part < 1 ? fromY + (toY - fromY) * part : toY;
       // The gap between the two, as one segment: both travel in straight lines
       // over this step, so their difference does too.
       const here = minChebyshevOnSegment(
         (segment[at] ?? 0) - fromX,
         (segment[at + 1] ?? 0) - fromY,
-        (segment[at + 2] ?? 0) - toX,
-        (segment[at + 3] ?? 0) - toY,
+        (segment[at + 2] ?? 0) - walkX,
+        (segment[at + 3] ?? 0) - walkY,
       );
       const gap = here - (segment[at + 4] ?? 0);
       if (gap < room) room = gap;
