@@ -18,6 +18,11 @@ apps/native/build/
 apps/native/zig-out/
 apps/native/.zig-cache/
 
+# What `npm run build:release` assembles: the same DLL, a 90 MB copy of the Node
+# binary, and a copy of the game's own data. Every byte of it is derived from
+# something else in this list.
+release/
+
 # ── Extracted from the local game install ───────────────────────────────────
 # The game's own data files, read at startup and regenerated per install by
 # `tools/gamedata`. Thirty-five megabytes of somebody else's XML.

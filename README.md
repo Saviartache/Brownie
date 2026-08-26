@@ -442,6 +442,36 @@ The compiler is Zig's clang, installed as an ordinary dev dependency — no
 Visual Studio and no separate SDK, with the version pinned in the lockfile like
 everything else. `ZIG=<path>` overrides it.
 
+## Packaging a release
+
+```bash
+npm run build:release    # release/Brownie/ and release/Brownie-<version>-win-x64.zip
+```
+
+Builds the module and the runtime, then assembles a folder somebody can
+download and run without installing anything:
+
+```
+Brownie/
+├── brownie.exe      the runtime, as a Node single-executable application
+├── d3d11.dll        the module — the reader copies it into the game folder
+├── config/          runtime.json, with the module switched on
+├── plugins/         this repository's plugins
+├── node_modules/    @brownie/plugin-api, which a plugin imports
+├── data/            packet definitions and stat types
+└── game-data/       whatever `npm run gamedata extract` last wrote
+```
+
+`brownie.exe` is the whole Node binary with the runtime bundled into it, so it
+is about 90 MB and only ever as new as the Node that built it.
+
+**The data stays beside the executable rather than inside it.** Both directories
+are read at startup and neither is cached, which is what keeps them data: a game
+patch that moves a field on the wire is an edit to `packet-definitions.json`, and
+a patch that adds a monster is a fresh `game-data/` — not a new build. The cost
+is that a release carries one machine's extraction, and the runtime says so at
+startup when the reader's install no longer matches it.
+
 # Running
 
 One command prepares a live run: it builds the module and the runtime, extracts
