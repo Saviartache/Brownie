@@ -233,20 +233,24 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 0.8,
     step: 0.01,
   });
-  // **The number the whole feel of the feature is quoted against.** It is what a
-  // route is charged, per tick, for each tile it sits away from where the player
-  // meant to be — so raising it buys a tighter dodge that gives the ground back
-  // sooner, and lowering it lets the planner walk further to be safer. Nothing
-  // else in the cost model is on the panel, because everything else is a ratio
-  // against this one.
+  // **What a route is charged, per tick, for each tile it sits away from where
+  // the player meant to be.** Raising it gives the ground back sooner; lowering
+  // it lets the planner walk further to be safer.
+  //
+  // **Deliberately small against the room a shot needs**, and that is the whole
+  // of the ordering: coming back is a convenience and not being hit is not.
+  // Measured at one, the character was walking home into fire a monster had
+  // already aimed at the ground it left — a quarter of that is a third fewer
+  // hits across a dozen fights, at every preset. Live report: "we catch shots
+  // because you try to return; the priority is the dodge."
   const holdGroundWeight = settings.range('holdGroundWeight', {
     label: 'Hold your ground',
     group: 'Control',
     advanced: true,
-    default: 1,
-    min: 0.2,
-    max: 3,
-    step: 0.1,
+    default: DODGE_PRESETS[DodgePresetId.Balanced].holdGroundWeight,
+    min: 0.05,
+    max: 2,
+    step: 0.05,
   });
   // **What the search is allowed to settle for.** One searches exactly and
   // slowest; above it the route is within this factor of the best one and is

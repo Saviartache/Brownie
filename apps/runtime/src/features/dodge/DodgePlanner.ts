@@ -141,6 +141,15 @@ export interface DodgeSettings {
    * The unit every other term in `StepCost` is quoted against. Raising it makes
    * a dodge tighter and more reluctant to travel; lowering it makes the planner
    * willing to walk further to be safer.
+   *
+   * **Small against the room a shot needs, and that ordering is the point.**
+   * Coming back is a convenience; not being hit is not. The enemy aims at where
+   * the server last saw the character, which after a sidestep is the very ground
+   * the planner would be walking back to — so an anchor strong enough to insist
+   * on the way home is an anchor that walks people into the next volley.
+   * Measured across a dozen fights, quartering it took about a third off the
+   * hits at every preset. Live report: "we catch shots because you try to
+   * return; the priority is the dodge."
    */
   readonly holdGroundWeight: number;
   /**
@@ -518,7 +527,14 @@ export class DodgePlanner {
     // entire fight alone.
     this.#probe(situation, settings, world, stepTiles, ticks, tickMs);
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
-    const offGround = this.#aimAnchor(situation, steering, world, stepTiles, settings.headings);
+    const offGround = this.#aimAnchor(
+      situation,
+      steering,
+      world,
+      stepTiles,
+      settings.headings,
+      ticks,
+    );
     if (
       !situation.onDamagingGround &&
       crowding <= CROWD_ACT_TILES &&
@@ -638,14 +654,21 @@ export class DodgePlanner {
     world: DodgeGround,
     stepTiles: number,
     headings: number,
+    ticks: number,
   ): number {
     if (this.#anchorHeld) {
       const stale = situation.nowMs - this.#anchorAtMs > ANCHOR_FRESH_MS;
       this.#anchorAtMs = situation.nowMs;
       if (!steering && !stale) {
-        this.#shiftAnchor(world, stepTiles, headings, situation);
+        // **A ring of stepping cannot always find ground worth returning to.**
+        // A shot that has slowed to a stop sits where it landed for the rest of
+        // its life, and one of those parked across the way home makes the whole
+        // idea of a way home wrong — so the hold is dropped rather than aimed
+        // somewhere slightly less bad, and the anchor goes back to following the
+        // character until there is somewhere to hold again.
+        const worth = this.#shiftAnchor(world, stepTiles, headings, situation, ticks);
         const off = Math.hypot(situation.x - this.#anchorX, situation.y - this.#anchorY);
-        if (off <= ANCHOR_REACH_TILES) return off;
+        if (worth && off <= ANCHOR_REACH_TILES) return off;
       }
       this.#anchorHeld = false;
     }
@@ -679,9 +702,10 @@ export class DodgePlanner {
     stepTiles: number,
     headings: number,
     situation: DodgeSituation,
-  ): void {
-    let bestScore = anchorScoreOf(world, this.#anchorX, this.#anchorY);
-    if (bestScore <= 0) return;
+    ticks: number,
+  ): boolean {
+    let bestScore = this.#unfitness(world, this.#anchorX, this.#anchorY, ticks);
+    if (bestScore <= 0) return true;
 
     let bestX = this.#anchorX;
     let bestY = this.#anchorY;
@@ -694,7 +718,7 @@ export class DodgePlanner {
       const angle = (i * 2 * Math.PI) / ring;
       const toX = this.#anchorX + Math.cos(angle) * stepTiles;
       const toY = this.#anchorY + Math.sin(angle) * stepTiles;
-      const score = anchorScoreOf(world, toX, toY);
+      const score = this.#unfitness(world, toX, toY, ticks);
       if (score > bestScore) continue;
       const near = Math.hypot(toX - situation.x, toY - situation.y);
       if (score === bestScore && near >= bestNear) continue;
@@ -706,6 +730,57 @@ export class DodgePlanner {
 
     this.#anchorX = bestX;
     this.#anchorY = bestY;
+    // **Whether the place it settled on is worth walking back to at all, which
+    // is a different question from whether it is crowded.** Crowding is what the
+    // stepping above is *for*: a monster standing on the return point is
+    // answered by walking the point out from under it, one step per plan, and
+    // giving up the moment one step has not finished the job would throw away
+    // the whole mechanism. What cannot be answered by stepping is a shot that
+    // has stopped on it — it will sit there for the rest of its life, and no
+    // number of steps makes that ground worth having.
+    return !this.#parkedOn(bestX, bestY, ticks) && world.hazardGapTiles(bestX, bestY) >= 0;
+  }
+
+  /**
+   * How unfit a place is to be the ground the planner walks back to.
+   *
+   * Nought for anywhere worth standing, and larger the less worth standing it
+   * is. Somewhere a body does not fit is refused outright — a return point
+   * inside a wall is a target the character can never arrive at, and the planner
+   * would walk at it for as long as it was held.
+   *
+   * **A shot parked on it counts, and that is the case a distance cannot
+   * see.** Some of this game's shots slow to a stop and then sit there for the
+   * rest of their life; the ground under one of those is no more worth returning
+   * to than the ground under a monster, and nothing about where a *monster* is
+   * would ever say so.
+   */
+  #unfitness(world: DodgeGround, x: number, y: number, ticks: number): number {
+    if (!world.canStand(x, y)) return Infinity;
+    let score = world.crowdingAt(x, y, 0);
+    if (world.hazardGapTiles(x, y) < 0) score += UNFIT_HAZARD_SCORE;
+    if (this.#parkedOn(x, y, ticks)) score += UNFIT_PARKED_SCORE;
+    return score;
+  }
+
+  /**
+   * Whether a shot is going to be *sitting* on this place, rather than passing
+   * over it.
+   *
+   * **Two moments well apart, which is the whole of the test.** A bullet crosses
+   * a place and is gone; one that has slowed to a stop is there at the middle of
+   * the horizon and still there at the end of it. Asking about both tells the
+   * two apart without the planner having to know anything about acceleration
+   * curves — and it is the *behaviour* that matters here, not the mechanism, so
+   * the same answer covers whatever else the game invents that ends up standing
+   * still.
+   */
+  #parkedOn(x: number, y: number, ticks: number): boolean {
+    const last = ticks - 1;
+    if (last < 1) return false;
+    const middle = last >> 1;
+    if (this.#threats.clearanceOf(last, x, y, x, y) >= 0) return false;
+    return this.#threats.clearanceOf(middle, x, y, x, y) < 0;
   }
 
   /**
@@ -867,23 +942,11 @@ export class DodgePlanner {
   }
 }
 
-/**
- * How unfit a place is to be the ground the planner walks back to.
- *
- * Nought for anywhere worth standing, and larger the less worth standing it is.
- * Somewhere a body does not fit is refused outright — a return point inside a
- * wall is a target the character can never arrive at, and the planner would walk
- * at it for as long as it was held.
- */
-function anchorScoreOf(world: DodgeGround, x: number, y: number): number {
-  if (!world.canStand(x, y)) return Infinity;
-  // Ground that hurts is worth more than any amount of crowding to be off,
-  // because standing on it costs health for as long as the planner aims there.
-  return world.crowdingAt(x, y, 0) + (world.hazardGapTiles(x, y) < 0 ? UNFIT_HAZARD_SCORE : 0);
-}
-
 /** What damaging ground is worth, against a tile of somebody standing on you. */
 const UNFIT_HAZARD_SCORE = 100;
+
+/** And a shot that has stopped on it, which is just as much not worth going to. */
+const UNFIT_PARKED_SCORE = 100;
 
 /** Why the planner is about to move, once it has decided that it is. */
 function verdictFor(situation: DodgeSituation, plan: DodgePlan, route: DodgeRoute): DodgeVerdict {

@@ -81,9 +81,10 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.05,
     driftTilesPerSecond: 0.15,
     safeClearanceTiles: 0.18,
-    // Higher, not lower: holding their ground *harder* is what "leave me alone"
-    // means to a planner that measures interference in tiles.
-    holdGroundWeight: 1.4,
+    // The highest of the three, because holding their ground is what "leave me
+    // alone" comes to — but still far under the room a shot needs, for the
+    // reason every preset shares. See `DodgeSettings.holdGroundWeight`.
+    holdGroundWeight: 0.3,
     greed: 2,
     maxExpansions: 300,
     keepAwayTiles: 2,
@@ -97,7 +98,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.1,
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.25,
-    holdGroundWeight: 1,
+    holdGroundWeight: 0.25,
     greed: 1.6,
     maxExpansions: 400,
     keepAwayTiles: 2.5,
@@ -111,7 +112,7 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     padTiles: 0.16,
     driftTilesPerSecond: 0.3,
     safeClearanceTiles: 0.35,
-    holdGroundWeight: 0.7,
+    holdGroundWeight: 0.15,
     greed: 1.4,
     // **Measured, not chosen.** A screen with six ranks of fire on it is what
     // spends a budget, and this is what keeps that plan inside a few

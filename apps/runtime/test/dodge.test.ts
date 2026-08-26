@@ -99,6 +99,37 @@ function straightShot(
   };
 }
 
+/**
+ * A shot that slows to a halt and then sits where it stopped.
+ *
+ * The game builds these out of a negative acceleration and a speed clamp of
+ * nought, which its own motion model integrates to exactly this: constant
+ * deceleration to a standstill, and then nothing until the shot expires.
+ */
+function parkingShot(
+  from: Position,
+  headingRadians: number,
+  tilesPerSecond: number,
+  stopsAfterMs: number,
+  firedAtMs: number,
+  lifetimeMs: number,
+): DodgeShot & { firedAtMs: number; expiresAtMs: number } {
+  return {
+    firedAtMs,
+    expiresAtMs: firedAtMs + lifetimeMs,
+    positionAt(gameTimeMs: number): Position | undefined {
+      const elapsed = gameTimeMs - firedAtMs;
+      if (elapsed < 0 || elapsed > lifetimeMs) return undefined;
+      const moving = Math.min(elapsed, stopsAfterMs);
+      const distance = (tilesPerSecond / 1000) * (moving - moving ** 2 / (2 * stopsAfterMs));
+      return {
+        x: from.x + distance * Math.cos(headingRadians),
+        y: from.y + distance * Math.sin(headingRadians),
+      };
+    },
+  };
+}
+
 /** Every entity counts, none is going anywhere, and all are ordinary sized. */
 const ANY_BODY = (enemy: EntityView): BodySighting => ({
   x: enemy.x,
@@ -521,6 +552,57 @@ describe('how far it moves to get out of the way', () => {
 
     // Further from the body than they started, never hauled back onto it.
     expect(y).toBeGreaterThan(10.7);
+  });
+
+  // **Some of this game's shots slow to a stop and then sit there.** The ground
+  // under one of those is no more worth walking back to than the ground under a
+  // monster — and unlike a monster, no amount of stepping the return point
+  // sideways helps, because it will be there for the rest of its life.
+  it('gives up on ground a shot has parked on', () => {
+    const planner = new DodgePlanner();
+    // Six tiles north to south at twelve tiles a second, decelerating for a
+    // second: it comes to rest exactly on the ground the first shot pushed them
+    // off, and sits there for the rest of the run.
+    const parked = parkingShot({ x: 10, y: 4 }, Math.PI / 2, 12, 1000, 200, 6000);
+    const pushing = straightShot({ x: 7.6, y: 10 }, 0, 8, 0, 1200);
+
+    let x = 10;
+    let y = 10;
+    let driving = 0;
+    let settled = 0;
+
+    const FRAME_MS = 25;
+    for (let frame = 0; frame < 140; frame += 1) {
+      const at = frame * FRAME_MS;
+      const shots = [pushing, parked].filter(
+        (shot) => shot.firedAtMs <= at && shot.expiresAtMs > at,
+      );
+      const plan = planner.plan(
+        { ...situation(), x, y, gameTimeMs: at, nowMs: 1_000_000 + at },
+        SETTINGS,
+        OPEN_GROUND,
+        shots,
+      );
+      if (plan.steer && plan.stepTiles > 0) {
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        x += plan.dirX * travel;
+        y += plan.dirY * travel;
+      }
+      // Once the passing shot is long gone, the only thing left is the one
+      // sitting on the ground they were holding.
+      if (at >= 2200) {
+        settled += 1;
+        if (plan.steer) driving += 1;
+      }
+    }
+
+    // It stops asking for the wheel rather than tugging at ground it cannot
+    // have, and it is not standing on the parked shot either.
+    expect(settled).toBeGreaterThan(10);
+    expect(driving).toBe(0);
+    expect(Math.max(Math.abs(x - 10), Math.abs(y - 10))).toBeGreaterThan(
+      PLAYER_HALF_TILES + DEFAULT_PROJECTILE_HALF_TILES,
+    );
   });
 
   // Their own ground is the line they are walking, not the place they started.
