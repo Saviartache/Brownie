@@ -844,8 +844,6 @@ describe('the emergency step', () => {
     return {
       x: 10,
       y: 10,
-      anchorX: 10,
-      anchorY: 10,
       tiles: MAX_HOP_TILES,
       headings: 12,
       safeClearanceTiles: 0.25,
@@ -879,6 +877,39 @@ describe('the emergency step', () => {
 
   it('says nothing when standing still is already as good as anywhere', () => {
     expect(chooseHop(hopFor())).toBeUndefined();
+  });
+
+  // **The live report: it hops to come home.** A hop used to be pointed at the
+  // ground the planner was walking the character back to, so a landing that was
+  // merely *nearer* that place could win — and somebody on their way back was
+  // jumped there instead of walked. There is nowhere it is trying to get to now:
+  // standing still travels nothing and wins every tie, so a landing has to be
+  // genuinely safer to be taken at all.
+  it('will not hop to cover ground when nothing is threatening', () => {
+    // The player is nowhere near where they started, and there is not a shot, a
+    // body or a pool anywhere — the only thing a hop could buy is the walk home.
+    expect(chooseHop(hopFor({ x: 16, y: 3 }))).toBeUndefined();
+  });
+
+  // And the flip side, so the rule above is not simply "never hop": the same
+  // place with something arriving is answered at once.
+  it('still hops when there is something to be out of the way of', () => {
+    const { threats } = fieldOf([straightShot({ x: 9.6, y: 9.8 }, 0, 8, 0, 3000)]);
+
+    expect(chooseHop(hopFor({ threats }))).toBeDefined();
+  });
+
+  // The smallest one that works, because a hop is an interruption and the
+  // shorter offer is the one a player notices least.
+  it('takes the shorter offer when both are equally clear', () => {
+    // Passing far enough north that half a hop south already has room to spare,
+    // while standing still is still a graze.
+    const { threats } = fieldOf([straightShot({ x: 9.6, y: 9.3 }, 0, 8, 0, 3000)]);
+
+    const hop = chooseHop(hopFor({ threats }));
+
+    expect(hop).toBeDefined();
+    expect(Math.hypot(hop?.offsetX ?? 0, hop?.offsetY ?? 0)).toBeLessThan(MAX_HOP_TILES);
   });
 
   // **A hop is instant, so unlike a step there is no moment in which the

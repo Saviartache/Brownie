@@ -750,10 +750,11 @@ export class DodgePlanner {
     const hop = chooseHop({
       x: situation.x,
       y: situation.y,
-      // The same ground the search is aiming for, so that a hop taken while
-      // already pushed off it lands on the side that gets some of it back.
-      anchorX: this.#anchorX,
-      anchorY: this.#anchorY,
+      // **Nothing here says where to go, and that is deliberate.** A hop used to
+      // be pointed at the ground the search was aiming for, which quietly made
+      // it a fast way home — a character merely on their way back was jumped
+      // there rather than walked. It answers a danger and nothing else now;
+      // going home is the walk's job. See `Hop`.
       tiles: Math.min(MAX_HOP_TILES, settings.hopTiles),
       headings: settings.headings,
       safeClearanceTiles: settings.safeClearanceTiles,

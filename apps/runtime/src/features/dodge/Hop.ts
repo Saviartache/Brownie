@@ -64,9 +64,6 @@ const HOP_FRACTIONS = [1, 0.5] as const;
 export interface HopRequest {
   readonly x: number;
   readonly y: number;
-  /** Where the character should be. A landing nearer it beats one further off. */
-  readonly anchorX: number;
-  readonly anchorY: number;
   /** How far to hop, before {@link MAX_HOP_TILES} has its say. */
   readonly tiles: number;
   /** How many directions to try, evenly spaced. The search's own ring. */
@@ -114,9 +111,15 @@ const CHOICE = { offsetX: 0, offsetY: 0, clearanceTiles: 0, crowdingTiles: 0 };
  * the next two steps of the lattice is the cheapest question that tells the two
  * apart, and it reuses the index the search was going to build anyway.
  *
- * **Among the ones with room to spare, the nearest to their own ground wins.** A
- * hop is an interruption; the smallest one that works is the one the player
- * notices least, which is the rule the whole feature is built on.
+ * **Among the ones with room to spare, the shortest wins — and there is nowhere
+ * it is trying to get to.** A hop is one frame of movement bought to be out of
+ * the way of something, and that is the only thing it is ever for. It used to be
+ * pointed at the ground the planner was walking the character back to, which
+ * quietly made it a fast way home: a landing that was merely *nearer* that place
+ * could win, so somebody on their way back was jumped there instead of walked.
+ * There is no such place here now. Standing still travels nothing and therefore
+ * wins every tie this decides, so a landing has to be genuinely safer to be
+ * taken at all, and going home is left to the walk — which is what it is for.
  *
  * @returns a hop valid until the next call, or `undefined` when there is nothing
  *   better to do than what the ordinary route already said.
@@ -138,8 +141,9 @@ export function chooseHop(request: HopRequest): Hop | undefined {
   // and ranked on their own ground alone, standing in the pool would win every
   // time, because it is by definition nought tiles from where they are.
   const fromGap = request.ground.hazardGapTiles(request.x, request.y);
-  let bestAnchor =
-    fromGap < 0 ? Infinity : Math.hypot(request.x - request.anchorX, request.y - request.anchorY);
+  // Nothing at all, because standing still travels nothing — which is what
+  // makes a landing have to be safer rather than merely somewhere else.
+  let bestTravel = fromGap < 0 ? Infinity : 0;
   let found = false;
 
   for (const fraction of HOP_FRACTIONS) {
@@ -175,12 +179,11 @@ export function chooseHop(request: HopRequest): Hop | undefined {
 
       const room = roomAt(request, toX, toY);
       const crowding = request.ground.crowdingAt(toX, toY, request.leadMs);
-      const anchor = Math.hypot(toX - request.anchorX, toY - request.anchorY);
-      if (!beats(room, crowding, anchor, bestRoom, bestCrowding, bestAnchor, safe)) continue;
+      if (!beats(room, crowding, distance, bestRoom, bestCrowding, bestTravel, safe)) continue;
 
       bestRoom = room;
       bestCrowding = crowding;
-      bestAnchor = anchor;
+      bestTravel = distance;
       found = true;
       CHOICE.offsetX = toX - request.x;
       CHOICE.offsetY = toY - request.y;
@@ -209,27 +212,35 @@ export function chooseHop(request: HopRequest): Hop | undefined {
 function beats(
   room: number,
   crowdingTiles: number,
-  anchorTiles: number,
+  travelTiles: number,
   bestRoom: number,
   bestCrowdingTiles: number,
-  bestAnchorTiles: number,
+  bestTravelTiles: number,
   safeTiles: number,
 ): boolean {
   const enough = room >= safeTiles;
   const bestEnough = bestRoom >= safeTiles;
   if (enough !== bestEnough) return enough;
   if (!enough) return room > bestRoom;
-  // Coarse, because two places a quarter of a tile apart in a three-tile bubble
-  // are the same place to fight from, and splitting them here would spend the
-  // term on a distinction nobody could see.
+  // **Fine, and it used to be coarse.** A ring of landing places differs by a
+  // few hundredths of a tile of room between neighbours, so a quarter-tile
+  // quantum made the best four of them tie — and the tie then fell to the term
+  // below, which knows nothing about the monster. Against something that is
+  // *following*, more distance is the whole of the answer, so let it decide.
   if (Math.abs(crowdingTiles - bestCrowdingTiles) > CROWD_QUANTUM_TILES) {
     return crowdingTiles < bestCrowdingTiles;
   }
-  return anchorTiles < bestAnchorTiles;
+  return travelTiles < bestTravelTiles;
 }
 
-/** How finely two landing places are told apart by the room they leave. */
-const CROWD_QUANTUM_TILES = 0.25;
+/**
+ * How finely two landing places are told apart by the room they leave.
+ *
+ * Small enough that "further from the body" is never a tie, and not nought so
+ * that two places genuinely the same distance off still fall through to the
+ * shorter hop.
+ */
+const CROWD_QUANTUM_TILES = 0.05;
 
 /**
  * How much room a body standing at a place has over the next two ticks.
