@@ -35,6 +35,8 @@ export const StatType = {
   Dexterity: 28,
   /** First condition-effect bitmask — bits 0–30. */
   Effects: 29,
+  /** The star rank drawn beside a player's name, here and in the chat box. */
+  Stars: 30,
   Name: 31,
   /** Main clothing colour or cloth-pattern value. */
   Texture1: 32,

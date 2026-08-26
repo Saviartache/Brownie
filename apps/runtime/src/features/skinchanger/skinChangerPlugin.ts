@@ -5,15 +5,9 @@ import {
   type Plugin,
   type SessionView,
 } from '@brownie/plugin-api';
-import type { FieldValue } from '@brownie/protocol';
 import { StatType } from '../../constants/StatType.js';
 import type { AppearanceChoice, PlayerSkin } from '../../gamedata/cosmetics.js';
-import {
-  StatOverrides,
-  asStatus,
-  statusOfEntity,
-  type MutableStatus,
-} from '../../state/StatOverrides.js';
+import { StatOverrides, findStatus } from '../../state/StatOverrides.js';
 import {
   DEFAULT_APPEARANCE,
   readAppearanceMemory,
@@ -212,7 +206,7 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
 
         const entries = packet.get(field);
         if (!Array.isArray(entries)) return;
-        const status = findSelfStatus(entries, session.self.objectId, announced);
+        const status = findStatus(entries, session.self.objectId, announced);
         if (status === undefined) return;
         state.remember(status, APPEARANCE_STATS);
         if (targets.size === 0 && !state.active) return;
@@ -253,16 +247,4 @@ function appearanceOptions(
 function addTarget(targets: Map<number, number>, stat: number, raw: string): void {
   const value = Number(raw);
   if (Number.isSafeInteger(value) && value !== 0) targets.set(stat, value);
-}
-
-function findSelfStatus(
-  entries: readonly FieldValue[],
-  objectId: number,
-  announced: boolean,
-): MutableStatus | undefined {
-  for (const entry of entries) {
-    const status = announced ? statusOfEntity(entry) : asStatus(entry);
-    if (status?.objectId === objectId) return status;
-  }
-  return undefined;
 }

@@ -29,6 +29,7 @@ import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlu
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
 import { createSkinChangerPlugin } from './features/skinchanger/skinChangerPlugin.js';
+import { createStreamerModePlugin } from './features/streamermode/streamerModePlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
 import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
 import { EquippedWeapon } from './gamedata/EquippedWeapon.js';
@@ -816,6 +817,12 @@ export class Application {
     // patterns written against real spam, which is only trustworthy with the
     // lines that motivated it kept as tests.
     this.#plugins.load(createChatFilterPlugin());
+
+    // After the chat filter, and the order is the point: handlers run in the
+    // order they were registered, and the filter decides whether a line is the
+    // player's own by the name on it. Loading this first would hand it the
+    // alias and leave the player's own messages to be judged as a stranger's.
+    this.#plugins.load(createStreamerModePlugin());
 
     // Built here for the same reason as dodge, twice over: it needs a way to
     // say something the player will read without looking away from the game,

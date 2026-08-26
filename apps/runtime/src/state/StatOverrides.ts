@@ -157,6 +157,24 @@ export function statusOfEntity(value: FieldValue | undefined): MutableStatus | u
   return asStatus(entity['status']);
 }
 
+/**
+ * One object's status in a decoded `UPDATE.newObjs` or `NEWTICK.statuses`.
+ *
+ * @param announced true for `UPDATE.newObjs`, whose elements are entities with
+ *   a status inside rather than statuses themselves.
+ */
+export function findStatus(
+  entries: readonly FieldValue[],
+  objectId: number,
+  announced: boolean,
+): MutableStatus | undefined {
+  for (const entry of entries) {
+    const status = announced ? statusOfEntity(entry) : asStatus(entry);
+    if (status?.objectId === objectId) return status;
+  }
+  return undefined;
+}
+
 function findStat(stats: readonly MutableStat[], id: number): MutableStat | undefined {
   for (const stat of stats) {
     if (stat.id === id) return stat;
