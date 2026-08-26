@@ -64,7 +64,8 @@ describe('message codec', () => {
       { kind: 'hello', pid: 4242, challenge: 'e'.repeat(64) },
       { kind: 'authResult', ok: true, response: 'f'.repeat(64) },
       { kind: 'controlAction', action: 'toggle|auto-nexus|1' },
-      { kind: 'hotkeyEvent', pluginId: 'auto-aim', action: 'togglePlugin', value: true },
+      { kind: 'hotkeyEvent', pluginId: 'auto-aim', slot: '', action: 'togglePlugin', value: true },
+      { kind: 'hotkeyEvent', pluginId: 'auto-dodge', slot: 'anchor', action: 'hold', value: false },
       { kind: 'offsetHealth', unresolved: ['HBEAKBIHANL', 'KDAJOMOFMJB'] },
       { kind: 'serverTarget', host: '18.194.220.13', port: 2050 },
       {

@@ -211,7 +211,7 @@ side per five seconds.
 | `0x0200` | `setFeature` | runtime | `{ key, value }` — value is boolean, finite number or string |
 | `0x0201` | `controlRecord` | runtime | `{ record }` — one overlay record |
 | `0x0202` | `controlAction` | native | `{ action }` — one overlay interaction |
-| `0x0300` | `hotkeyEvent` | native | `{ pluginId, action, value }` |
+| `0x0300` | `hotkeyEvent` | native | `{ pluginId, slot, action, value }` |
 | `0x0301` | `offsetHealth` | native | `{ unresolved: string[] }` |
 | `0x0400` | `playerTelemetry` | native | binary, 24 bytes (below) |
 
@@ -322,6 +322,85 @@ for arriving first would leave the claim acting on whatever came before it. The
 module clamps it to `0` … `1` on arrival rather than trusting the slider it came
 from: above one is a *larger* collision circle than the game built.
 
+### `hotkeyEvent`
+
+A key the player pressed, and the switch it was bound to. **An edge, never a
+state**: the key went down, or a held one came up.
+
+**A plugin can offer more than one key**, so what a press names is a plugin *and*
+a slot — the setting the key moves, or empty for the plugin's own switch. Two
+keys of one plugin are two binds throughout: watched apart, reported apart, and
+held apart, so a hold on one can never be ended by a release of the other. A
+module that sends no `slot` at all is one built before this, and the switch is
+what it meant.
+
+| `action` | `value`          | meaning                                                     |
+| -------- | ---------------- | ----------------------------------------------------------- |
+| `toggle` | `true`           | flip the plugin — sent on the way down, never on the way up  |
+| `hold`   | `true` / `false` | the key went down, or came up                                |
+
+**The module watches and the runtime decides**, which is the division `move` and
+`aim` embody one layer down. Only the module can read a keyboard, name the key
+somebody just pressed, or tell whether the player is looking at the game rather
+than at a panel over it. Only the runtime knows which way a switch is currently
+set — which is the whole of what a toggle needs — and only it can move one.
+
+**A hold is an override that remembers.** The runtime notes what the plugin was
+doing when the key went down and puts it back on the way up, so one that was
+already running is not switched off by a key that only ever meant to switch it
+on.
+
+**And it has to be able to end without being told to.** A hold left standing is
+a plugin running with nothing left able to say stop, and one of them holds the
+client's entire uplink. Three things end one, and none of them depends on the
+others: the key coming up; the module finding the player is no longer looking at
+the game, which reads every key as up; and the link going down, which the
+runtime treats as every hold released.
+
+**A bind never fires on a key that was already down when it appeared.**
+Rebinding to the key you are holding, and a runtime reconnecting mid-press,
+would otherwise both fire the instant the bind existed. The module seeds each
+bind from the keyboard as it is at that moment, so only a genuine press after
+that is an edge.
+
+#### Which key, and who knows what it means
+
+A bind travels to the module as an overlay record — `bind|pluginId|mode|key|slot|label`
+— and its halves belong to different sides:
+
+* **the mode and the slot are the runtime's**, because what a press does, and
+  which switch it does it to, are both about the switch;
+* **the key is the module's, and opaque to the runtime**, which checks the shape
+  of the text and never interprets it.
+
+That is not tidiness, it is the keyboard layout. Windows maps a **scan code** —
+the key's position, which is what the hardware sends — to a virtual key through
+the *active layout*, and `GetAsyncKeyState` takes virtual keys. The key labelled
+`A` is `VK_A` under a US or Russian layout and `VK_Q` under a French one, so a
+bind stored as a virtual key is a bind that moves when the player switches
+layouts. They do switch: chat is in one language and the game's own keys are
+laid out for another.
+
+So the module stores the **scan code** and asks the layout what it means afresh
+every time it reads the key. Pressing the key marked `F` binds `F`, whether it
+was typing `f`, `а` or `;` at the time, and it goes on working after the layout
+changes underneath it. The names are the US keycaps, because a *position* is
+what is being named. `apps/native/src/core/KeyChord.h` holds the table and is
+the only place any of this is known.
+
+A chord is modifiers then key, joined by `+`: `F5`, `Ctrl+Shift+A`, `Alt+Mouse5`.
+**The modifiers must match exactly**, so `Ctrl+F` and `F` are two binds rather
+than one swallowing the other. Mouse buttons are the one thing named by virtual
+key — they are not on the keyboard and have no scan code — and the left and
+right buttons are deliberately not among them: those are the game's own shoot
+and ability, and a plugin that switched on every time the player fired would be
+one nobody could use.
+
+**What the module cannot see is the game's own chat.** A key bound to a letter
+fires while the player is typing that letter into it. Nothing on this link can
+tell the difference, which is why nothing is bound by default and why the keys
+worth binding are the ones chat never produces.
+
 ### `playerTelemetry`
 
 ```
@@ -374,6 +453,20 @@ kind    plugin     key       label        type  vt v hasMin min hasMax max step 
 Record kinds and their fields are documented with the overlay pages that emit
 them, in `apps/runtime/src/overlay`.
 
+`bind` is the one worth stating here, because it is the only record whose value
+the runtime stores without being able to read it: `bind|pluginId|mode|key|slot|label`,
+published once for **every key a plugin offers**, and sent back as an action —
+`bind|pluginId|mode|key|slot` — when the player chooses a mode or presses one.
+An empty `key` is a key nobody has bound yet; a plugin with no `bind` record at
+all is one that offers none. See [`hotkeyEvent`](#hotkeyevent).
+
+`slot` is which of that plugin's switches the key moves: the setting it names,
+or empty for the plugin's own switch. It is the bind's identity — what it is
+stored, published and reported under — so an overlay must send back the one it
+was given rather than inventing it, and a runtime that names none is one from
+before a plugin could offer a second key. `label` is what to call the row, so
+the overlay never has to know what any particular key is for.
+
 A handful of kinds are not about drawing at all. Most of them carry integers
 only — no encoding to apply, and nothing to get wrong between two languages.
 `weapon` and `text` are the two that do not, and each says why below:
@@ -383,7 +476,7 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
-| `aim`   | x·100, y·100, holdMs                              | point the shots the player fires at here, for this long unless replaced                               |
+| `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100 | point the shots the player fires at here, for this long unless replaced. The last three name the enemy the point leads and where the *runtime* had that enemy when it worked the point out — so the module can look the enemy up in the game's own tables and shift the point by however far the client disagrees. All three or none: a shift needs somewhere to be measured from, and two of them describe none. Absent is an aim used exactly as sent |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |

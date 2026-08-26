@@ -65,8 +65,13 @@ export type {
 export {
   PluginCategory,
   PluginState,
+  SWITCH_SLOT,
+  bindLabel,
+  bindSlot,
+  bindTargets,
   definePlugin,
   type Plugin,
+  type PluginBindable,
   type PluginMeta,
   type PluginStatus,
 } from './plugin.js';

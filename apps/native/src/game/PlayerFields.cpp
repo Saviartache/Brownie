@@ -73,6 +73,20 @@ constexpr std::array kQueries{
     KeyedFieldQuery{kWorldManager,
                     FieldQuery{kAppManagerOwner, "<CHDFAEBMILI>k__BackingField", {}}},
     KeyedFieldQuery{kLocalPlayer, FieldQuery{kWorldManagerOwner, "OCLNLBHDEFK", {}}},
+
+    // The two tables of map objects. Fingerprinted like everything else — the
+    // class declares exactly two fields of this type — and told apart at the
+    // point of use rather than here, because the declared type cannot say which
+    // holds what and a name that says nothing must not be read as though it
+    // did. See `kWorldObjects`.
+    KeyedFieldQuery{kWorldObjects,
+                    FieldQuery{kWorldManagerOwner, "KHIHFNACEKJ", {},
+                               "System.Collections.Generic.Dictionary<System.Int32,KJMONHENJEN>",
+                               0, 2}},
+    KeyedFieldQuery{kWorldObjectsAlt,
+                    FieldQuery{kWorldManagerOwner, "CIOIHEOEAEB", {},
+                               "System.Collections.Generic.Dictionary<System.Int32,KJMONHENJEN>",
+                               1, 2}},
 };
 
 /// `bool MoveTo(float x, float y)` on the player.

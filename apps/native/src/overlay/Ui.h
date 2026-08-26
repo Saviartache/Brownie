@@ -154,6 +154,22 @@ struct SettingRow {
     std::vector<std::string> visible_values;
 };
 
+/// One key a plugin offers, as the runtime described it.
+struct BindRow {
+    /// Which of the plugin's switches this key moves. Empty is its own, and it
+    /// is what identifies the bind everywhere — stored, drawn and reported.
+    std::string slot;
+    /// What to call it on screen. The runtime names it; this build never has to
+    /// know what a plugin's second key is for.
+    std::string label;
+    /// `toggle` or `hold`, as the runtime spells it. Carried rather than turned
+    /// into an enum, so a mode this build predates travels back unchanged
+    /// instead of being rewritten to one it happens to know.
+    std::string mode;
+    /// The key, as the module itself named it, or empty when nothing is bound.
+    std::string key;
+};
+
 /// One plugin, as the runtime described it.
 struct PluginRow {
     std::string id;
@@ -168,6 +184,10 @@ struct PluginRow {
     /// whose `setup` threw — one switched off for failing handlers is still
     /// worth offering a retry, and its toggle stays live.
     bool enableable = true;
+    /// The keys the runtime offers for this plugin. Empty for most of them, and
+    /// the difference between a bind nobody has set and a plugin that has no
+    /// bind to set.
+    std::vector<BindRow> binds;
     std::vector<SettingRow> settings;
 };
 
@@ -358,9 +378,52 @@ struct InspectorInput {
 /// working the moment the link did. See `DrawMultiSelect`.
 using MultiSelectFilters = std::unordered_map<std::string, std::string>;
 
+/// A bind waiting for the player to press something.
+///
+/// View state, never a value: a prompt is not on the wire, and the runtime has
+/// no opinion about one being open. It is also the one place the overlay reads
+/// the keyboard directly rather than through ImGui — the point of a bind is the
+/// *physical* key, and ImGui reports the character a layout made of it. See
+/// `core/KeyChord.h`.
+///
+/// One at a time, like {@link PendingEdit}, because a person can only press one
+/// key at a time.
+struct BindCapture {
+    std::string plugin_id;
+    /// Which of that plugin's keys is being bound. A plugin can offer more than
+    /// one, and a prompt that named only the plugin would settle whichever row
+    /// was drawn last.
+    std::string slot;
+    /// The mode the bind was in when the prompt opened, so finishing it changes
+    /// the key and nothing else.
+    std::string mode;
+    /// Whether a prompt is open at all. Its own flag because neither of the two
+    /// above can be empty *and* absent: a plugin's own switch is the empty slot.
+    bool open = false;
+
+    [[nodiscard]] bool waiting(std::string_view id, std::string_view bind_slot) const noexcept {
+        return open && plugin_id == id && slot == bind_slot;
+    }
+
+    void Begin(std::string_view id, std::string_view bind_slot, std::string_view bind_mode) {
+        plugin_id.assign(id);
+        slot.assign(bind_slot);
+        mode.assign(bind_mode);
+        open = true;
+    }
+
+    void Clear() noexcept {
+        plugin_id.clear();
+        slot.clear();
+        mode.clear();
+        open = false;
+    }
+};
+
 /// The overlay's own state — everything it holds that the runtime does not.
 struct UiState {
     PendingEdit edit;
+    BindCapture capture;
     InspectorInput inspector;
     MultiSelectFilters multi_filters;
 

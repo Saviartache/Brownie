@@ -159,19 +159,109 @@ of what was chosen for each character class, for one. A declaration is already
 the only thing the config store persists, so this is where such state belongs
 instead of in a second file with a lifetime of its own.
 
+## Hotkeys
+
+A plugin can offer a key that switches it on and off:
+
+```ts
+meta: {
+  id: 'auto-dodge',
+  name: 'Auto Dodge',
+  category: PluginCategory.Movement,
+  bindable: true,
+}
+```
+
+That is the whole declaration. The plugin registers nothing, hears nothing about
+the key, and cannot read it — the switch a bind moves is the *host's*, so the
+bind that moves it is the host's too. What the plugin gets is a control in the
+overlay: a key, and whether it **toggles** the plugin or holds it on while the
+key is down.
+
+`bindable` is opt-in rather than universal because a bind is only worth having
+where switching mid-fight is the point. A chat filter is switched on once and
+left there, and a row for binding one is a control that answers a question
+nobody asked.
+
+**A string names a boolean setting to bind instead of the switch.** A plugin
+cannot observe its own switch moving — that is the whole reason there is no
+`onEnable`/`onDisable` pair — so one that has to *undo* something when it stops
+carries its own armed setting, and that is what a key has to move:
+
+```ts
+meta: { id: 'player-noclip', /* … */ bindable: 'active' },
+setup(ctx) {
+  const active = ctx.settings.boolean('active', { default: false });
+  active.onChange((on) => (on ? start() : stop()));
+}
+```
+
+Pressing the key then switches the plugin on *and* arms the setting, because an
+armed setting inside a plugin nobody enabled does nothing — its timers never
+run. Switching off only disarms: that is what makes the plugin let go of
+whatever it was holding, and taking the plugin's switch away as well would undo
+something the user chose.
+
+**A list offers more than one key.** A plugin that is switched on for a run and
+then *told* something inside it wants two: auto-dodge is one — its own switch,
+and a key that holds the ground you are standing on:
+
+```ts
+meta: {
+  id: 'auto-dodge', /* … */
+  bindable: [{ label: 'Hotkey' }, { setting: 'anchor', label: 'Anchor here' }],
+},
+```
+
+Each entry is a row in the overlay and a key of its own. What identifies one is
+the **slot** — the setting it moves, or nothing for the plugin's own switch — so
+the slot is as much part of the plugin's identity as its id: renaming one loses
+the key the user chose. Two entries naming one slot is refused at
+`definePlugin`, because two rows writing one stored key is one press moving
+whichever of them the host kept.
+
+**A hold puts back what it found.** A plugin that was already running comes back
+running when the key comes up, rather than being switched off by a key that only
+meant to switch it on. Each slot is remembered separately, so holding two of one
+plugin's keys is two holds. And a hold ends on its own when the module stops
+reporting — an alt-tab, the overlay opening, the game closing — because a hold
+nothing can revoke is a plugin left running by a key nobody is pressing.
+
+Which key a bind names, and why it is stored the way it is, is
+[`docs/ipc.md`](ipc.md#hotkeyevent) — the short version being that it is the
+*physical* key, so it survives the player changing keyboard layout.
+
 ## Persistence
 
-Every setting value and every plugin's on/off switch survives a restart. They
-are kept in `config/plugins.json`, beside the runtime's own configuration:
+Every setting value, every plugin's on/off switch, and the key bound to that
+switch survive a restart. They are kept in `config/plugins.json`, beside the
+runtime's own configuration:
 
 ```json
 {
   "version": 1,
   "plugins": {
-    "auto-nexus": { "enabled": true, "settings": { "hpPercent": 40 } }
+    "auto-nexus": { "enabled": true, "settings": { "hpPercent": 40 } },
+    "auto-dodge": {
+      "enabled": false,
+      "bind": "hold:Mouse5",
+      "binds": { "anchor": "toggle:F6" },
+      "settings": {}
+    }
   }
 }
 ```
+
+`bind` sits beside `enabled` rather than among the settings, and for the reason
+the switch itself does: neither is declared, neither has a descriptor to
+validate against, and both belong to the host. A bind the file no longer
+describes — a mode this build dropped, a key it has no name for — leaves the
+plugin unbound rather than bound to a guess.
+
+`binds` holds the plugin's *other* keys, filed under the settings they move. It
+is a second field rather than one map with an empty key in it because the
+switch is the one slot that is not a setting, and `"": "hold:Mouse5"` is not a
+line anybody reading the file could act on.
 
 The file is the user's, not the project's — it is written by clicking rather
 than by editing, and it is not in the repository.

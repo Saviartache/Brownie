@@ -327,7 +327,13 @@ describe('NativeLink', () => {
       peer.authenticate();
 
       peer.send({ kind: 'controlAction', action: 'ui|page|key|1' });
-      peer.send({ kind: 'hotkeyEvent', pluginId: 'auto-aim', action: 'togglePlugin', value: true });
+      peer.send({
+        kind: 'hotkeyEvent',
+        pluginId: 'auto-aim',
+        slot: '',
+        action: 'togglePlugin',
+        value: true,
+      });
       peer.send({
         kind: 'playerTelemetry',
         alive: true,
@@ -344,6 +350,30 @@ describe('NativeLink', () => {
       expect(hotkeys).toEqual(['auto-aim']);
       expect(hp).toBe(640);
       expect(health).toEqual([['HBEAKBIHANL']]);
+    });
+
+    it('says when the module goes, and only for one that had arrived', () => {
+      const { link: native } = link();
+      const gone: string[] = [];
+      native.onDisconnected((reason) => gone.push(reason));
+
+      // A connection that never authenticated was never a peer, so there is no
+      // departure to report — and a listener that acts on one (a held key to
+      // release, a claim to drop) would be acting on a session that never was.
+      const stranger = new NativePeer();
+      native.accept(stranger.transport);
+      native.disconnect('never said hello');
+      expect(gone).toEqual([]);
+
+      const peer = new NativePeer();
+      native.accept(peer.transport);
+      peer.authenticate();
+      native.disconnect('the game closed');
+      expect(gone).toEqual(['the game closed']);
+
+      // Once, not once per attempt to close a link that is already closed.
+      native.disconnect('again');
+      expect(gone).toEqual(['the game closed']);
     });
 
     it('ignores a message type it does not know', () => {

@@ -88,6 +88,31 @@ export interface WeaponProjectile {
   readonly reachTiles: number;
 }
 
+/**
+ * Which enemy an aim point leads, and where this side had it.
+ *
+ * **What lets the module correct a point this side could not.** Bullet
+ * collision in this game is the client's own — it moves its bullets, tests them
+ * against its own copy of the monsters and reports the hit it has already made
+ * — so a shot lands against where the *client* has the enemy. Everything here
+ * is a reconstruction of that: parsed from `NEWTICK`, carried forward between
+ * ticks, and close rather than exact, because the client smooths an entity's
+ * motion between two ticks and no arithmetic on this side can say how far along
+ * that it is.
+ *
+ * Naming the enemy lets the module look it up in the game's own tables and
+ * shift the point by however far the two disagree. **The position goes with the
+ * name because the point alone cannot be corrected**: it is already a lead, and
+ * how far ahead of the monster it sits is exactly what has to survive the
+ * shift.
+ */
+export interface AimSubject {
+  readonly objectId: number;
+  /** Where this side had it when the point was worked out, in tiles. */
+  readonly x: number;
+  readonly y: number;
+}
+
 export interface AimOutput {
   /**
    * Asks the module to point the player's shots at a world position.
@@ -97,7 +122,7 @@ export interface AimOutput {
    * is how the runtime says stop, so there is no cancel — an aim that is not
    * renewed expires, and the player's own aim is theirs again.
    */
-  aimAt(x: number, y: number, holdMs: number): void;
+  aimAt(x: number, y: number, holdMs: number, subject: AimSubject): void;
 }
 
 export interface AutoAimOptions {
@@ -151,6 +176,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       name: 'Auto Aim',
       category: PluginCategory.Combat,
       description: 'Points the shots you fire at the enemy they are most likely to hit.',
+      bindable: true,
     },
 
     setup(context) {
@@ -372,7 +398,16 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         // meeting a screen away, which is the shot going nowhere near anything.
         const maxFlightMs = Math.min(projectile.lifetimeMs, range / projectile.speedTilesPerMs);
 
-        const aimPointFor = (enemy: EntityView): { x: number; y: number } | undefined => {
+        /**
+         * Where to point, and the enemy that answer was measured against.
+         *
+         * The second half is not decoration: the module corrects the point by
+         * however far the client disagrees about *this* position, so a point
+         * without it is one that cannot be corrected. See {@link AimSubject}.
+         */
+        const aimPointFor = (
+          enemy: EntityView,
+        ): { x: number; y: number; subject: AimSubject } | undefined => {
           // Where it is *now*, not where the last tick put it: between two
           // sightings the enemy keeps walking, and aiming at the sample is
           // aiming a tile behind anything that moves.
@@ -384,7 +419,11 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             // branch that publishes a number straight off the wire, so it is
             // also the only one that has to ask whether it is one.
             if (!Number.isFinite(enemy.x) || !Number.isFinite(enemy.y)) return undefined;
-            return { x: enemy.x, y: enemy.y };
+            return {
+              x: enemy.x,
+              y: enemy.y,
+              subject: { objectId: enemy.objectId, x: enemy.x, y: enemy.y },
+            };
           }
           const intercept = solveIntercept({
             shooterX,
@@ -410,6 +449,10 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
           return {
             x: motion.x + (intercept.x - motion.x) * lead,
             y: motion.y + (intercept.y - motion.y) * lead,
+            // Where the enemy is *now* by this side's reckoning, which is what
+            // the lead above was measured from — not the sample the last tick
+            // carried, which is a tile behind it.
+            subject: { objectId: enemy.objectId, x: motion.x, y: motion.y },
           };
         };
 
@@ -451,7 +494,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
         const point = aimPointFor(target);
         if (point === undefined) return;
-        options.output.aimAt(point.x, point.y, holdMs.get());
+        options.output.aimAt(point.x, point.y, holdMs.get(), point.subject);
       };
 
       // **Deciding is not packet work, so it does not wait for a packet.** The

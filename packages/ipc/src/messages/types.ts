@@ -119,6 +119,14 @@ export interface ControlActionMessage {
 export interface HotkeyEventMessage {
   readonly kind: 'hotkeyEvent';
   readonly pluginId: string;
+  /**
+   * Which of that plugin's switches the key moves — the setting it names, or
+   * empty for the plugin's own.
+   *
+   * Empty for a module built before a plugin could offer more than one key,
+   * which is exactly what that module meant by it.
+   */
+  readonly slot: string;
   readonly action: string;
   readonly value: boolean;
 }

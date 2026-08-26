@@ -165,6 +165,28 @@ describe('object catalog', () => {
     expect(catalog.displayName(0x0d59)).toBe('Oryx the Mad God 3');
   });
 
+  it('tells a portal of any kind from the narrower one a key opens', async () => {
+    // A realm portal is `<Class>Portal</Class>` with no `<DungeonPortal/>`, so
+    // the two questions have different answers for it — which is the whole
+    // reason `/enter` asks the wider one and auto-portal the narrower.
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+          <Object type="0x0704" id="Realm Portal"><Class>Portal</Class><IntergamePortal /></Object>
+          <Object type="0x071a" id="Undead Lair Portal"><Class>Portal</Class><DungeonPortal /></Object>
+          <Object type="0x0d59" id="Oryx the Mad God 3"><Class>Character</Class><Enemy /></Object>
+        </Objects>`),
+      ),
+    );
+
+    expect(catalog.isPortal(0x0704)).toBe(true);
+    expect(catalog.isDungeonPortal(0x0704)).toBe(false);
+    expect(catalog.isPortal(0x071a)).toBe(true);
+    expect(catalog.isDungeonPortal(0x071a)).toBe(true);
+    expect(catalog.isPortal(0x0d59)).toBe(false);
+    expect(catalog.isPortal(0xffff)).toBe(false);
+  });
+
   it('lists only the skins assigned to a requested player class', async () => {
     const catalog = new GameObjectCatalog(
       await readObjectDefinitions(

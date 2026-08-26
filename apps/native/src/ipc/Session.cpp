@@ -257,10 +257,14 @@ Status Session::SendControlAction(std::string_view action) {
     return Send(MessageType::kControlAction, writer.Str("action", action).Finish(), false);
 }
 
-Status Session::SendHotkey(std::string_view plugin_id, std::string_view action, bool value) {
+Status Session::SendHotkey(std::string_view plugin_id, std::string_view slot,
+                           std::string_view action, bool value) {
     json::Writer writer;
-    const std::string payload =
-        writer.Str("pluginId", plugin_id).Str("action", action).Bool("value", value).Finish();
+    const std::string payload = writer.Str("pluginId", plugin_id)
+                                    .Str("slot", slot)
+                                    .Str("action", action)
+                                    .Bool("value", value)
+                                    .Finish();
     return Send(MessageType::kHotkeyEvent, payload, false);
 }
 

@@ -1,4 +1,4 @@
-import type { SettingValue } from '@brownie/plugin-api';
+import { SWITCH_SLOT, type SettingValue } from '@brownie/plugin-api';
 import type { PluginStore } from './PluginStore.js';
 
 /**
@@ -14,12 +14,27 @@ export const PREFERENCES_VERSION = 1;
 interface Entry {
   /** `undefined` until the user has switched the plugin either way. */
   enabled: boolean | undefined;
+  /** `undefined` until the user has bound a key to that switch. */
+  bind: string | undefined;
+  /**
+   * The keys bound to the plugin's *other* switches, by the setting each moves.
+   *
+   * Apart from {@link bind} rather than folded in beside it under an empty key,
+   * because the switch is the one slot that is not a setting: a document is
+   * read by people, and `"": "toggle:F5"` is not a line anybody can act on.
+   */
+  binds: Map<string, string>;
   settings: Record<string, SettingValue>;
 }
 
 export interface PreferencesDocument {
   readonly version: number;
-  readonly plugins: Readonly<Record<string, { enabled?: boolean; settings: object }>>;
+  readonly plugins: Readonly<
+    Record<
+      string,
+      { enabled?: boolean; bind?: string; binds?: Record<string, string>; settings: object }
+    >
+  >;
 }
 
 /**
@@ -75,6 +90,20 @@ export class PluginPreferences implements PluginStore {
     this.#onChanged();
   }
 
+  readBind(pluginId: string, slot: string): string | undefined {
+    const entry = this.#entries.get(pluginId);
+    if (entry === undefined) return undefined;
+    return slot === SWITCH_SLOT ? entry.bind : entry.binds.get(slot);
+  }
+
+  writeBind(pluginId: string, slot: string, bind: string): void {
+    const entry = this.#entryFor(pluginId);
+    if (this.readBind(pluginId, slot) === bind) return;
+    if (slot === SWITCH_SLOT) entry.bind = bind;
+    else entry.binds.set(slot, bind);
+    this.#onChanged();
+  }
+
   /**
    * Replaces everything with what a document's `plugins` member holds.
    *
@@ -96,8 +125,14 @@ export class PluginPreferences implements PluginStore {
     for (const [pluginId, raw] of Object.entries(plugins)) {
       if (pluginId === '' || !isRecord(raw)) continue;
       const enabled = raw['enabled'];
+      const bind = raw['bind'];
       this.#entries.set(pluginId, {
         enabled: typeof enabled === 'boolean' ? enabled : undefined,
+        // Only checked for being storable here. Whether it is a bind this build
+        // can act on is the host's question, and it asks it against the
+        // declaration in `pluginBind.ts` while the plugin is loading.
+        bind: typeof bind === 'string' ? bind : undefined,
+        binds: readBinds(raw['binds']),
         settings: readSettings(raw['settings']),
       });
     }
@@ -106,10 +141,15 @@ export class PluginPreferences implements PluginStore {
 
   /** The whole document, ready to serialise. */
   toDocument(): PreferencesDocument {
-    const plugins: Record<string, { enabled?: boolean; settings: object }> = {};
+    const plugins: Record<
+      string,
+      { enabled?: boolean; bind?: string; binds?: Record<string, string>; settings: object }
+    > = {};
     for (const [pluginId, entry] of this.#entries) {
       plugins[pluginId] = {
         ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
+        ...(entry.bind === undefined ? {} : { bind: entry.bind }),
+        ...(entry.binds.size === 0 ? {} : { binds: Object.fromEntries(entry.binds) }),
         settings: entry.settings,
       };
     }
@@ -119,11 +159,25 @@ export class PluginPreferences implements PluginStore {
   #entryFor(pluginId: string): Entry {
     let entry = this.#entries.get(pluginId);
     if (entry === undefined) {
-      entry = { enabled: undefined, settings: {} };
+      entry = { enabled: undefined, bind: undefined, binds: new Map(), settings: {} };
       this.#entries.set(pluginId, entry);
     }
     return entry;
   }
+}
+
+/** The same rule as a setting value: storable, or dropped. */
+function readBinds(raw: unknown): Map<string, string> {
+  const binds = new Map<string, string>();
+  if (!isRecord(raw)) return binds;
+  for (const [slot, bind] of Object.entries(raw)) {
+    // An empty slot is the plugin's own switch, which the document holds as
+    // `bind`. One arriving here is a file written by hand, and honouring it
+    // would give that switch two spellings that can disagree.
+    if (slot === SWITCH_SLOT || typeof bind !== 'string') continue;
+    binds.set(slot, bind);
+  }
+  return binds;
 }
 
 function readSettings(raw: unknown): Record<string, SettingValue> {

@@ -9,6 +9,8 @@
 
 import {
   MutablePacket,
+  bindSlot,
+  bindTargets,
   type EntityView,
   type NativeApi,
   type Position,
@@ -67,6 +69,7 @@ import {
 } from '../src/features/dodge/hitbox.js';
 import { StatType } from '../src/constants/StatType.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
+import { PluginPreferences } from '../src/plugins/PluginPreferences.js';
 import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
 import { testLogger } from './fakes.js';
 import {
@@ -619,6 +622,239 @@ describe('how far it moves to get out of the way', () => {
     // the character is exactly where their own walking left them.
     expect(x).toBe(10);
     expect(y).toBe(10);
+  });
+});
+
+/**
+ * The ground a *person* named, rather than the ground a dodge remembered.
+ *
+ * Everything a held anchor does is the ordinary anchor with its guesses taken
+ * out: it does not follow them about, is not walked out from under anything,
+ * does not lapse and is not dropped for being far off. What it is not is a
+ * destination — every other term of the cost model still has its say, which is
+ * what these are mostly about.
+ */
+describe('the ground the player named', () => {
+  const FRAME_MS = 25;
+
+  /**
+   * Plays a plan out the way the module would, with a place being held.
+   *
+   * @returns where the character ended up, and the least room it ever left
+   *   itself from the shots.
+   */
+  function hold(options: {
+    readonly anchor?: Position;
+    readonly start?: Partial<DodgeSituation>;
+    readonly frames?: number;
+    readonly shots?: readonly (DodgeShot & { firedAtMs: number; expiresAtMs: number })[];
+    readonly world?: DodgeGround;
+    readonly settings?: DodgeSettings;
+  }): { x: number; y: number; closest: number } {
+    const planner = new DodgePlanner();
+    const base = situation({ ...options.start, anchor: options.anchor });
+    const world = options.world ?? OPEN_GROUND;
+    const settings = options.settings ?? SETTINGS;
+    let x = base.x;
+    let y = base.y;
+    let closest = Infinity;
+
+    for (let frame = 0; frame < (options.frames ?? 120); frame += 1) {
+      const at = frame * FRAME_MS;
+      const shots = (options.shots ?? []).filter(
+        (shot) => shot.firedAtMs <= at && shot.expiresAtMs > at,
+      );
+      const plan = planner.plan(
+        { ...base, x, y, gameTimeMs: at, nowMs: base.nowMs + at },
+        settings,
+        world,
+        shots,
+      );
+      if (plan.steer && plan.stepTiles > 0) {
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        x += plan.dirX * travel;
+        y += plan.dirY * travel;
+      }
+      for (const shot of shots) {
+        const where = shot.positionAt(at);
+        if (where === undefined) continue;
+        const gap =
+          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) -
+          (PLAYER_HALF_TILES + DEFAULT_PROJECTILE_HALF_TILES);
+        if (gap < closest) closest = gap;
+      }
+    }
+    return { x, y, closest };
+  }
+
+  /** How far from the place they are holding, in tiles. */
+  const offBy = (at: { x: number; y: number }, anchor: Position): number =>
+    Math.hypot(at.x - anchor.x, at.y - anchor.y);
+
+  /**
+   * How near the place counts as standing on it.
+   *
+   * Not the exact tile: the planner stops returning once the ground is given
+   * back, and the last step it commanded can carry a little past that — a step
+   * being most of a tile at the widest preset.
+   */
+  const HOME_TILES = 0.9;
+
+  // The whole of what a key is for: they are somewhere else, and nothing is
+  // happening, and the answer is still "go back".
+  it('walks back to it with nothing in the air at all', () => {
+    const anchor = { x: 10, y: 10 };
+    const at = hold({ anchor, start: { x: 14, y: 10 } });
+
+    expect(offBy(at, anchor)).toBeLessThan(HOME_TILES);
+  });
+
+  // **The tests here run at the harness's own pull; a person runs at a
+  // preset's**, which is a third of it. The way home is worth having at all
+  // three of them or it is worth having at none.
+  it('walks back at the pull every preset ships with', () => {
+    const anchor = { x: 10, y: 10 };
+    for (const preset of Object.values(DodgePresetId)) {
+      const tuning = DODGE_PRESETS[preset];
+      const at = hold({
+        anchor,
+        start: { x: 14, y: 10 },
+        settings: {
+          ...SETTINGS,
+          horizonMs: tuning.horizonMs,
+          tickMs: tuning.tickMs,
+          reactWithinMs: tuning.reactWithinMs,
+          headings: tuning.headings,
+          hitScale: tuning.hitScale,
+          padTiles: tuning.padTiles,
+          driftTilesPerSecond: tuning.driftTilesPerSecond,
+          safeClearanceTiles: tuning.safeClearanceTiles,
+          holdGroundWeight: tuning.holdGroundWeight,
+          greed: tuning.greed,
+          maxExpansions: tuning.maxExpansions,
+        },
+      });
+
+      expect(offBy(at, anchor), preset).toBeLessThan(HOME_TILES);
+    }
+  });
+
+  // **The two rules the remembered anchor needs and this one must not have.**
+  // A dodge lets go of its ground once the fight has dragged the character a
+  // horizon's walk from it, and again after a lull long enough that the memory
+  // is stale — both because it *guessed* that ground, and neither is true of a
+  // place somebody pressed a key on.
+  it('is not dropped for being far off, nor for a lull', () => {
+    const anchor = { x: 10, y: 10 };
+    // Twice the distance at which a remembered anchor is abandoned.
+    const far = hold({ anchor, start: { x: 18, y: 10 } });
+    expect(offBy(far, anchor)).toBeLessThan(HOME_TILES);
+
+    // And a gap with no planning in it — the feature switched off, the game
+    // paused — leaves it holding exactly the same ground afterwards.
+    const planner = new DodgePlanner();
+    const start = situation({ x: 14, y: 10, anchor });
+    planner.plan(start, SETTINGS, OPEN_GROUND, []);
+    const after = planner.plan({ ...start, nowMs: start.nowMs + 5000 }, SETTINGS, OPEN_GROUND, []);
+    expect(after.steer).toBe(true);
+    expect(after.dirX).toBeLessThan(0);
+  });
+
+  // Nothing to say once they are standing on it, which is what stops the pull
+  // being a leash: the wheel goes back the moment the ground is given back.
+  it('says nothing at all once they are back on it', () => {
+    const planner = new DodgePlanner();
+    const plan = planner.plan(situation({ anchor: { x: 10, y: 10 } }), SETTINGS, OPEN_GROUND, []);
+
+    expect(plan.verdict).toBe('clear');
+    expect(plan.steer).toBe(false);
+  });
+
+  // **Their own walking is a more recent statement than the key was.** It
+  // suspends the pull rather than clearing it, so letting go of the keys is
+  // what puts them back on their ground rather than pressing anything again.
+  it('gives way to their own walking, and takes over again when it stops', () => {
+    const anchor = { x: 10, y: 10 };
+    const planner = new DodgePlanner();
+    const away = planner.plan(
+      situation({ x: 13, y: 10, intentX: 1, intentY: 0, anchor }),
+      SETTINGS,
+      OPEN_GROUND,
+      [],
+    );
+    expect(away.verdict).toBe('intent-safe');
+    expect(away.steer).toBe(false);
+
+    const back = planner.plan(situation({ x: 13, y: 10, anchor }), SETTINGS, OPEN_GROUND, []);
+    expect(back.steer).toBe(true);
+    expect(back.dirX).toBeLessThan(0);
+  });
+
+  // **A pull, not a destination.** The place is worth having and a monster
+  // standing on it is worth more: the planner closes on the anchor until the
+  // crowding costs more than the distance, and stands there.
+  it('stops short of a monster standing on it', () => {
+    const anchor = { x: 10, y: 10 };
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 10, y: 10 } as EntityView], 16, 10, 12, ANY_BODY);
+    const at = hold({ anchor, start: { x: 16, y: 10 }, world: standingOff(bodies, 2.5) });
+
+    // Nearer than it started — the pull is real — and never inside the body it
+    // is being pulled towards.
+    expect(offBy(at, anchor)).toBeLessThan(6);
+    expect(offBy(at, anchor)).toBeGreaterThan(1.5);
+  });
+
+  // **The pull is three times the ordinary one, and it still cannot buy a
+  // tight step.** A step short of comfortable is charged on the ground it left
+  // rather than the ground it reached, so no anchor weight whatever pays for
+  // crossing a shot — which is what makes it safe to ask for a strong one. The
+  // same fight as "leaves room on the way back", with a key pressed on it.
+  it('comes back round the fire rather than through it', () => {
+    const at = hold({
+      anchor: { x: 10, y: 10 },
+      frames: 100,
+      shots: [
+        // One from the west to move them off it, and one across the ground they
+        // were holding, timed for the moment they would be walking back over it.
+        straightShot({ x: 6, y: 10 }, 0, 8, 0, 2000),
+        straightShot({ x: 10, y: 4 }, Math.PI / 2, 8, 700, 2000),
+      ],
+    });
+
+    expect(at.closest).toBeGreaterThan(0.1);
+  });
+
+  // **Letting go has to be immediate**, and the danger is the planner's own
+  // memory: the ground a pin named must not become ground a dodge goes on
+  // returning to after the pin is cleared.
+  it('is forgotten the moment it is let go of', () => {
+    const planner = new DodgePlanner();
+    const held = situation({ x: 13, y: 10, anchor: { x: 10, y: 10 } });
+    expect(planner.plan(held, SETTINGS, OPEN_GROUND, []).steer).toBe(true);
+
+    const cleared = planner.plan(situation({ x: 13, y: 10 }), SETTINGS, OPEN_GROUND, []);
+    expect(cleared.verdict).toBe('clear');
+    expect(cleared.steer).toBe(false);
+  });
+
+  // Ground that hurts is not crossed for it either, by the same rule and for
+  // the better reason: standing in a pool costs health every tick.
+  it('will not cross damaging ground to reach it', () => {
+    const anchor = { x: 10, y: 10 };
+    // A river of lava between them and the place they are holding.
+    const world: DodgeGround = {
+      canStand: () => true,
+      hazardGapTiles: (x) => Math.abs(x - 12) - 1,
+      crowdingAt: () => 0,
+      contactAt: () => 0,
+    };
+    const at = hold({ anchor, start: { x: 14, y: 10 }, world });
+
+    // Up to the margin it keeps from the edge, and not a step past it: the pull
+    // is answered as far as it can be answered without standing in the fire.
+    expect(at.x).toBeLessThan(13.95);
+    expect(at.x).toBeGreaterThan(13);
   });
 });
 
@@ -1401,6 +1637,7 @@ describe('the picture of what it is thinking', () => {
       gameTimeMs: 0,
       engageTiles: 2.5,
       keepAwayTiles: 2.5 as number | undefined,
+      anchor: undefined as Position | undefined,
       bodies: new EnemyBodies(),
       blasts: [] as BlastView[],
       ...overrides,
@@ -1700,6 +1937,10 @@ describe('when the plugin decides', () => {
     clock: { ms: number };
     /** A server tick arriving, which is when a sighting is taken. */
     tick: () => void;
+    /** Where the character is, moved by hand — the server shoving them about. */
+    self: { x: number; y: number };
+    /** A portal taken: the same coordinates, somewhere else entirely. */
+    mapChanged: () => void;
   }
 
   /**
@@ -1734,6 +1975,8 @@ describe('when the plugin decides', () => {
        * rather than a hundredth of a tile.
        */
       shot?: ProjectileView;
+      /** What the last run left behind, for the settings that survive one. */
+      store?: PluginPreferences;
     } = {},
   ): Harness {
     const moveTo = vi.fn();
@@ -1778,6 +2021,7 @@ describe('when the plugin decides', () => {
         onDisconnected: () => () => undefined,
       } satisfies SessionApi,
       onChanged: () => undefined,
+      ...(map.store === undefined ? {} : { store: map.store }),
     });
     host.load(
       createDodgePlugin({
@@ -1816,6 +2060,12 @@ describe('when the plugin decides', () => {
           new MutablePacket(decodeFrame(registry, encodePacket(registry, packet))),
           session,
         );
+      },
+      self: session.self,
+      // Nothing in its body is read either: what a new map means here is that
+      // every coordinate the plugin was holding now names somewhere else.
+      mapChanged: () => {
+        host.dispatchPacket(new MutablePacket(createPacket(registry, 'MAPINFO')), session);
       },
     };
   }
@@ -1859,6 +2109,104 @@ describe('when the plugin decides', () => {
     host.setEnabled('auto-dodge', false);
     plan();
     expect(moveBy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The anchor, as its key moves it.
+   *
+   * Through the host rather than through the setting, because that is the whole
+   * path a bind takes: the key names a slot, the host moves the switch behind
+   * it, and the plugin sees a setting change. See `PluginHotkeys`.
+   */
+  const anchorKey = (host: PluginHost, on: boolean): boolean =>
+    host.setActive('auto-dodge', 'anchor', on);
+
+  it('offers a key for the anchor as well as for its own switch', () => {
+    const { host } = underFire(0);
+    const meta = [...host.statuses()].find((status) => status.meta.id === 'auto-dodge')?.meta;
+
+    expect(meta === undefined ? [] : bindTargets(meta).map(bindSlot)).toEqual(['', 'anchor']);
+  });
+
+  // **The place is where they were standing when the key went down**, and it is
+  // taken on the next plan rather than in the press: a key can be pressed with
+  // nothing connected, and a place read off a session that does not exist is
+  // not a place.
+  it('holds the ground the anchor key was pressed on', () => {
+    const h = underFire(0, { shot: ACROSS_THE_ROOM as unknown as ProjectileView });
+    expect(anchorKey(h.host, true)).toBe(true);
+    h.plan();
+
+    // Shoved three tiles east, with nothing in the air worth answering.
+    h.self.x = 13;
+    h.moveBy.mockClear();
+    h.plan();
+
+    expect(h.moveBy).toHaveBeenCalled();
+    const [offsetX] = h.moveBy.mock.lastCall as [number, number];
+    expect(offsetX, 'walked west, back onto it').toBeLessThan(0);
+  });
+
+  it('leaves them where they are once the key is let go of', () => {
+    const h = underFire(0, { shot: ACROSS_THE_ROOM as unknown as ProjectileView });
+    anchorKey(h.host, true);
+    h.plan();
+
+    h.self.x = 13;
+    anchorKey(h.host, false);
+    h.moveBy.mockClear();
+    h.plan();
+
+    // One command of no distance hands the wheel back, and nothing after it.
+    expect(h.moveBy.mock.calls.length).toBeLessThanOrEqual(1);
+    for (const call of h.moveBy.mock.calls) {
+      const [offsetX, offsetY] = call as [number, number];
+      expect(Math.hypot(offsetX, offsetY)).toBe(0);
+    }
+  });
+
+  // **A portal is the same two numbers meaning somewhere else.** The switch
+  // goes with the place, because a panel saying the character is being held
+  // somewhere is a panel that has to be true.
+  it('lets go of the anchor, and of its switch, when the map changes', () => {
+    const h = underFire(0, { shot: ACROSS_THE_ROOM as unknown as ProjectileView });
+    anchorKey(h.host, true);
+    h.plan();
+
+    h.mapChanged();
+    expect(h.host.settingsOf('auto-dodge')?.value('anchor')).toBe(false);
+
+    h.self.x = 13;
+    h.moveBy.mockClear();
+    h.plan();
+    for (const call of h.moveBy.mock.calls) {
+      const [offsetX, offsetY] = call as [number, number];
+      expect(Math.hypot(offsetX, offsetY), 'nothing to walk back to').toBe(0);
+    }
+  });
+
+  // A place cannot survive a restart, so the switch that named one must not
+  // either: coming back armed would be a panel claiming the character is being
+  // held somewhere nobody chose — and then pinning them wherever they logged in.
+  it('never comes back armed from a run that ended holding one', () => {
+    const store = new PluginPreferences();
+    store.write('auto-dodge', { anchor: true });
+
+    const h = underFire(0, { store });
+
+    expect(h.host.settingsOf('auto-dodge')?.value('anchor')).toBe(false);
+  });
+
+  it('draws the ground it is holding', () => {
+    const h = underFire(0, { shot: ACROSS_THE_ROOM as unknown as ProjectileView });
+    h.view.on = true;
+    anchorKey(h.host, true);
+    h.plan();
+
+    const marks = (h.showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    const anchor = marks.find((mark) => mark.kind === DodgeMarkKind.Anchor);
+    expect(anchor?.x).toBe(10);
+    expect(anchor?.y).toBe(10);
   });
 
   // The whole of "does not get in your way": a player already walking somewhere
@@ -2273,12 +2621,14 @@ describe('when the plugin decides', () => {
       return settings;
     }
 
-    it('puts everything behind Advanced except the question and the emergency', () => {
+    // The anchor is on the panel because it is not a number at all: it is the
+    // one thing here a person *does* mid-fight, and the same switch a key moves.
+    it('puts everything behind Advanced except the question, the anchor and the emergency', () => {
       const everyday = settingsOf()
         .descriptors()
         .filter((setting) => setting.advanced !== true);
 
-      expect(everyday.map((setting) => setting.key)).toEqual(['preset', 'hopEnabled']);
+      expect(everyday.map((setting) => setting.key)).toEqual(['preset', 'anchor', 'hopEnabled']);
     });
 
     it('starts on a preset rather than on a mix nobody chose', () => {

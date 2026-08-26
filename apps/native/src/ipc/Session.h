@@ -94,8 +94,10 @@ class Session {
     /// One overlay interaction, travelling back.
     Status SendControlAction(std::string_view action);
 
-    /// An edge-triggered key press the module detected.
-    Status SendHotkey(std::string_view plugin_id, std::string_view action, bool value);
+    /// An edge-triggered key press the module detected. `slot` is which of the
+    /// plugin's switches the key was bound to, empty for its own.
+    Status SendHotkey(std::string_view plugin_id, std::string_view slot,
+                      std::string_view action, bool value);
 
     /// Where the game was heading before it was redirected to the proxy.
     ///

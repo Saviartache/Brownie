@@ -81,6 +81,10 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
       name: 'Player Noclip',
       category: PluginCategory.Movement,
       description: 'Walks through what stands on the map, holding the uplink while it does.',
+      // The setting, not the switch. A plugin cannot see its own switch move,
+      // and this one has to let go of the client's uplink when it stops — so
+      // what a key moves is the control that has a listener behind it.
+      bindable: 'active',
     },
 
     setup(context) {

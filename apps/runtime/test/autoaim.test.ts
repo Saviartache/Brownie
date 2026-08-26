@@ -796,6 +796,42 @@ describe('the auto-aim plugin', () => {
     expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(3);
   });
 
+  // **The point on its own cannot be corrected.** A shot is tested against the
+  // client's own copy of the monster, and only the module can see that copy —
+  // so it shifts the point by however far the two disagree. It can only do that
+  // if it is told which enemy the lead belongs to and where this side had it.
+  it('names the enemy it led, and where it had it', () => {
+    const { aimAt, enemies, setTime, tick } = harness();
+    const walker = { ...enemy(7, 3, 0) };
+    enemies.push(walker);
+
+    tick();
+    setTime(200);
+    walker.y = 0.8;
+    tick();
+
+    const subject = aimAt.mock.calls.at(-1)?.[3] as
+      { objectId: number; x: number; y: number } | undefined;
+    expect(subject?.objectId).toBe(7);
+    // Where the enemy is *now* by this side's reckoning — which is what the
+    // lead was measured from, not the sample the last tick carried.
+    expect(subject?.x).toBeCloseTo(3);
+    expect(subject?.y).toBeCloseTo(0.8);
+    // And the point itself is ahead of it, which is the part that must survive
+    // the shift.
+    expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(subject?.y ?? 0);
+  });
+
+  it('names an enemy it has only seen once at the place it saw it', () => {
+    const { aimAt, enemies, tick } = harness();
+    enemies.push(enemy(4, 3, 1));
+    tick();
+
+    const subject = aimAt.mock.calls.at(-1)?.[3] as
+      { objectId: number; x: number; y: number } | undefined;
+    expect(subject).toEqual({ objectId: 4, x: 3, y: 1 });
+  });
+
   it('says nothing while no weapon is held', () => {
     const { aimAt, enemies, tick } = harness({ weaponType: -1 });
     enemies.push(enemy(1, 3, 0));

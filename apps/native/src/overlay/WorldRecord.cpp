@@ -193,9 +193,24 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
         return false;
     }
 
+    // Appended later, and read as a set: a shift needs the enemy and the place
+    // the runtime had it, and two of the three describe no shift at all. An
+    // older runtime stops after `holdMs` and is not malformed for it.
+    int object_id = 0;
+    int target_x = 0;
+    int target_y = 0;
+    const bool has_target = ParseInt(TakeField(rest), object_id) &&
+                            ParseInt(TakeField(rest), target_x) &&
+                            ParseInt(TakeField(rest), target_y);
+
     out.x_hundredths = x;
     out.y_hundredths = y;
     out.hold_ms = hold;
+    if (has_target) {
+        out.object_id = object_id;
+        out.target_x_hundredths = target_x;
+        out.target_y_hundredths = target_y;
+    }
     return true;
 }
 

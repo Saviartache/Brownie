@@ -13,7 +13,7 @@
  * goes with it rather than waiting out its own freshness.
  */
 
-import type { SessionView } from '@brownie/plugin-api';
+import type { Position, SessionView } from '@brownie/plugin-api';
 import { dodgeMarks } from './DodgeMarks.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeOutput, DodgeView } from './dodgeInputs.js';
@@ -58,7 +58,13 @@ export class DodgePictureFeed {
    * a debug view has to be able to say. Empty when the spacing group is switched
    * off, which is honest: it is then not minding the monsters at all.
    */
-  publish(session: SessionView, scene: DodgeScene, controls: DodgeControls, nowMs: number): void {
+  publish(
+    session: SessionView,
+    scene: DodgeScene,
+    controls: DodgeControls,
+    nowMs: number,
+    anchor: Position | undefined,
+  ): void {
     if (!this.#view.wanted()) {
       if (!this.#showing) return;
       this.#showing = false;
@@ -85,6 +91,9 @@ export class DodgePictureFeed {
         // "why did it move" gets answered without a log line.
         engageTiles: (walkSpeedOf(session, controls) * controls.tuning.reactWithinMs.get()) / 1000,
         keepAwayTiles: scene.keepAwayTiles,
+        // Where the player said to stand, which is the one thing on this
+        // picture they put there themselves.
+        anchor,
         bodies: scene.bodies,
         blasts: scene.blastsIn(world, controls),
       }),

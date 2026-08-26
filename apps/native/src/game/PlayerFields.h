@@ -64,6 +64,17 @@ inline constexpr std::string_view kPlayerGlow = "self.glow";
 inline constexpr std::string_view kWorldManager = "world.manager";
 inline constexpr std::string_view kLocalPlayer = "world.localPlayer";
 
+/// The world manager's map objects, by object id.
+///
+/// **Two of them, because the class declares two and nothing here knows which
+/// is which.** Both are `Dictionary<int, MapObject>` and neither name says
+/// anything. They are not guessed between: a lookup asks each in turn and takes
+/// the answer whose stored object agrees about its own id, which is the same
+/// key it was filed under. A wrong table cannot pass that, and neither can a
+/// wrong idea of how a dictionary is laid out. See `MapObjects.h`.
+inline constexpr std::string_view kWorldObjects = "world.objects";
+inline constexpr std::string_view kWorldObjectsAlt = "world.objects.alt";
+
 /// The game's own "walk towards here".
 ///
 /// **The first thing this project calls rather than reads.** Movement is

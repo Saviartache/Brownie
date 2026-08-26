@@ -77,10 +77,11 @@ enum class MarkKind : int {
     Body = 2,
     KeepAway = 3,
     Blast = 4,
+    Anchor = 5,
 };
 
 /// The largest kind this build knows, for refusing the ones it does not.
-inline constexpr int kMaxMarkKind = 4;
+inline constexpr int kMaxMarkKind = 5;
 
 /// What outline the radius describes. Mirrors `DodgeMarkShape` in the runtime.
 ///

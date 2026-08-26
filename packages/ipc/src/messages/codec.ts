@@ -110,6 +110,7 @@ function encodePayload(message: IpcMessage): PreparedMessage {
     case 'hotkeyEvent':
       return json(MessageType.HotkeyEvent, {
         pluginId: message.pluginId,
+        slot: message.slot,
         action: message.action,
         value: message.value,
       });
@@ -201,6 +202,9 @@ export function decodeMessage(frame: Frame, from: Origin): IpcMessage {
       return {
         kind: 'hotkeyEvent',
         pluginId: requireString(body, 'pluginId'),
+        // Absent from a module built before a plugin could offer a second key,
+        // and the plugin's own switch is what such a module is talking about.
+        slot: optionalString(body, 'slot'),
         action: requireString(body, 'action'),
         value: requireBoolean(body, 'value'),
       };
@@ -234,6 +238,16 @@ function requireString(body: Readonly<Record<string, unknown>>, key: string): st
   const value = body[key];
   if (typeof value !== 'string') throw new MessageError(`field "${key}" must be a string`);
   return value;
+}
+
+/**
+ * A string field a peer may not have sent at all.
+ *
+ * Absent reads as empty; present and not a string is still refused, because
+ * that is a peer disagreeing about the shape rather than one predating it.
+ */
+function optionalString(body: Readonly<Record<string, unknown>>, key: string): string {
+  return body[key] === undefined ? '' : requireString(body, key);
 }
 
 function requireBoolean(body: Readonly<Record<string, unknown>>, key: string): boolean {

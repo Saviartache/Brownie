@@ -74,6 +74,11 @@ export class SettingsRegistry implements SettingsApi {
     return Object.fromEntries(this.#values);
   }
 
+  /** One value, or `undefined` when this plugin declared no such setting. */
+  value(key: string): SettingValue | undefined {
+    return this.#values.get(key);
+  }
+
   /** Presses a button setting. Returns false if there is no such button. */
   press(key: string): boolean {
     const action = this.#buttons.get(key);

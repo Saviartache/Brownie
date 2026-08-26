@@ -89,6 +89,15 @@ export interface ObjectCatalog {
    */
   isScenery(objectType: number): boolean;
   /**
+   * Whether one of these is a portal of any kind.
+   *
+   * `<Class>Portal</Class>` in `objects.xml`, which is wider than
+   * {@link isDungeonPortal}: it also covers the realm, guild, vault and event
+   * portals. Anything asking what the player is *standing on* wants this one —
+   * a realm portal is exactly the case the narrower question misses silently.
+   */
+  isPortal(objectType: number): boolean;
+  /**
    * Whether one of these is a key-opened dungeon portal.
    *
    * `<DungeonPortal/>` in `objects.xml`, which is narrower than the `Portal`
@@ -169,6 +178,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isQuest: () => false,
   occupies: () => false,
   isScenery: () => false,
+  isPortal: () => false,
   isDungeonPortal: () => false,
   dungeonPortals: () => [],
   bodyTiles: () => undefined,

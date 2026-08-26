@@ -22,6 +22,9 @@ AimTarget AimTargetFrom(const overlay::AimCommand& aim, std::uint64_t now_ms) no
     target.x = static_cast<float>(aim.x_hundredths) / 100.0F;
     target.y = static_cast<float>(aim.y_hundredths) / 100.0F;
     target.expires_at_ms = now_ms + static_cast<std::uint64_t>(aim.hold_ms);
+    target.object_id = aim.object_id;
+    target.target_x = static_cast<float>(aim.target_x_hundredths) / 100.0F;
+    target.target_y = static_cast<float>(aim.target_y_hundredths) / 100.0F;
     return target;
 }
 
@@ -211,6 +214,37 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     }
 
     if (aiming) {
+        // **Where the client has the enemy, which is what a shot is tested
+        // against.** The point arrived already led; how far ahead of the monster
+        // it sits is the runtime's arithmetic and is kept. What is corrected is
+        // the monster: the runtime rebuilt its position from packets and
+        // smoothed it between server ticks, and the game has the real one. The
+        // difference between the two is applied to the point, so the lead
+        // survives and the thing it is measured from stops being a guess.
+        //
+        // Nothing happens without a name to look up, without the tables having
+        // resolved, or when the enemy is not in them — and each of those leaves
+        // the point exactly as the runtime sent it, which is where this feature
+        // stood before any of it existed.
+        // **Held in locals, never written back.** A frame that has no new
+        // target reuses the one it already has, so a correction folded into it
+        // would be applied again next frame, and again the frame after — an aim
+        // walking away from the monster it is chasing.
+        float aim_x = frame_aim_.x;
+        float aim_y = frame_aim_.y;
+        if (frame_aim_.object_id != 0) {
+            float seen_x = 0.0F;
+            float seen_y = 0.0F;
+            if (game::FindMapObject(*game_, map_objects_, frame_aim_.object_id, seen_x, seen_y)) {
+                aim_x += seen_x - frame_aim_.target_x;
+                aim_y += seen_y - frame_aim_.target_y;
+            }
+        }
+        // What the overlay draws, so the picture is the shot rather than the
+        // record behind it. The same argument {@link WalkTarget} makes.
+        frame_aim_shown_x_ = aim_x;
+        frame_aim_shown_y_ = aim_y;
+
         // **The angle is worked out here, not in the detour.** The detour runs
         // inside the game's own shot path, where the cheapest thing that could
         // go wrong is a stutter; here there is a frame's worth of room and the
@@ -218,8 +252,8 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         //
         // Standing exactly on the target names no direction, and `atan2(0, 0)`
         // is a direction the game would take literally.
-        const float dx = frame_aim_.x - player.x;
-        const float dy = frame_aim_.y - player.y;
+        const float dx = aim_x - player.x;
+        const float dy = aim_y - player.y;
         if (dx == 0.0F && dy == 0.0F) {
             aim_.Clear();
         } else {

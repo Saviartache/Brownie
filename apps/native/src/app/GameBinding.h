@@ -25,6 +25,7 @@
 #include "game/Il2CppReady.h"
 #include "game/Il2CppRuntime.h"
 #include "game/MapFields.h"
+#include "game/MapObjects.h"
 #include "game/OffsetTable.h"
 #include "game/PlayerHandle.h"
 #include "game/PlayerRoute.h"
@@ -81,6 +82,14 @@ class GameBinding {
     /// The walk from a static field to the player object, once every offset it
     /// needs has resolved.
     [[nodiscard]] std::optional<game::PlayerRoute> Route() const;
+
+    /// The same walk, carried on to the other things standing in the map.
+    ///
+    /// Separate from {@link Route} and asked for separately, because the two
+    /// fail apart: the object tables are one more field each and a build that
+    /// does not give them up must still leave everything that only wants the
+    /// player working. See `game/MapObjects.h`.
+    [[nodiscard]] std::optional<game::MapObjectRoute> MapObjectRoute() const;
 
     /// Every `bool(float, float)` the world manager declares, found once and
     /// kept — see `game/MapFields.h` for why it is a shape and not a name.

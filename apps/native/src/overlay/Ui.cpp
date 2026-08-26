@@ -10,6 +10,7 @@
 #include <imgui.h>
 
 #include "core/Colour.h"
+#include "core/KeyChord.h"
 #include "overlay/ControlRecord.h"
 
 namespace brownie::overlay {
@@ -541,6 +542,38 @@ void DrawWorld(const OverlayModel& model) {
 /// a plugin nobody has written.
 constexpr std::string_view kEnabledKey{};
 
+/// The same, for the keys bound to a plugin's switches.
+///
+/// A control character, for the reason above and with the same caveat: a bind
+/// is not one of the plugin's settings, so it needs a slot none of them can
+/// take, and a setting key is written in source code. The bind's own slot is
+/// appended, because a plugin can offer more than one key and two rows held
+/// under one name would be one row showing the other's pending value.
+constexpr std::string_view kBindEditKey{"\x01"
+                                        "bind"};
+
+[[nodiscard]] std::string BindEditKey(std::string_view slot) {
+    std::string key{kBindEditKey};
+    key.append(slot);
+    return key;
+}
+
+/// The two modes a bind can act in, spelled as the runtime spells them — see
+/// `apps/runtime/src/plugins/pluginBind.ts`.
+constexpr std::string_view kToggleMode = "toggle";
+constexpr std::string_view kHoldMode = "hold";
+
+/// What each mode is called on screen, in the order the combo offers them.
+struct ModeChoice {
+    std::string_view value;
+    const char* label;
+};
+
+constexpr ModeChoice kModes[] = {
+    {kToggleMode, "Toggle"},
+    {kHoldMode, "Hold"},
+};
+
 std::string FormatNumber(float value) {
     char text[32]{};
     std::snprintf(text, sizeof(text), "%.6g", static_cast<double>(value));
@@ -891,13 +924,144 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
     }
 }
 
+/// Sends one bind and holds the row at what was sent until the sync answers.
+///
+/// **The halves are copied before anything else happens, and that is not a
+/// nicety.** A capture prompt finishing passes `mode` and `slot` as views into
+/// `state.capture` — which the clear below empties, leaving the view over a
+/// string whose first byte has just become a terminator. What went out was
+/// `%00oggle`, the runtime refused a mode it could not read, and the sync came
+/// back saying the plugin was still unbound.
+void SendBind(const PluginRow& plugin, std::string_view slot, std::string_view mode,
+              std::string_view key, UiState& state, std::uint64_t version,
+              const ActionSink& emit) {
+    const std::string sent_slot{slot};
+    const std::string sent_mode{mode};
+    const std::string sent_key{key};
+
+    // Whatever the prompt was waiting for, this settles it.
+    state.capture.Clear();
+
+    std::string held = sent_mode;
+    held.push_back(':');
+    held.append(sent_key);
+    state.edit.Hold(plugin.id, BindEditKey(sent_slot));
+    state.edit.SetText(held);
+    emit(BuildAction("bind", {plugin.id, sent_mode, sent_key, sent_slot}));
+    state.edit.Sent(version);
+}
+
+/// One of a plugin's binds: the key, how it acts, and a way to be rid of it.
+///
+/// A row of its own above the settings rather than one among them, because it
+/// is not one of them: what it moves is a switch the host owns, and what it
+/// names is a key, which belongs to this module.
+void DrawBind(const PluginRow& plugin, const BindRow& bind, std::uint64_t version, UiState& state,
+              const ActionSink& emit) {
+    // Its slot, so a plugin's two rows are two widgets rather than one drawn
+    // twice — and stable, so the one being clicked keeps its identity.
+    ImGui::PushID(bind.slot.c_str());
+
+    const std::string edit_key = BindEditKey(bind.slot);
+    std::string mode = bind.mode.empty() ? std::string{kToggleMode} : bind.mode;
+    std::string key = bind.key;
+    // What was sent and not yet confirmed, so a click does not show the old
+    // value again on its way to the new one.
+    if (state.edit.Holds(plugin.id, edit_key)) {
+        const std::string_view sent = state.edit.TextView();
+        if (const std::size_t colon = sent.find(':'); colon != std::string_view::npos) {
+            mode.assign(sent.substr(0, colon));
+            key.assign(sent.substr(colon + 1));
+        }
+    }
+
+    const bool waiting = state.capture.waiting(plugin.id, bind.slot);
+    ImGui::TextUnformatted(bind.label.c_str());
+    ImGui::SameLine();
+
+    // `###` fixes the widget's identity, so a label that changes with the bound
+    // key does not make ImGui treat it as a different button each time.
+    char label[96]{};
+    std::snprintf(label, sizeof(label), "%s###bindkey",
+                  waiting        ? "press a key, Esc to cancel"
+                  : key.empty()  ? "not bound"
+                                 : key.c_str());
+    if (ImGui::Button(label, ImVec2{210.0F, 0.0F})) {
+        if (waiting) {
+            state.capture.Clear();
+        } else {
+            state.capture.Begin(plugin.id, bind.slot, mode);
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0F);
+    // An unrecognised mode is shown as it arrived rather than as one of ours: a
+    // runtime newer than this build is describing something, and drawing it as
+    // "Toggle" would be this build claiming it knows which.
+    const char* preview = mode.c_str();
+    for (const ModeChoice& choice : kModes) {
+        if (mode == choice.value) preview = choice.label;
+    }
+    if (ImGui::BeginCombo("###bindmode", preview)) {
+        for (const ModeChoice& choice : kModes) {
+            const bool selected = mode == choice.value;
+            if (ImGui::Selectable(choice.label, selected)) {
+                SendBind(plugin, bind.slot, choice.value, key, state, version, emit);
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    // Only when there is something to clear, by the same rule as everything
+    // else here: a control that can do nothing is one in the way.
+    if (!key.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Clear###bindclear")) {
+            SendBind(plugin, bind.slot, mode, {}, state, version, emit);
+        }
+    }
+    ImGui::PopID();
+}
+
+/// Finishes a bind prompt once the player presses something.
+///
+/// **At the top of the frame, not where the row is drawn**, and for two
+/// reasons: the click that opened the prompt is still down on the frame it
+/// opened, and a plugin whose node the player has since collapsed still has a
+/// prompt waiting on it.
+void ResolveBindCapture(const OverlayModel& model, UiState& state, const ActionSink& emit) {
+    if (!state.capture.open) {
+        return;
+    }
+
+    const PluginRow* row = nullptr;
+    for (const PluginRow& plugin : model.plugins) {
+        if (plugin.id == state.capture.plugin_id) row = &plugin;
+    }
+    // The plugin went away with the runtime that described it, so there is
+    // nothing left to bind a key to.
+    if (row == nullptr || core::CaptureCancelled()) {
+        state.capture.Clear();
+        return;
+    }
+
+    const core::KeyChord pressed = core::PressedChord();
+    if (!pressed.bound()) {
+        return;
+    }
+    SendBind(*row, state.capture.slot, state.capture.mode, core::FormatChord(pressed), state,
+             model.controls_version, emit);
+}
+
 /// Whether opening this plugin would show anything at all.
 ///
 /// Counted rather than assumed: a setting can be hidden by the value of another
 /// one, so a plugin with rows in the model may still have nothing to show right
 /// now — and one whose `setup` threw has a message instead of settings.
 [[nodiscard]] bool HasBody(const PluginRow& plugin) {
-    if (!plugin.error.empty()) {
+    if (!plugin.error.empty() || !plugin.binds.empty()) {
         return true;
     }
     for (const SettingRow& row : plugin.settings) {
@@ -908,8 +1072,9 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
     return false;
 }
 
-void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edit,
-                MultiSelectFilters& filters, const ActionSink& emit) {
+void DrawPlugin(const PluginRow& plugin, std::uint64_t version, UiState& state,
+                const ActionSink& emit) {
+    PendingEdit& edit = state.edit;
     bool enabled = edit.Holds(plugin.id, kEnabledKey) ? edit.number != 0.0F : plugin.enabled;
 
     // Only a plugin whose `setup` threw is out of reach — it registered nothing
@@ -946,7 +1111,13 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edi
     if (!plugin.error.empty()) {
         ImGui::TextWrapped("%s", plugin.error.c_str());
     }
-    DrawSettings(plugin, false, version, edit, filters, emit);
+    // First, because they are what the plugin is switched *by* — the settings
+    // below them are what it does once it is on. In the order the runtime
+    // published them, which is the order the plugin declared them.
+    for (const BindRow& bind : plugin.binds) {
+        DrawBind(plugin, bind, version, state, emit);
+    }
+    DrawSettings(plugin, false, version, edit, state.multi_filters, emit);
 
     // Visible ones only, by the same rule as the node above: a section that
     // opens onto nothing is worse than no section.
@@ -954,16 +1125,25 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, PendingEdit& edi
     for (const SettingRow& row : plugin.settings) {
         if (row.advanced && IsVisible(plugin, row)) has_advanced = true;
     }
-    if (has_advanced && ImGui::TreeNode("Advanced")) {
-        DrawSettings(plugin, true, version, edit, filters, emit);
-        ImGui::TreePop();
+    if (has_advanced) {
+        // A gap above it, always. The everyday settings end wherever their last
+        // group does, and a group draws a heading while this node does not — so
+        // without the break the node reads as one more row of whichever group
+        // happened to finish above it rather than as the section it is.
+        ImGui::Spacing();
+        if (ImGui::TreeNode("Advanced")) {
+            DrawSettings(plugin, true, version, edit, state.multi_filters, emit);
+            ImGui::TreePop();
+        }
+        // And below it, so the section is set apart from what follows as well
+        // as from what precedes it — which, closed, is the next plugin's row.
+        ImGui::Spacing();
     }
 
     ImGui::TreePop();
 }
 
-void DrawPlugins(const OverlayModel& model, PendingEdit& edit, MultiSelectFilters& filters,
-                 const ActionSink& emit) {
+void DrawPlugins(const OverlayModel& model, UiState& state, const ActionSink& emit) {
     if (model.plugins.empty()) {
         // Two different situations, and the status line above already says which:
         // no runtime connected, or a runtime with an empty plugin directory.
@@ -980,7 +1160,7 @@ void DrawPlugins(const OverlayModel& model, PendingEdit& edit, MultiSelectFilter
             ImGui::SeparatorText(plugin.category.c_str());
         }
         ImGui::PushID(plugin.id.c_str());
-        DrawPlugin(plugin, model.controls_version, edit, filters, emit);
+        DrawPlugin(plugin, model.controls_version, state, emit);
         ImGui::PopID();
     }
 }
@@ -1253,6 +1433,12 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
         edit.Clear();
     }
 
+    // Before anything is drawn, and outside every collapsing header: a prompt
+    // has to be answered by the key the player pressed rather than by the click
+    // that opened it, and a plugin whose node they have since closed still has
+    // one waiting on it.
+    ResolveBindCapture(model, state, emit);
+
     ImGui::SetNextWindowSize(ImVec2{900.0F, 600.0F}, ImGuiCond_FirstUseEver);
     // Collapsing the main window must not take the inspector with it: they are
     // separate windows, and the one is not inside the other.
@@ -1289,7 +1475,7 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
     // is up.
     ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
     if (ImGui::CollapsingHeader("Plugins")) {
-        DrawPlugins(model, edit, state.multi_filters, emit);
+        DrawPlugins(model, state, emit);
     }
 
     if (ImGui::CollapsingHeader("Visualisation")) {

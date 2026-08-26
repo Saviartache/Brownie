@@ -20,13 +20,21 @@ bool WriteRaw(void* address, const void* value, std::size_t size) noexcept {
     return written == size;
 }
 
-void* FindPlayer(const Il2CppRuntime& game, const PlayerRoute& route) noexcept {
+void* FindWorldManager(const Il2CppRuntime& game, const PlayerRoute& route) noexcept {
     void* manager = game.ReadStaticReference(route.singleton);
     if (manager == nullptr) {
         return nullptr;
     }
     void* world = nullptr;
-    if (!ReadField(manager, route.world_manager_at, world) || world == nullptr) {
+    if (!ReadField(manager, route.world_manager_at, world)) {
+        return nullptr;
+    }
+    return world;
+}
+
+void* FindPlayer(const Il2CppRuntime& game, const PlayerRoute& route) noexcept {
+    void* world = FindWorldManager(game, route);
+    if (world == nullptr) {
         return nullptr;
     }
     void* player = nullptr;

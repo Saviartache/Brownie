@@ -19,6 +19,7 @@
 #include "core/Snapshot.h"
 #include "game/AimHook.h"
 #include "game/Il2CppRuntime.h"
+#include "game/MapObjects.h"
 #include "game/PlayerMover.h"
 #include "game/PlayerRoute.h"
 #include "overlay/WorldRecord.h"
@@ -66,6 +67,12 @@ struct AimTarget {
     float y = 0.0F;
     /// A tick count, stamped where it arrived.
     std::uint64_t expires_at_ms = 0;
+    /// The enemy the point leads, and where the runtime had it. Nought for an
+    /// aim that named nothing, which is one this side leaves exactly as sent.
+    /// See `overlay::AimCommand`.
+    std::int32_t object_id = 0;
+    float target_x = 0.0F;
+    float target_y = 0.0F;
 };
 
 /// The longest a single frame may claim to have taken.
@@ -143,6 +150,12 @@ class PlayerControl {
     /// touching anything the loop is still working on.
     void Bind(const game::Il2CppRuntime& game, const game::PlayerRoute& route) noexcept;
 
+    /// Hands the frame the walk to the other things standing in the map. IPC
+    /// thread, and separate from {@link Bind} because it can arrive later or
+    /// never: a build that does not give up its object tables leaves aiming
+    /// working on the runtime's own reckoning. See `game/MapObjects.h`.
+    void BindMapObjects(const game::MapObjectRoute& route) noexcept { map_objects_ = route; }
+
     /// Whether {@link Bind} has happened. Callable from either thread.
     [[nodiscard]] bool bound() const noexcept { return ready_.load(std::memory_order_acquire); }
 
@@ -199,8 +212,8 @@ class PlayerControl {
         if (!frame_aim_.wanted || now_ms >= frame_aim_.expires_at_ms) {
             return false;
         }
-        x = frame_aim_.x;
-        y = frame_aim_.y;
+        x = frame_aim_shown_x_;
+        y = frame_aim_shown_y_;
         return true;
     }
 
@@ -258,6 +271,15 @@ class PlayerControl {
     float frame_walk_y_ = 0.0F;
     AimTarget frame_aim_;
     std::uint64_t frame_aim_version_ = 0;
+    /// Where this frame actually pointed, once the client's own reading of the
+    /// enemy — if there was one — has shifted the record's point. See
+    /// {@link AimTargetNow}, and `game/MapObjects.h` for the shift.
+    float frame_aim_shown_x_ = 0.0F;
+    float frame_aim_shown_y_ = 0.0F;
+    /// The walk to the other things in the map. All-zero until it resolves, and
+    /// `FindMapObject` answers nothing for that — which is an aim left exactly
+    /// as the runtime sent it.
+    game::MapObjectRoute map_objects_{};
     /// Where the player was when the last frame acted, and what this module
     /// asked the game to add to it — the two together are what the next frame
     /// subtracts to be left with the walking they did themselves. False

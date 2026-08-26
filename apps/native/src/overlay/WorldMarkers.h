@@ -104,6 +104,7 @@ enum class RingRole : int {
     Body = 2,
     KeepAway = 3,
     Blast = 4,
+    Anchor = 5,
 };
 
 /// One shape on the ground, already projected.

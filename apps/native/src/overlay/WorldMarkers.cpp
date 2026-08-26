@@ -278,6 +278,15 @@ void DrawDodgeRings(const RingMark* marks, int count) {
             case RingRole::KeepAway:
                 list->AddCircle(centre, ring.radius, mark, 0, kStroke);
                 break;
+            case RingRole::Anchor:
+                // **The player's own colour, because it is their ground**: it
+                // is the one shape here they put on the map themselves, and
+                // what it means is "the character belongs on this spot".
+                // Filled, so a ring the size of a character is still a mark
+                // rather than an outline lost among the bodies.
+                list->AddCircleFilled(centre, ring.radius, Faded(line, kBodyFill));
+                list->AddCircle(centre, ring.radius, line, 0, kStroke);
+                break;
             case RingRole::Blast:
                 // **The one that is coloured by its own number**, for the same
                 // reason the shot trails are: green to red is how long there is

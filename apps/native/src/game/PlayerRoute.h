@@ -72,6 +72,13 @@ struct PlayerRoute {
     std::uint32_t y_at = 0;
 };
 
+/// The live world manager, or null when there is not one right now.
+///
+/// The first two hops of the walk, which is as far as anything that wants the
+/// map rather than the player needs to go. See `MapObjects.h`.
+[[nodiscard]] void* FindWorldManager(const Il2CppRuntime& game,
+                                     const PlayerRoute& route) noexcept;
+
 /// The live player object, or null when there is not one right now.
 ///
 /// Between realms, at the login screen and during a map rebuild there is no

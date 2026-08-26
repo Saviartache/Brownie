@@ -107,9 +107,32 @@ struct AimCommand {
     /// its own — otherwise the player would keep shooting at where something
     /// used to be.
     std::int32_t hold_ms = 0;
+    /// Which enemy the point was worked out against, or nought for none.
+    ///
+    /// **What lets this side correct the point the runtime could not.** Bullet
+    /// collision is the client's own, so a shot lands against where the *client*
+    /// has the monster — and the runtime only ever had a reconstruction of that,
+    /// rebuilt from packets and smoothed between server ticks. Naming the enemy
+    /// lets the frame look it up in the game's own tables and shift the aim by
+    /// however far the two disagree. See `game/MapObjects.h`.
+    std::int32_t object_id = 0;
+    /// Where the runtime believed that enemy was when it worked the point out.
+    ///
+    /// The point alone cannot be corrected: it is already a lead, and how far
+    /// ahead of the monster it sits is exactly what must survive the shift. The
+    /// difference between this and the client's own reading is the correction,
+    /// and it is applied to the point rather than replacing it.
+    std::int32_t target_x_hundredths = 0;
+    std::int32_t target_y_hundredths = 0;
 };
 
-/// Parses `aim|x|y|holdMs`, in hundredths of a tile and milliseconds.
+/// Parses `aim|x|y|holdMs` and the optional `|objectId|targetX|targetY` after
+/// it, in hundredths of a tile and milliseconds.
+///
+/// The three are read as one: a correction needs the enemy *and* where the
+/// runtime had it, so a record carrying some of them is read as carrying none
+/// rather than as a shift measured from nowhere. An older runtime stops after
+/// `holdMs`, which is the rule this file already follows for defence.
 [[nodiscard]] bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept;
 
 /// A line for the game to show over the player, and the colour to show it in.

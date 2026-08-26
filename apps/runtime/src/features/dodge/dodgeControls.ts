@@ -36,6 +36,13 @@ export type DodgeTuningHandles = {
 /** Everything the feature can be told, grouped by what it is about. */
 export interface DodgeControls {
   readonly preset: SettingHandle<DodgePresetChoice>;
+  /**
+   * Whether the player is holding a place, which a key is bound to.
+   *
+   * *Which* place is not here: it is captured where the plugin can see the
+   * character, and it dies with the map. See `dodgePlugin`.
+   */
+  readonly anchor: SettingHandle<boolean>;
   readonly tuning: DodgeTuningHandles;
   /** How long before a plan takes effect. A property of the link, not a style. */
   readonly leadMs: SettingHandle<number>;
@@ -124,6 +131,18 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
       [DodgePresetId.Cautious, 'Cautious — wide margins, takes the wheel sooner'],
       ['custom', 'Custom (your own numbers)'],
     ],
+  });
+
+  // **The one control here that is an action rather than a preference**, and
+  // the reason it is a setting at all: what a key moves is a boolean the host
+  // owns, so the switch a key presses and the switch a person clicks are the
+  // same one. Where the anchor *is* is the plugin's — see `dodgePlugin` — and
+  // deliberately not a setting: it is a place on a map, meaningless in the next
+  // one and worse than meaningless after a restart.
+  const anchor = settings.boolean('anchor', {
+    group: 'Anchor',
+    label: 'Hold the ground you are standing on',
+    default: false,
   });
 
   // ── What the preset writes ──────────────────────────────────────────────
@@ -488,6 +507,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
 
   return {
     preset,
+    anchor,
     tuning,
     leadMs,
     walls: { avoid: avoidWalls, clearanceTiles: wallClearanceTiles },

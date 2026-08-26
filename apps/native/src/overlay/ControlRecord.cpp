@@ -13,6 +13,7 @@ constexpr std::string_view kSyncBegin = "sync-begin";
 constexpr std::string_view kSyncEnd = "sync-end";
 constexpr std::string_view kPlugin = "plugin";
 constexpr std::string_view kSetting = "setting";
+constexpr std::string_view kBind = "bind";
 
 /// Field positions, counted from the kind. Named because a bare `fields[9]` in
 /// the middle of a parser is unreadable and the wire format is positional
@@ -28,6 +29,20 @@ enum PluginField : std::size_t {
     /// Everything up to the error. `enableable` was appended later, and a
     /// record without it describes a plugin this build can still draw.
     kPluginMinimumFields = 7,
+};
+
+enum BindField : std::size_t {
+    kBindPlugin = 1,
+    kBindMode = 2,
+    kBindKey = 3,
+    /// Which of the plugin's switches this key moves, and what to call it.
+    /// Appended, so a runtime that predates a plugin having more than one key
+    /// describes its only one as the switch it always was.
+    kBindSlot = 4,
+    kBindLabel = 5,
+    /// The first three, because a bind with a half missing is not one — and the
+    /// key being empty is a value rather than an absence.
+    kBindMinimumFields = 4,
 };
 
 enum SettingField : std::size_t {
@@ -56,6 +71,21 @@ enum SettingField : std::size_t {
 constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",
                                                "visuals", "utility",  "commands",
                                                "developer"};
+
+/// The plugin a record belongs to, or null when its own record never arrived.
+///
+/// A plugin's records follow it, so the last match is almost always it — but
+/// searching is what makes that an optimisation rather than an assumption about
+/// an ordering nothing enforces.
+[[nodiscard]] PluginRow* Owner(std::vector<PluginRow>& staging, std::string_view id) {
+    PluginRow* found = nullptr;
+    for (PluginRow& candidate : staging) {
+        if (candidate.id == id) {
+            found = &candidate;
+        }
+    }
+    return found;
+}
 
 /// Where a category sorts. An unrecognised one belongs to a runtime newer than
 /// this build, so it is filed after the known ones rather than dropped.
@@ -294,20 +324,34 @@ bool ControlMirror::Apply(std::string_view record) {
         return false;
     }
 
+    if (kind == kBind) {
+        if (fields.size() < kBindMinimumFields) {
+            return false;
+        }
+        PluginRow* plugin = Owner(staging_, fields[kBindPlugin]);
+        if (plugin == nullptr) {
+            return false;
+        }
+        // The record existing is what says a bind is on offer; what it holds is
+        // only what has been chosen so far, and an empty key is a plugin nobody
+        // has bound yet rather than one that cannot be.
+        BindRow bind;
+        bind.mode = fields[kBindMode];
+        bind.key = fields[kBindKey];
+        bind.slot = Field(fields, kBindSlot);
+        bind.label = Field(fields, kBindLabel);
+        // A runtime that named no label is one from before there could be two
+        // of these, so there is only ever one row to name.
+        if (bind.label.empty()) bind.label = "Hotkey";
+        plugin->binds.push_back(std::move(bind));
+        return false;
+    }
+
     if (kind == kSetting) {
         if (fields.size() < kSettingMinimumFields) {
             return false;
         }
-        // Settings follow their plugin, so the last one is almost always it —
-        // but searching is what makes that an optimisation rather than an
-        // assumption about an ordering nothing enforces.
-        const std::string& owner = fields[kSettingPlugin];
-        PluginRow* plugin = nullptr;
-        for (PluginRow& candidate : staging_) {
-            if (candidate.id == owner) {
-                plugin = &candidate;
-            }
-        }
+        PluginRow* plugin = Owner(staging_, fields[kSettingPlugin]);
         if (plugin == nullptr) {
             return false;
         }

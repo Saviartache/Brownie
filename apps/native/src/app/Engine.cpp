@@ -13,6 +13,7 @@
 #include "app/Inspection.h"
 #include "core/Clock.h"
 #include "core/Colour.h"
+#include "core/KeyChord.h"
 #include "game/FloatingText.h"
 #include "game/MapFields.h"
 #include "game/PlayerFields.h"
@@ -517,6 +518,12 @@ std::uint32_t Engine::PollBudgetMs(std::uint64_t now_ms) const noexcept {
         steer_held_.load(std::memory_order_relaxed)) {
         budget = std::min<std::uint64_t>(budget, kCursorPollMs);
     }
+    // And the same rule once more, for the keys somebody bound: a session with
+    // nothing bound never wakes for them, and one with a bind is answered
+    // within the time it takes to notice a press.
+    if (hotkeys_.watching()) {
+        budget = std::min(budget, hotkey_.Remaining(now_ms));
+    }
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(budget, kPollTimeoutMs));
 }
 
@@ -596,6 +603,12 @@ void Engine::Turn() {
     // round rather than for the timeout as well.
     HandlePendingActions();
 
+    // And the keys somebody bound, on the same argument: a press held back
+    // until the next read of the pipe is a press the player has already given
+    // up on.
+    WatchHotkeys();
+    PollHotkeys(NowMs());
+
     const auto polled = session_.Poll(PollBudgetMs(NowMs()));
     if (!polled.ok() && polled.error().code() != ErrorCode::kNotReady) {
         // The link is gone. The loop reconnects on its next turn; the runtime
@@ -651,6 +664,16 @@ void Engine::AdvanceSetup() {
             patches_.BindPlayer(*route);
             cosmetics_.BindPlayer(*route);
         }
+    }
+
+    // **Asked on every turn, and separately from the route above.** The object
+    // tables are two more fields and they resolve when they resolve; a build
+    // that never gives them up leaves aiming working on the runtime's own
+    // reckoning, which is where it stood before this existed. Re-published each
+    // time because it costs a copy of five numbers and the alternative is a
+    // second flag saying whether it has been done.
+    if (const auto objects = binding_.MapObjectRoute()) {
+        control_.BindMapObjects(*objects);
     }
 
     // Each is bound on its own, so a method that is never found leaves the
@@ -1095,6 +1118,55 @@ void Engine::PublishDodgeView() {
     actions_.Push(overlay::BuildAction(kDodgeViewAction, {wanted ? "1" : "0"}));
     sent_dodge_view_ = wanted;
     dodge_view_stated_ = true;
+}
+
+HotkeyWatch::Report Engine::HotkeyReporter() {
+    return [this](std::string_view plugin_id, std::string_view slot, std::string_view action,
+                  bool value) {
+        // Sent rather than queued, unlike an overlay interaction: this already
+        // runs on the thread the pipe belongs to, and a press held over to the
+        // next turn is a press the player has stopped waiting for.
+        (void)session_.SendHotkey(plugin_id, slot, action, value);
+    };
+}
+
+void Engine::WatchHotkeys() {
+    const std::uint64_t version = controls_.version();
+    if (version == watched_controls_version_) {
+        return;
+    }
+    watched_controls_version_ = version;
+
+    std::vector<HotkeyBind> binds;
+    for (const overlay::PluginRow& plugin : controls_.plugins()) {
+        for (const overlay::BindRow& row : plugin.binds) {
+            // A key this build has no name for parses to nothing, and an
+            // unbound chord is dropped by the watcher — so a runtime newer than
+            // this one asking for a key it has never heard of watches nothing
+            // rather than watching the wrong thing.
+            if (row.key.empty()) {
+                continue;
+            }
+            HotkeyBind bind;
+            bind.plugin_id = plugin.id;
+            bind.slot = row.slot;
+            bind.hold = row.mode == kHoldAction;
+            bind.chord = core::ParseChord(row.key);
+            binds.push_back(std::move(bind));
+        }
+    }
+    hotkeys_.Watch(std::move(binds), HotkeyReporter());
+}
+
+void Engine::PollHotkeys(std::uint64_t now_ms) {
+    if (!hotkeys_.watching() || !hotkey_.Due(now_ms)) {
+        return;
+    }
+    // A panel over the game takes the keys, so a player typing into one is not
+    // pressing a bind; a window of another application having focus means the
+    // same. Both read as every key being up, which is also what releases a hold
+    // the player let go of somewhere this module cannot see.
+    hotkeys_.Poll(!overlay_.visible() && GameHasFocus(), HotkeyReporter());
 }
 
 void Engine::DrawAim(std::uint64_t now_ms, const std::optional<FrameScreen>& screen) const {

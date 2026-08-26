@@ -38,6 +38,8 @@ export interface ObjectDefinition {
   readonly occupies: boolean;
   /** Whether one of these is part of the room rather than something that fights. */
   readonly isScenery: boolean;
+  /** Whether one of these is a portal of any kind — `<Class>Portal</Class>`. */
+  readonly isPortal: boolean;
   /** Whether one of these is a key-opened dungeon portal — `<DungeonPortal/>`. */
   readonly isDungeonPortal: boolean;
   /** How wide one of these is, in tiles. See {@link ObjectCatalog.bodyTiles}. */
@@ -156,6 +158,10 @@ export class GameObjectCatalog implements ObjectCatalog {
 
   isScenery(objectType: number): boolean {
     return this.#byType.get(objectType)?.isScenery ?? false;
+  }
+
+  isPortal(objectType: number): boolean {
+    return this.#byType.get(objectType)?.isPortal ?? false;
   }
 
   isDungeonPortal(objectType: number): boolean {
@@ -392,6 +398,9 @@ export async function readObjectDefinitions(
       // The game's own word for a thing that is part of the room, and the
       // absence of any shot to go with it. See {@link killsAsStructure}.
       isScenery: killsAsStructure(element) && projectiles.length === 0,
+      // `<Class>Portal</Class>` is every portal there is, the realm, guild and
+      // vault ones included. It is what answers "what am I standing on".
+      isPortal: objectClass === 'Portal',
       // `<DungeonPortal/>` is what a key opens — narrower than `<Class>Portal`,
       // which also covers realm, guild and event portals. Auto-portal wants only
       // the ones somebody pops a key for.

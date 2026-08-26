@@ -32,33 +32,6 @@ document — not either implementation — is the specification.
 something lives in the game's memory and proving it is what you think it is —
 read it before adding an offset, and again after a game patch.
 
-## Status
-
-Under construction. What is finished and green:
-
-- [x] Discovery pass over the reference implementation
-- [x] Architecture and layer boundaries
-- [x] Toolchain: TypeScript (strict), ESLint, Prettier, Vitest
-- [x] `packages/protocol` — framing, RC4, binary codecs, schema loader,
-      registry, decode/encode, 73 tests
-- [x] `packages/ipc` — frame header, framer, sequence guard, message codec,
-      handshake, overlay record codec, 71 tests
-- [x] `packages/plugin-api` — plugin contract, capability context, typed
-      settings, `MutablePacket`, 13 tests
-- [ ] `apps/runtime` — in progress: logging, transport with backpressure,
-      peer links, packet pipeline, proxy session, world/self state and the
-      state stage, plugin host with settings and commands, native link and
-      pipe server, proxy server, configuration, overlay control plane,
-      composition root, plugin discovery and hot reload, game-data catalogs,
-      projectile tracking — **it runs** (186 tests)
-- [ ] `apps/native` — in progress: build (Zig, sources discovered from disk),
-      `core/` (Result, RAII handles), `ipc/` (frame codec, frame reader,
-      cancellable pipe, handshake, flat JSON, session), self-check. Still to
-      come: engine lifecycle, IL2CPP layer with the self-healing offset table,
-      hooks, the ImGui overlay, one dodge planner.
-      The session is not covered by the self-check — it needs a live peer, so
-      the honest test for it is an end-to-end run against the Node runtime.
-
 ## Requirements
 
 | | |
@@ -237,7 +210,3 @@ packages/protocol/
 │   └── codec/            decode / encode
 └── test/
 ```
-
-## License
-
-See [LICENSE](LICENSE).

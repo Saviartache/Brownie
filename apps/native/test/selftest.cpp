@@ -18,10 +18,12 @@
 #include <utility>
 #include <vector>
 
+#include "app/HotkeyWatch.h"
 #include "app/Inspection.h"
 #include "app/PlayerControl.h"
 #include "core/Clock.h"
 #include "core/Colour.h"
+#include "core/KeyChord.h"
 #include "core/ModuleImage.h"
 #include "core/Result.h"
 #include "game/AimHook.h"
@@ -489,6 +491,25 @@ void AimRecordsAreReadStrictly() {
     Check(kept.hold_ms == 350, "and changes nothing");
     Check(!brownie::overlay::ParseAimRecord("move|1|2|600|350", kept), "a move is not an aim");
     Check(!brownie::overlay::ParseAimRecord("aim|1|2|0", kept), "no lifetime is refused");
+
+    // A record that stops after the lifetime is an older runtime, not a broken
+    // one: it names no enemy, and an aim that names none is one the frame
+    // points at exactly as sent.
+    Check(aim.object_id == 0, "a record without an enemy names none");
+
+    brownie::overlay::AimCommand led;
+    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25", led),
+          "an aim naming the enemy it leads parses");
+    Check(led.object_id == 8821, "with the object id");
+    Check(led.target_x_hundredths == 450 && led.target_y_hundredths == 25,
+          "and where the runtime had it, so the frame can shift the lead");
+
+    // Two of the three describe no shift at all — there is nothing to measure a
+    // correction against — so a half-written tail is read as no tail.
+    brownie::overlay::AimCommand partial;
+    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450", partial),
+          "a half-written tail still leaves a usable aim");
+    Check(partial.object_id == 0, "and is read as naming no enemy at all");
 }
 
 /// A text record carries its message whole, separators and all.
@@ -1091,6 +1112,265 @@ void MultiSelectIsReadAsAChecklist() {
     Check(row.value == "b", "with its chosen keys as the value");
     Check(row.options.size() == 2 && row.options[1].label == "B" && row.options[1].value == "b",
           "and every option to tick");
+}
+
+void AChordNamesAKeyByWhereItIsRatherThanByWhatItTypes() {
+    using brownie::core::FormatChord;
+    using brownie::core::KeyChord;
+    using brownie::core::ParseChord;
+
+    const KeyChord plain = ParseChord("F5");
+    Check(plain.bound() && plain.modifiers == 0, "a bare key is a chord");
+    Check(FormatChord(plain) == "F5", "and spells itself back");
+
+    const KeyChord chord = ParseChord("Ctrl+Shift+F");
+    Check(chord.bound() && chord.scan_code == ParseChord("F").scan_code,
+          "the key of a chord is the same key on its own");
+    Check(FormatChord(chord) == "Ctrl+Shift+F", "and the modifiers come back in one order");
+    Check(FormatChord(ParseChord("shift+ctrl+f")) == "Ctrl+Shift+F",
+          "however they were written, and in whatever case");
+
+    // The mouse buttons are the one thing here named by virtual key, because
+    // they are not on the keyboard and so have no scan code to name.
+    Check(FormatChord(ParseChord("Alt+Mouse5")) == "Alt+Mouse5", "a mouse button is bindable");
+    Check(!ParseChord("Mouse1").bound(), "the game's own shoot button is not");
+
+    // Refused whole rather than partly read: half a chord is a key nobody chose.
+    for (const char* text : {"", "Ctrl", "Ctrl+", "+F5", "F5+F6", "Wobble", "Escape"}) {
+        Check(!ParseChord(text).bound(), text[0] == '\0' ? "an empty chord is unbound" : text);
+    }
+    Check(FormatChord(KeyChord{}).empty(), "and an unbound chord has no spelling");
+}
+
+void ABindRecordIsWhatOffersAKey() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|auto-aim|Auto%20Aim|combat|0|loaded||1"), "a plugin");
+    Check(!mirror.Apply("bind|auto-aim|hold|Ctrl%2BF5"), "and the key bound to it");
+    Check(!mirror.Apply("plugin|chat-filter|Chat|utility|1|enabled||1"), "a plugin with no bind");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    const auto& plugins = mirror.plugins();
+    Check(plugins.size() == 2, "both are listed");
+    const auto& aim = plugins[0].id == "auto-aim" ? plugins[0] : plugins[1];
+    const auto& chat = plugins[0].id == "auto-aim" ? plugins[1] : plugins[0];
+    Check(aim.binds.size() == 1 && aim.binds[0].mode == "hold" && aim.binds[0].key == "Ctrl+F5",
+          "the bind arrives whole");
+    // A runtime from before a plugin could offer two keys names neither the
+    // slot nor the label, and its only key is the switch it always was.
+    Check(aim.binds[0].slot.empty() && aim.binds[0].label == "Hotkey",
+          "and one that names no slot is the plugin's own switch");
+    Check(chat.binds.empty(), "and a plugin the runtime offers no key for has none to draw");
+
+    // More than one, which is a plugin that is switched on for a run and told
+    // something inside it — see `auto-dodge` and its anchor.
+    brownie::overlay::ControlMirror two;
+    Check(!two.Apply("sync-begin"), "open");
+    Check(!two.Apply("plugin|auto-dodge|Auto%20Dodge|movement|1|enabled||1"), "a plugin");
+    Check(!two.Apply("bind|auto-dodge|toggle|F5||Hotkey"), "its switch");
+    Check(!two.Apply("bind|auto-dodge|hold|Mouse4|anchor|Anchor%20here"), "and its second key");
+    Check(two.Apply("sync-end"), "commits");
+    const auto& dodge = two.plugins().front();
+    Check(dodge.binds.size() == 2, "both keys are drawn");
+    Check(dodge.binds[1].slot == "anchor" && dodge.binds[1].label == "Anchor here",
+          "each under the name and slot the runtime gave it");
+
+    // The record existing is what says a key is on offer, so one that says too
+    // little says nothing at all rather than half a bind.
+    brownie::overlay::ControlMirror short_record;
+    Check(!short_record.Apply("sync-begin"), "open");
+    Check(!short_record.Apply("plugin|auto-aim|Auto%20Aim|combat|0|loaded||1"), "a plugin");
+    Check(!short_record.Apply("bind|auto-aim|hold"), "a bind missing its key");
+    Check(short_record.Apply("sync-end"), "commits");
+    Check(short_record.plugins().front().binds.empty(),
+          "which is refused rather than half-read");
+}
+
+/// A keyboard the self-check can press, since it has no real one to.
+struct FakeKeyboard {
+    std::vector<brownie::core::KeyChord> down;
+
+    [[nodiscard]] bool Held(const brownie::core::KeyChord& chord) const {
+        for (const brownie::core::KeyChord& pressed : down) {
+            if (pressed == chord) return true;
+        }
+        return false;
+    }
+
+    void Press(std::string_view key) { down.push_back(brownie::core::ParseChord(key)); }
+    void ReleaseAll() { down.clear(); }
+};
+
+/// Every edge a watch reported, as `plugin[.slot]:action:value`.
+struct HotkeyLog {
+    std::vector<std::string> events;
+
+    [[nodiscard]] brownie::app::HotkeyWatch::Report Sink() {
+        return [this](std::string_view id, std::string_view slot, std::string_view action,
+                      bool value) {
+            std::string line{id};
+            if (!slot.empty()) {
+                line.push_back('.');
+                line.append(slot);
+            }
+            line.push_back(':');
+            line.append(action);
+            line.append(value ? ":1" : ":0");
+            events.push_back(std::move(line));
+        };
+    }
+
+    [[nodiscard]] std::string Take() {
+        std::string joined;
+        for (const std::string& event : events) {
+            if (!joined.empty()) joined.push_back(' ');
+            joined.append(event);
+        }
+        events.clear();
+        return joined;
+    }
+};
+
+[[nodiscard]] brownie::app::HotkeyBind Bind(std::string plugin_id, bool hold, std::string_view key,
+                                            std::string slot = {}) {
+    brownie::app::HotkeyBind bind;
+    bind.plugin_id = std::move(plugin_id);
+    bind.slot = std::move(slot);
+    bind.hold = hold;
+    bind.chord = brownie::core::ParseChord(key);
+    return bind;
+}
+
+void AKeyIsReportedOnItsEdgeAndNeverOnItsState() {
+    FakeKeyboard keyboard;
+    HotkeyLog log;
+    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
+        return keyboard.Held(chord);
+    }};
+
+    watch.Watch({Bind("auto-aim", false, "F5")}, log.Sink());
+    Check(watch.watching(), "a bound key is watched");
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "a key nobody is pressing says nothing");
+
+    keyboard.Press("F5");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-aim:toggle:1", "the way down is the whole event");
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "holding it is not a second press");
+    keyboard.ReleaseAll();
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "and a toggle has no release to report");
+
+    // A key that is nothing to do with this one.
+    keyboard.Press("F6");
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "another key is another key");
+
+    // A bind with no key is not a bind, so nothing is watched for it.
+    watch.Watch({Bind("auto-aim", false, "")}, log.Sink());
+    Check(!watch.watching(), "an unbound plugin is not watched");
+}
+
+void ABindNeverFiresOnAKeyThatWasAlreadyDown() {
+    FakeKeyboard keyboard;
+    HotkeyLog log;
+    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
+        return keyboard.Held(chord);
+    }};
+
+    // The player is holding the key at the moment it becomes theirs — which is
+    // what rebinding to a key you are holding looks like, and what a runtime
+    // reconnecting mid-press looks like too.
+    keyboard.Press("F5");
+    watch.Watch({Bind("auto-aim", false, "F5")}, log.Sink());
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "a key already down when the bind appeared is not a press");
+
+    keyboard.ReleaseAll();
+    watch.Poll(true, log.Sink());
+    keyboard.Press("F5");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-aim:toggle:1", "and the next real press is");
+}
+
+void AHoldEndsWhateverStopsIt() {
+    FakeKeyboard keyboard;
+    HotkeyLog log;
+    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
+        return keyboard.Held(chord);
+    }};
+
+    watch.Watch({Bind("auto-dodge", true, "Mouse5")}, log.Sink());
+    keyboard.Press("Mouse5");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:1", "a hold begins on the way down");
+
+    // The player alt-tabbed, or opened a panel over the game. Every key reads
+    // as up, which is what ends a hold nobody can see the end of.
+    watch.Poll(false, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:0", "and ends when it stops being watchable");
+    watch.Poll(false, log.Sink());
+    Check(log.Take().empty(), "once, not on every turn after");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:1", "and begins again when they come back to it");
+
+    // A sync published for some other reason must not disturb a key that is
+    // still held: the runtime republishes its whole list whenever anything
+    // changes.
+    watch.Watch({Bind("auto-dodge", true, "Mouse5")}, log.Sink());
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "an unchanged bind is left exactly as it was");
+
+    // Rebinding while holding: the old key's hold has to end, and the new one
+    // must not begin from a press that was never aimed at it.
+    watch.Watch({Bind("auto-dodge", true, "Mouse4")}, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:0", "a rebind releases what the old key was holding");
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "and the new key starts from nothing");
+
+    // And a bind that goes away entirely — the plugin unloaded, or the runtime
+    // did — is the last chance anything has to say stop.
+    keyboard.ReleaseAll();
+    keyboard.Press("Mouse4");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:1", "the new key holds");
+    watch.Watch({}, log.Sink());
+    Check(log.Take() == "auto-dodge:hold:0", "and losing the bind releases it");
+    Check(!watch.watching(), "with nothing left to watch");
+}
+
+/// One plugin, two keys — its switch and something it is told mid-fight.
+///
+/// What identifies a bind is the plugin *and* the slot: keyed on the plugin
+/// alone, the second key would be carried over onto the first's edge state and
+/// one of them would be dropped from every sync.
+void TwoKeysOnOnePluginAreTwoBinds() {
+    FakeKeyboard keyboard;
+    HotkeyLog log;
+    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
+        return keyboard.Held(chord);
+    }};
+
+    watch.Watch({Bind("auto-dodge", false, "F5"), Bind("auto-dodge", true, "Mouse4", "anchor")},
+                log.Sink());
+    keyboard.Press("Mouse4");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-dodge.anchor:hold:1", "each key reports the slot it moves");
+
+    keyboard.Press("F5");
+    watch.Poll(true, log.Sink());
+    Check(log.Take() == "auto-dodge:toggle:1", "and the other one is untouched by it");
+
+    // A sync for some other reason: the hold on one slot survives it, exactly
+    // as it does for a plugin with a single key.
+    watch.Watch({Bind("auto-dodge", false, "F5"), Bind("auto-dodge", true, "Mouse4", "anchor")},
+                log.Sink());
+    watch.Poll(true, log.Sink());
+    Check(log.Take().empty(), "an unchanged pair is left exactly as it was");
+
+    watch.Watch({Bind("auto-dodge", false, "F5")}, log.Sink());
+    Check(log.Take() == "auto-dodge.anchor:hold:0", "and losing one slot releases only that one");
 }
 
 void ActionQueueHandsInteractionsOver() {
@@ -2285,6 +2565,12 @@ int main() {
     AControlRecordThatSaysTooLittleIsRefused();
     SelectOptionsAndVisibilityAreRead();
     MultiSelectIsReadAsAChecklist();
+    AChordNamesAKeyByWhereItIsRatherThanByWhatItTypes();
+    ABindRecordIsWhatOffersAKey();
+    AKeyIsReportedOnItsEdgeAndNeverOnItsState();
+    ABindNeverFiresOnAKeyThatWasAlreadyDown();
+    AHoldEndsWhateverStopsIt();
+    TwoKeysOnOnePluginAreTwoBinds();
     DodgePictureCommitsWholeSetsAndExpires();
     DodgePictureTakesShapesAndShotSizes();
     ActionQueueHandsInteractionsOver();

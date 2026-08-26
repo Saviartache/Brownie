@@ -50,6 +50,14 @@ export interface NativeLinkOptions {
 export interface NativeEvents {
   onControlAction(listener: (action: string) => void): Unsubscribe;
   onHotkey(listener: (event: HotkeyEventMessage) => void): Unsubscribe;
+  /**
+   * The module going away, however it went — closed, timed out, or refused.
+   *
+   * Only ever after an {@link NativeApi.onConnected}: a connection that never
+   * authenticated was never a peer, and a disconnect with no connect behind it
+   * would be an event nothing can act on.
+   */
+  onDisconnected(listener: (reason: string) => void): Unsubscribe;
   onTelemetry(listener: (telemetry: PlayerTelemetryMessage) => void): Unsubscribe;
   onOffsetHealth(listener: (health: OffsetHealthMessage) => void): Unsubscribe;
 }
@@ -110,6 +118,7 @@ export class NativeLink implements NativeApi, NativeEvents {
   readonly #features = new Map<string, boolean | number | string>();
 
   readonly #connectedListeners = new Set<() => void>();
+  readonly #disconnectedListeners = new Set<(reason: string) => void>();
   readonly #actionListeners = new Set<(action: string) => void>();
   readonly #hotkeyListeners = new Set<(event: HotkeyEventMessage) => void>();
   readonly #telemetryListeners = new Set<(telemetry: PlayerTelemetryMessage) => void>();
@@ -172,6 +181,7 @@ export class NativeLink implements NativeApi, NativeEvents {
   disconnect(reason: string): void {
     const transport = this.#transport;
     if (transport === undefined) return;
+    const wasAuthenticated = this.#authenticated;
 
     this.#transport = undefined;
     this.#authenticated = false;
@@ -183,6 +193,11 @@ export class NativeLink implements NativeApi, NativeEvents {
     this.#discardPending();
     transport.close();
     this.#log.info(`native link closed: ${reason}`);
+    // Last, and after the state is already down: a listener may act on the link
+    // — a hold to release, a claim to drop — and must not find it half-closed.
+    if (wasAuthenticated) {
+      for (const listener of this.#disconnectedListeners) listener(reason);
+    }
   }
 
   #discardPending(): void {
@@ -215,6 +230,10 @@ export class NativeLink implements NativeApi, NativeEvents {
 
   onHotkey(listener: (event: HotkeyEventMessage) => void): Unsubscribe {
     return subscribe(this.#hotkeyListeners, listener);
+  }
+
+  onDisconnected(listener: (reason: string) => void): Unsubscribe {
+    return subscribe(this.#disconnectedListeners, listener);
   }
 
   onTelemetry(listener: (telemetry: PlayerTelemetryMessage) => void): Unsubscribe {

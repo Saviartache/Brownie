@@ -228,6 +228,7 @@ against:
 | `shot.hitsWall`          | `bool GJFKGLJEGKO(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `shot.tileBlocks`        | `bool IACODGNOFMH(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `map.walkable.<name>`    | every `bool(float, float)` on the world manager       | player noclip, through `PlayerNoclip` |
+| `world.objects` / `world.objects.alt` | the world manager's two `Dictionary<int, MapObject>` fields | auto-aim, through `MapObjects` — where the *client* has a monster, which is what a shot is tested against |
 | `ui.MapObjectUIManager.ShowFloatingText` | `void ShowFloatingText(kind, string, …)` | floating text, through `FloatingText` |
 | `ui.MapObjectUIManager.ShowFloatingText.number` | `void ShowFloatingText(kind, int, …)` | the same, read for the style the game draws with |
 

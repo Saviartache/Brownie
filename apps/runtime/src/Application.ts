@@ -22,7 +22,9 @@ import { createColliderPlugin } from './features/collider/colliderPlugin.js';
 import { createDodgePlugin } from './features/dodge/dodgePlugin.js';
 import { SteerTracker } from './features/dodge/SteerIntent.js';
 import { createGlowPlugin } from './features/glow/glowPlugin.js';
+import { createHazardGuardPlugin } from './features/hazardguard/hazardGuardPlugin.js';
 import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
+import { createPortalEntryPlugin } from './features/portalentry/portalEntryPlugin.js';
 import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
@@ -47,6 +49,7 @@ import type { WorldState } from './state/WorldState.js';
 import { CommandStage } from './pipeline/stages/CommandStage.js';
 import { PluginStage } from './pipeline/stages/PluginStage.js';
 import { PluginHost } from './plugins/PluginHost.js';
+import { PluginHotkeys } from './plugins/PluginHotkeys.js';
 import { PluginLoader } from './plugins/PluginLoader.js';
 import { PreferencesFile } from './plugins/PreferencesFile.js';
 import { BlastRadiusTable } from './state/blasts/BlastRadiusTable.js';
@@ -187,6 +190,7 @@ export class Application {
   /** Undefined when this run was not given a path to remember anything in. */
   readonly #preferences: PreferencesFile | undefined;
   readonly #overlay: OverlayControlPlane;
+  readonly #hotkeys: PluginHotkeys;
   readonly #loader: PluginLoader;
   readonly #proxy: ProxyServer;
   readonly #targets: AllowlistTargets;
@@ -394,6 +398,7 @@ export class Application {
           isQuest: (type) => this.#objects.isQuest(type),
           occupies: (type) => this.#objects.occupies(type),
           isScenery: (type) => this.#objects.isScenery(type),
+          isPortal: (type) => this.#objects.isPortal(type),
           isDungeonPortal: (type) => this.#objects.isDungeonPortal(type),
           dungeonPortals: () => this.#objects.dungeonPortals(),
           bodyTiles: (type) => this.#objects.bodyTiles(type),
@@ -462,6 +467,14 @@ export class Application {
       log: this.#log,
     });
     overlayHolder.plane = this.#overlay;
+
+    // The other half of the overlay's plugin list: it publishes what is bound,
+    // and this applies what the module saw somebody press.
+    this.#hotkeys = new PluginHotkeys({
+      host: this.#plugins,
+      native: this.#native,
+      log: this.#log,
+    });
 
     this.#loader = new PluginLoader({
       host: this.#plugins,
@@ -708,9 +721,21 @@ export class Application {
     this.#plugins.load(
       createAutoAimPlugin({
         output: {
-          aimAt: (x, y, holdMs) => {
+          // The enemy and where we had it ride along with the point, because
+          // only the module can see where the *client* has that enemy — and a
+          // shot is tested against the client's copy, not ours. It shifts the
+          // point by the difference; see `game/MapObjects.h`.
+          aimAt: (x, y, holdMs, subject) => {
             this.#native.publishRecord(
-              ['aim', Math.round(x * 100), Math.round(y * 100), Math.round(holdMs)].join('|'),
+              [
+                'aim',
+                Math.round(x * 100),
+                Math.round(y * 100),
+                Math.round(holdMs),
+                subject.objectId,
+                Math.round(subject.x * 100),
+                Math.round(subject.y * 100),
+              ].join('|'),
             );
           },
         },
@@ -809,6 +834,26 @@ export class Application {
     // handed over. Built here rather than dropped in `plugins/` because what it
     // claims — and what expiry puts back — is worth having tests for.
     this.#plugins.load(createColliderPlugin());
+
+    // The collider's neighbour on the protocol side: that one withholds the
+    // acknowledgement an area effect needs, this one withholds the
+    // acknowledgement damaging ground needs. Built here rather than dropped in
+    // `plugins/` because which packet it refuses, and why that one works where
+    // others did not, is worth having a test for.
+    // Handed the same floating text noclip takes, and for the same reason: what
+    // it withholds is on a clock — the server drops the connection after about
+    // ten seconds of a character standing in damaging ground saying nothing —
+    // so how much of that clock is left has to be readable without looking away
+    // from the fight.
+    this.#plugins.load(
+      createHazardGuardPlugin({
+        showText: (text, colour) => {
+          this.#native.publishRecord(
+            ['text', colour.red, colour.green, colour.blue, text].join('|'),
+          );
+        },
+      }),
+    );
 
     // Movement too, but by rewriting the stream rather than by writing into the
     // game. It is built here for the one reason auto-aim and anti-lag are:
@@ -915,10 +960,21 @@ export class Application {
     // asking and going somewhere the player did not mean.
     this.#plugins.load(createServerSwitchPlugin());
 
+    // `/enter` has to know a portal from a loot bag lying on the same square,
+    // and nothing on the wire says which is which — so, like auto-portal, it is
+    // built here where the game's own object data lives.
+    this.#plugins.load(
+      createPortalEntryPlugin({
+        isPortal: (objectType) => this.#objects.isPortal(objectType),
+        displayName: (objectType) => this.#objects.displayName(objectType),
+      }),
+    );
+
     for (const plugin of this.#startupPlugins) this.#plugins.load(plugin);
     await this.#loader.loadAll();
     this.#loader.watch();
     this.#overlay.start();
+    this.#hotkeys.start();
 
     if (this.#pipe !== undefined) {
       try {
@@ -1119,6 +1175,9 @@ export class Application {
     await this.#proxy.close();
     this.#loader.stop();
     this.#overlay.stop();
+    // Before the plugins go: a held key is an override, and letting it end here
+    // is what keeps the switch it borrowed from being persisted as a choice.
+    this.#hotkeys.stop();
     this.#plugins.disposeAll();
     // After disposal, so a plugin that writes a setting on its way out is still
     // captured, and before the pipe closes, so a failure to save is reportable.

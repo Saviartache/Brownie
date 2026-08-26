@@ -25,6 +25,92 @@ export interface PluginMeta {
   readonly version?: string;
   /** Start enabled the first time this plugin is ever seen. Default false. */
   readonly enabledByDefault?: boolean;
+  /**
+   * Offer a key that switches this plugin on and off. Default false.
+   *
+   * A property of the plugin rather than of every plugin, because a bind is
+   * only worth having where switching mid-fight is the point — dodging,
+   * aiming, walking through a wall. A chat filter is switched on once and left
+   * there, and a control for binding one would be a row in the overlay that
+   * answers a question nobody asked.
+   *
+   * `true` binds the plugin's own switch, which is what "on" means for almost
+   * every plugin. **A string names a boolean setting to bind instead**, for the
+   * plugin whose switch is not the thing a player turns on and off: a plugin
+   * cannot observe its own switch moving, so one that has to *undo* something
+   * when it stops — noclip lets go of the client's uplink — carries its own
+   * armed/disarmed setting, and that is what a key has to move.
+   *
+   * **A list offers more than one key**, for the plugin where switching it on
+   * and telling it something mid-fight are two different presses: auto-dodge is
+   * switched on for a run and told where to hold ground a dozen times inside
+   * one. Each entry is one row in the overlay and one key of its own — see
+   * {@link PluginBindable}.
+   *
+   * The plugin declares nothing else and hears nothing about the key itself.
+   * See `apps/runtime/src/plugins/pluginBind.ts`.
+   */
+  readonly bindable?: boolean | string | readonly PluginBindable[];
+}
+
+/**
+ * One switch a key can be bound to.
+ *
+ * **What a key moves is always a boolean the host owns**, which is what keeps
+ * the whole mechanism out of the plugin: a press flips the plugin's switch or a
+ * setting it declared, and the plugin sees only the value it already had a
+ * handle on.
+ */
+export interface PluginBindable {
+  /**
+   * The boolean setting a key moves, or the plugin's own switch when absent.
+   *
+   * It is also the *slot* this bind is filed under — persisted, published to the
+   * overlay and reported back by the module under this name — so it is as much
+   * a part of the plugin's identity as its id, and renaming one loses the key
+   * the user chose.
+   */
+  readonly setting?: string;
+  /**
+   * What the overlay calls this key.
+   *
+   * Worth stating only where there is more than one: a plugin with a single
+   * bind has a row that can only mean one thing, and {@link bindLabel} names it
+   * for what it is.
+   */
+  readonly label?: string;
+}
+
+/** The plugin's own switch, as a slot. Empty because it is not a setting. */
+export const SWITCH_SLOT = '';
+
+/** The default name of a bind that did not choose one. */
+const DEFAULT_BIND_LABEL = 'Hotkey';
+
+/**
+ * Every key a plugin offers, in the order it declared them.
+ *
+ * Empty for a plugin that offers none, which is most of them. The three
+ * spellings of {@link PluginMeta.bindable} collapse to this one shape here, so
+ * that nothing downstream has to know there were three.
+ */
+export function bindTargets(meta: PluginMeta): readonly PluginBindable[] {
+  const bindable = meta.bindable;
+  if (bindable === true) return [{}];
+  if (typeof bindable === 'string') return [{ setting: bindable }];
+  // The list, or nothing at all: what is left here is `false`, `undefined` or
+  // the array itself, and only one of the three is an object.
+  return typeof bindable === 'object' ? bindable : [];
+}
+
+/** Which of a plugin's binds this is. See {@link PluginBindable.setting}. */
+export function bindSlot(target: PluginBindable): string {
+  return target.setting ?? SWITCH_SLOT;
+}
+
+/** What to call it on a panel. */
+export function bindLabel(target: PluginBindable): string {
+  return target.label ?? DEFAULT_BIND_LABEL;
 }
 
 /**
@@ -88,6 +174,18 @@ export function definePlugin(plugin: Plugin): Plugin {
   }
   if (typeof plugin.setup !== 'function') {
     throw new TypeError(`plugin "${meta.id}" has no setup function`);
+  }
+  // Two binds on one slot would be two rows in the overlay writing one stored
+  // key, and one press moving whichever of them the host happened to keep.
+  const slots = new Set<string>();
+  for (const target of bindTargets(meta)) {
+    const slot = bindSlot(target);
+    if (slots.has(slot)) {
+      throw new TypeError(
+        `plugin "${meta.id}" offers two keys for ${slot === SWITCH_SLOT ? 'its own switch' : `"${slot}"`}`,
+      );
+    }
+    slots.add(slot);
   }
   return plugin;
 }

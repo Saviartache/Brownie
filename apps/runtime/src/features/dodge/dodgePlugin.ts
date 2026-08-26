@@ -25,6 +25,13 @@
  * untouched. Only when their course is genuinely about to cost them does it
  * speak, and then it speaks continuously until it does not have to.
  *
+ * **A key can name the ground it holds them to**, which is the one thing here
+ * the planner cannot work out for itself: where a person means to be standing
+ * is a decision about a fight, not about the shots in the air. The switch is a
+ * setting so that a key and a click move the same thing; the *place* is held
+ * here, because it is a point on a map and belongs to neither the panel nor the
+ * file the panel persists to. See {@link DodgeSituation.anchor}.
+ *
  * **It plans on its own clock, and again the moment a shot is announced.** What
  * makes a shot worth dodging is time passing, not a packet arriving: a bullet
  * 500 ms away is outside the window and the same bullet 300 ms later is inside
@@ -39,7 +46,13 @@
  * naming somebody else. It is off by default and it costs a bystander.
  */
 
-import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
+import {
+  PluginCategory,
+  definePlugin,
+  type Plugin,
+  type Position,
+  type SessionView,
+} from '@brownie/plugin-api';
 import { DodgePlanner } from './DodgePlanner.js';
 import { DodgePictureFeed } from './DodgePictureFeed.js';
 import { DodgeScene } from './DodgeScene.js';
@@ -94,6 +107,12 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       name: 'Auto Dodge',
       category: PluginCategory.Movement,
       description: 'Keeps your own walking, and takes the wheel when it would cost you.',
+      // **Two keys, because switching it on and telling it something are two
+      // different presses.** The switch is set once for a run; the anchor is a
+      // thing a person says a dozen times inside one fight — stand here, hold
+      // this doorway — and it is worth a key of its own for exactly the reason
+      // the switch is: reaching for a panel mid-fight is not an option.
+      bindable: [{ label: 'Hotkey' }, { setting: 'anchor', label: 'Anchor here' }],
     },
 
     setup(context) {
@@ -107,6 +126,53 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       const picture = new DodgePictureFeed(inputs.output, inputs.view);
 
       let lastPlanAtMs = 0;
+      /**
+       * The place the player is holding, or nothing while they are not.
+       *
+       * **Here rather than in a setting, and it is a place rather than a
+       * distance.** A setting survives a restart and travels to a panel, and
+       * neither is true of a point on a map: the coordinates mean something
+       * else in the next dungeon and nothing at all after a reconnect. What
+       * *is* a setting is the switch — see `dodgeControls.anchor` — and this is
+       * where it points.
+       *
+       * **Captured on the first plan after the switch goes up rather than the
+       * moment it does**, because that is where the character is known to be: a
+       * key can be pressed while nothing is connected, and a place taken from a
+       * session that does not exist is not a place.
+       */
+      let anchor: Position | undefined;
+
+      // **A switch that outlived its place, which is what every restart leaves
+      // behind.** The setting persists as every setting does and the place
+      // cannot, so a run that starts armed is a panel claiming the character is
+      // being held somewhere nobody chose. Cleared rather than honoured: the
+      // only other reading is pinning them wherever they happen to log in.
+      controls.anchor.set(false);
+
+      /**
+       * Lets go of the place, and of the switch that named it.
+       *
+       * Both, because the switch is what a person reads: an armed switch
+       * pointing at nothing is a panel saying the character is being held
+       * somewhere they are not. Called wherever the coordinates stop meaning
+       * anything — a new map, a new session — and when the feature stops.
+       */
+      const dropAnchor = (): void => {
+        anchor = undefined;
+        controls.anchor.set(false);
+      };
+
+      // Cleared on both edges: switched off there is nothing to hold, and
+      // switched on the place is wherever the character turns out to be on the
+      // next plan. Pressing the key twice is therefore how a held place is
+      // moved, which is the only other thing anybody wants to do with one.
+      context.onDispose(
+        controls.anchor.onChange(() => {
+          anchor = undefined;
+        }),
+      );
+
       /**
        * Whether the module is currently being told where to walk.
        *
@@ -124,14 +190,23 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         scene.reset();
         picture.reset();
         commanding = false;
+        dropAnchor();
       });
       // A new connection is a new character in a new place; what the last one
       // had committed to says nothing about this one — and an object id from the
       // last map names something else in this one, so a track kept across the
-      // join is a velocity attributed to a stranger.
+      // join is a velocity attributed to a stranger. The place the player was
+      // holding is the same kind of stranger: the same two numbers name
+      // somewhere else entirely.
       context.sessions.onConnected(() => {
         planner.reset();
         scene.reset();
+        dropAnchor();
+      });
+      // And a map changes underneath a session that never disconnected, which
+      // is what a portal is. Coordinates do not survive one.
+      context.packets.on('MAPINFO', () => {
+        dropAnchor();
       });
 
       /**
@@ -184,6 +259,14 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       };
 
       const dodge = (session: SessionView, nowMs: number): void => {
+        // **Before the chord, so that a key pressed during one still names the
+        // place it was pressed at.** The switch is armed and there is nowhere
+        // held yet, which happens once per press and never again until the next
+        // one.
+        if (anchor === undefined && controls.anchor.get()) {
+          anchor = { x: session.self.x, y: session.self.y };
+        }
+
         // Before anything else, including the check for shots: being stuck is
         // not a thing that happens only under fire, and a player asking to be
         // moved is answered whether or not the planner had an opinion.
@@ -207,6 +290,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             gameTimeMs: map.gameTimeMs,
             nowMs,
             onDamagingGround: scene.onDamagingGround,
+            anchor,
           },
           planning,
           scene.world,
@@ -276,7 +360,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const session = context.sessions.current();
         if (session === undefined) return;
         planNow(session);
-        picture.publish(session, scene, controls, Date.now());
+        picture.publish(session, scene, controls, Date.now(), anchor);
       }, PLAN_INTERVAL_MS);
 
       // The one packet that changes the answer by arriving. Everything else a

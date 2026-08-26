@@ -109,6 +109,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
       name: 'Auto Loot',
       category: PluginCategory.Items,
       description: 'Takes what you asked for out of the bag you are standing on.',
+      bindable: true,
     },
 
     setup(context) {

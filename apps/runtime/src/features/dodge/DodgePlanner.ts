@@ -24,6 +24,14 @@
  * are the same idea — a place the plan is trying to give back — and which one it
  * is depends only on whether they are pressing anything.
  *
+ * **Or a place they named, which is the same idea again and the only one they
+ * can state outright.** A key sets it, and it then stands as their ground until
+ * they clear it: held harder, never guessed at, never quietly abandoned. What
+ * it is *not* is a destination the planner drives to — it is a term in the same
+ * cost function as everything else, so the way back is chosen by the same
+ * arithmetic that refuses to cross a shot, walk into a pool or finish inside a
+ * monster. See {@link DodgeSituation.anchor}.
+ *
  * **Two questions, not one, and confusing them is the difference between a
  * dodge and a leash.** Whether to speak at all is settled by probing the course
  * the player is already on: a shot that will not touch it inside the reaction
@@ -36,8 +44,14 @@
  * no path drawing, nothing about weapon range. Folding a destination in is how
  * the reference implementation ended up with a nine-hundred-line arbiter and a
  * mode-hysteresis timer. This decides one thing.
+ *
+ * A named anchor is not the exception it looks like: it moves *where their
+ * ground is* and adds no mode, no arbiter and no second way of deciding. The
+ * planner cannot tell it from the ground a dodge remembered, and that is the
+ * whole of why it costs the feature nothing.
  */
 
+import type { Position } from '@brownie/plugin-api';
 import { Blasts, type BlastView } from './Blasts.js';
 import { DodgeSearch, type DodgeGround, type DodgeRoute } from './DodgeSearch.js';
 import { MAX_HOP_TILES, chooseHop } from './Hop.js';
@@ -194,6 +208,23 @@ export interface DodgeSituation {
    * a pool.
    */
   readonly onDamagingGround: boolean;
+  /**
+   * A place the player named to hold, or nothing while they have not.
+   *
+   * **The ground a dodge remembers is a guess about what the player wanted;
+   * this is not one.** So it is held on none of the terms that one is — it does
+   * not follow them, it is not walked out from under a monster, it does not go
+   * stale, and no distance drops it — and it is held harder, because the whole
+   * point of naming a place is that leaving it costs something. See
+   * {@link DodgePlanner} and `dodgePlugin`, which is where a key sets one.
+   *
+   * **It is a pull and not a destination**, which is what makes it safe: every
+   * other term of the cost model still applies, so the route home goes round
+   * the fire rather than through it, stops short of a monster standing on the
+   * place, and never walks into a pool to reach it. Standing a tile off a
+   * crowded anchor is the arithmetic working, not failing.
+   */
+  readonly anchor?: Position | undefined;
 }
 
 export interface DodgePlan {
@@ -295,6 +326,38 @@ const ANCHOR_FRESH_MS = 500;
  * walk, past which the new ground is simply adopted.
  */
 const ANCHOR_REACH_TILES = 4;
+
+/**
+ * How much harder a place the player named is held than ground a dodge
+ * happened to take them off, as a multiple of `holdGroundWeight`.
+ *
+ * **It buys the walk home, and it cannot buy anything else.** A step that ends
+ * short of comfortable is charged on the ground it *left* rather than the
+ * ground it reached — see `StepCost` — so no anchor weight whatever can pay for
+ * a tight step, and raising this only makes the planner willing to spend more
+ * *travel* on getting back. That is exactly what a named place is for: the
+ * default pull is sized for a sidestep and a return of about a tile, and a
+ * character shoved five tiles off a spot they chose has to want the walk back
+ * more than it wants to stand still. Still an order of magnitude under
+ * {@link RISK_PER_TILE}, which is what keeps the way home going round the fire.
+ */
+const PINNED_ANCHOR_SCALE = 3;
+
+/**
+ * And the most it may come to, whatever the pull is set to.
+ *
+ * **The same ceiling the panel already allows by hand**, which is what makes it
+ * safe by construction rather than by argument: a pull of this size is one the
+ * cost model was tuned against, and multiplying a number somebody set to its
+ * maximum would take the anchor term into the range where the whole spread of
+ * it across a horizon starts to approach the price of a hit. Nothing may buy a
+ * hit — see {@link HIT_PER_STEP} — and the way to keep that true is not to let
+ * a multiplier out of the range the terms were measured in.
+ *
+ * It binds only at pulls well above every preset, so what a person actually
+ * sees is the anchor held three times as hard as their setting asks.
+ */
+const MAX_PINNED_ANCHOR = 2;
 
 /**
  * How near the held ground counts as being back on it, in tiles.
@@ -403,11 +466,25 @@ export class DodgePlanner {
    * "I moved you" and "you are back" is a sidestep with a return in it. While
    * nothing is held the anchor simply follows the character, which is what makes
    * every plan measure interference from where they actually are.
+   *
+   * **A place the player named overrides all of it** while there is one — see
+   * {@link DodgeSituation.anchor} and {@link #pinned} — because none of the
+   * caution above is about that case: it exists to stop the planner inventing
+   * ground to hold, and a key press is not an invention.
    */
   #anchorX = 0;
   #anchorY = 0;
   #anchorHeld = false;
   #anchorAtMs = 0;
+  /**
+   * Whether the last plan was holding a place the player named rather than one
+   * a dodge remembered.
+   *
+   * Kept so the two can hand over cleanly: what one of them was holding is not
+   * the other's to hold, and carrying it across is a planner walking somebody
+   * back to a place nothing is aiming for any more.
+   */
+  #pinned = false;
 
   /** Rewritten in place: a plan happens fifty times a second. */
   readonly #weights: { -readonly [K in keyof StepWeights]: StepWeights[K] } = {
@@ -460,6 +537,7 @@ export class DodgePlanner {
     this.#hoppedAtMs = 0;
     this.#anchorHeld = false;
     this.#anchorAtMs = 0;
+    this.#pinned = false;
   }
 
   /**
@@ -565,10 +643,15 @@ export class DodgePlanner {
 
     // **Nought while standing in it**, because the anchor is the ground the
     // player is on and that ground is what is hurting them. Leaving is then the
-    // only thing worth wanting, and the hazard term is what says so.
+    // only thing worth wanting, and the hazard term is what says so. A place the
+    // player named is no exception: it is a place to come back to, and coming
+    // back to it starts with not being in a pool.
+    const pull = Math.max(0, settings.holdGroundWeight);
     this.#weights.anchorPerTile = situation.onDamagingGround
       ? 0
-      : Math.max(0, settings.holdGroundWeight);
+      : this.#pinned
+        ? Math.min(pull * PINNED_ANCHOR_SCALE, MAX_PINNED_ANCHOR)
+        : pull;
     this.#weights.safeClearanceTiles = settings.safeClearanceTiles;
     this.#weights.hazardClearTiles = Math.max(0, settings.hazardClearTiles);
 
@@ -648,6 +731,19 @@ export class DodgePlanner {
    * spreads over it, and returning is then walking back into the thing that
    * moved them in the first place.
    *
+   * **None of which applies to a place the player named.** Every rule above is
+   * a guess about what ground they wanted, and a guess is exactly what a key
+   * press is not — so a pinned anchor does not follow them, is not walked out
+   * from under anything, does not go stale and is not dropped for being far
+   * away. What is still true of it is everything in the cost model: it is a
+   * pull, so the route to it goes round the fire, stops short of a body
+   * standing on it, and never crosses a pool to reach it.
+   *
+   * **The one thing that overrides it is the player walking**, which is a more
+   * recent statement of where they want to be than the key was. It suspends the
+   * pull rather than dropping it: the moment they let go, the way back is the
+   * plan again.
+   *
    * @returns how far off the held ground the character is, in tiles.
    */
   #aimAnchor(
@@ -658,6 +754,21 @@ export class DodgePlanner {
     headings: number,
     ticks: number,
   ): number {
+    const pin = steering ? undefined : situation.anchor;
+    if ((pin !== undefined) !== this.#pinned) {
+      // Changing hands. What the other kind of anchor was holding is not this
+      // one's to hold — most of all when a pin is dropped, where the ground it
+      // named must not become ground a dodge goes on returning to.
+      this.#pinned = pin !== undefined;
+      this.#anchorHeld = false;
+    }
+    if (pin !== undefined) {
+      this.#anchorX = pin.x;
+      this.#anchorY = pin.y;
+      this.#anchorAtMs = situation.nowMs;
+      return Math.hypot(situation.x - pin.x, situation.y - pin.y);
+    }
+
     if (this.#anchorHeld) {
       const stale = situation.nowMs - this.#anchorAtMs > ANCHOR_FRESH_MS;
       this.#anchorAtMs = situation.nowMs;

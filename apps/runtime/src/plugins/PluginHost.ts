@@ -1,5 +1,8 @@
 import {
   PluginState,
+  SWITCH_SLOT,
+  bindSlot,
+  bindTargets,
   type CommandApi,
   type CommandDefinition,
   type MutablePacket,
@@ -16,6 +19,7 @@ import {
   type Unsubscribe,
 } from '@brownie/plugin-api';
 import { toError, type Logger } from '../core/logging/Logger.js';
+import { normaliseBind } from './pluginBind.js';
 import { MEMORY_ONLY_STORE, type PluginStore } from './PluginStore.js';
 import { SettingsRegistry } from './SettingsRegistry.js';
 
@@ -69,6 +73,17 @@ interface LoadedPlugin {
   readonly commands: Set<string>;
   state: PluginState;
   enabled: boolean;
+  /**
+   * The key bound to each switch this plugin offers, canonically spelled, by
+   * the slot it moves.
+   *
+   * Beside the switch rather than among the settings, for the reason
+   * `PluginStore` gives about the switch itself: it is never declared, has no
+   * descriptor to validate against, and belongs to the host. A slot the plugin
+   * did not declare is absent, which is what makes an unknown one refusable
+   * rather than a key that moves nothing.
+   */
+  readonly binds: Map<string, string>;
   handlerErrors: number;
   error?: string;
   /**
@@ -173,6 +188,15 @@ export class PluginHost {
       commands: new Set(),
       state: PluginState.Discovered,
       enabled: false,
+      // Restored rather than set, so nothing is written back on every start —
+      // and refused rather than repaired, so a hand-edited file leaves the
+      // plugin unbound instead of bound to something nobody chose.
+      binds: new Map(
+        bindTargets(plugin.meta).map((target) => {
+          const slot = bindSlot(target);
+          return [slot, normaliseBind(this.#store.readBind(id, slot) ?? '') ?? ''];
+        }),
+      ),
       handlerErrors: 0,
       setupFailed: false,
     };
@@ -251,6 +275,79 @@ export class PluginHost {
 
   isEnabled(pluginId: string): boolean {
     return this.#plugins.get(pluginId)?.enabled ?? false;
+  }
+
+  /** The key bound to one of a plugin's switches, or empty when there is none. */
+  bindOf(pluginId: string, slot: string): string {
+    return this.#plugins.get(pluginId)?.binds.get(slot) ?? '';
+  }
+
+  /**
+   * Binds a key to one of a plugin's switches, or clears it with an empty
+   * value.
+   *
+   * @returns false when there is no such plugin, when it offers no key for that
+   *   slot, or when the value is not a bind this build understands. Refusing
+   *   rather than repairing: the bind it already has is one the user chose, and
+   *   replacing it with a guess is worse than ignoring the write.
+   */
+  setBind(pluginId: string, slot: string, raw: string): boolean {
+    const entry = this.#plugins.get(pluginId);
+    if (entry === undefined || !entry.binds.has(slot)) return false;
+
+    const bind = normaliseBind(raw);
+    if (bind === undefined) return false;
+    if (entry.binds.get(slot) === bind) return true;
+
+    entry.binds.set(slot, bind);
+    this.#store.writeBind(pluginId, slot, bind);
+    this.#log.info(
+      `plugin "${pluginId}"${slot === SWITCH_SLOT ? '' : ` (${slot})`} ${
+        bind === '' ? 'unbound' : `bound to ${bind}`
+      }`,
+    );
+    this.#onChanged();
+    return true;
+  }
+
+  /**
+   * Whether the switch a key moves is on.
+   *
+   * The same thing as {@link isEnabled} for the plugin's own switch. For a slot
+   * that names a setting it is both: a disarmed setting is off, and so is an
+   * armed one inside a plugin nobody enabled — which is also what makes a press
+   * able to rescue that second state.
+   */
+  isActive(pluginId: string, slot: string): boolean {
+    const entry = this.#plugins.get(pluginId);
+    if (entry === undefined || !entry.binds.has(slot)) return false;
+    if (slot === SWITCH_SLOT) return entry.enabled;
+    return entry.enabled && entry.settings.value(slot) === true;
+  }
+
+  /**
+   * Moves that switch the way a bound key does.
+   *
+   * **Asymmetric on purpose where the slot is a setting.** On needs both — a
+   * setting armed inside a plugin that is not running does nothing — while off
+   * needs only the setting disarmed: that is what makes the plugin undo
+   * whatever it was doing, and switching it off as well would take away a
+   * plugin the user had enabled themselves. So a key leaves the switch where it
+   * found it and moves only what has to move.
+   *
+   * @returns false when there is no such plugin, when it offers no key for that
+   *   slot, or when the switch cannot be moved.
+   */
+  setActive(pluginId: string, slot: string, on: boolean): boolean {
+    const entry = this.#plugins.get(pluginId);
+    if (entry === undefined || !entry.binds.has(slot)) return false;
+    if (slot === SWITCH_SLOT) return this.setEnabled(pluginId, on);
+
+    // Order matters both ways: arming a plugin that is not running would leave
+    // it armed and inert, and disabling one before it is disarmed would leave
+    // whatever it is holding held with nothing left running to let go of it.
+    if (on && !this.setEnabled(pluginId, true)) return false;
+    return entry.settings.apply(slot, on);
   }
 
   /** Unloads one plugin, running its disposers and dropping its registrations. */

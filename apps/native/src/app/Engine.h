@@ -30,6 +30,7 @@
 
 #include "app/Cadence.h"
 #include "app/GameBinding.h"
+#include "app/HotkeyWatch.h"
 #include "app/PlayerControl.h"
 #include "app/PlayerCosmetics.h"
 #include "app/ScenePatches.h"
@@ -93,6 +94,14 @@ class Engine {
     /// Slower than the cursor's, because a hand changes direction far less often
     /// than it moves a mouse.
     static constexpr std::uint32_t kSteerIntervalMs = 100;
+    /// How often the bound keys are looked at, while any are bound.
+    ///
+    /// Forty times a second, so a press reaches the runtime inside the time it
+    /// takes to notice one — and nothing at all the rest of the time, because
+    /// the wait is only shortened while something is actually bound. Slower
+    /// than a frame on purpose: this is the IPC thread, and a key is a state
+    /// rather than an event, so there is no edge to miss between two looks.
+    static constexpr std::uint32_t kHotkeyIntervalMs = 25;
 
     explicit Engine(EngineOptions options) noexcept : options_{std::move(options)} {}
 
@@ -238,6 +247,26 @@ class Engine {
     /// @returns how many shot paths were drawn, for the panel's own line.
     [[nodiscard]] int DrawDodgePicture(std::uint64_t now_ms,
                                        const std::optional<FrameScreen>& screen);
+
+    /// Rebuilds the watched binds from the mirror, when the mirror has changed.
+    /// **IPC thread**, from the loop.
+    ///
+    /// Driven by the mirror's version rather than by a flag of its own, so a
+    /// runtime that went away — which empties the mirror — releases every hold
+    /// by the same path as a plugin that was unbound.
+    void WatchHotkeys();
+
+    /// Looks at the bound keys and passes on what changed. **IPC thread**,
+    /// which is also the thread that may send.
+    ///
+    /// Gated on the player looking at the game rather than at a panel over it:
+    /// a key pressed into the overlay's own text field is somebody typing, and
+    /// one pressed in another application is not this game's business at all.
+    void PollHotkeys(std::uint64_t now_ms);
+
+    /// Where a bound key's edge goes. Built per call rather than held, so the
+    /// watcher owns no reference to a session it does not outlive.
+    [[nodiscard]] HotkeyWatch::Report HotkeyReporter();
 
     /// Tells the runtime whether the dodge picture is wanted, when that changes.
     /// **IPC thread**, from the loop.
@@ -509,6 +538,11 @@ class Engine {
     /// The runtime's plugin list, mirrored, and the same question about it.
     overlay::ControlMirror controls_;
     bool controls_dirty_ = false;
+    /// The keys bound to those plugins, and which commit of the mirror they
+    /// were taken from. IPC thread only — the same thread that mirrors, polls
+    /// and sends, so there is nothing here to share.
+    HotkeyWatch hotkeys_;
+    std::uint64_t watched_controls_version_ = 0;
     bool offsets_dirty_ = false;
     bool memory_dirty_ = false;
     bool redirect_installed_ = false;
@@ -556,6 +590,9 @@ class Engine {
     /// The heartbeat under that, so a camera turning under a held key is not
     /// missed. Render thread only.
     Cadence steer_{kSteerIntervalMs};
+
+    /// How often the bound keys are looked at. IPC thread only.
+    Cadence hotkey_{kHotkeyIntervalMs};
 
     /// What the dodge planner is thinking, as the runtime last described it.
     /// Written on the IPC thread by the record handler, read by the frame that

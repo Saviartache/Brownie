@@ -89,6 +89,32 @@ const game::OffsetTable* GameBinding::table() const noexcept {
 
 std::optional<game::PlayerRoute> GameBinding::Route() const { return player_.Route(); }
 
+std::optional<game::MapObjectRoute> GameBinding::MapObjectRoute() const {
+    const auto player = player_.Route();
+    if (!player.has_value() || !offsets_.has_value()) {
+        return std::nullopt;
+    }
+
+    game::MapObjectRoute route;
+    route.world = *player;
+    // The two tables are taken as they come: one of them holds the objects and
+    // nothing here knows which, so a build that gives up only one is a build
+    // this still works on. See `game::kWorldObjects`.
+    route.objects_at = offsets_->FieldOffset(game::kWorldObjects).value_or(0);
+    route.objects_alt_at = offsets_->FieldOffset(game::kWorldObjectsAlt).value_or(0);
+    // **The same three the player is read through**, because they are declared
+    // on the class the player derives from and every monster with it. Nothing
+    // new had to be found for these.
+    route.object_id_at = offsets_->FieldOffset(game::kPlayerObjectId).value_or(0);
+    route.x_at = offsets_->FieldOffset(game::kPlayerX).value_or(0);
+    route.y_at = offsets_->FieldOffset(game::kPlayerY).value_or(0);
+
+    if (!route.usable()) {
+        return std::nullopt;
+    }
+    return route;
+}
+
 std::span<const game::WalkabilityPredicate> GameBinding::WalkabilityPredicates() {
     if (walkability_.empty() && game_ != nullptr && offsets_.has_value()) {
         walkability_ = game::ResolveWalkabilityPredicates(*game_, *offsets_);

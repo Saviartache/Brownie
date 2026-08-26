@@ -1,6 +1,14 @@
 import { buildRecord, encodeOptions, parseRecord } from '@brownie/ipc';
-import type { SettingDescriptor, Unsubscribe } from '@brownie/plugin-api';
+import {
+  SWITCH_SLOT,
+  bindLabel,
+  bindSlot,
+  bindTargets,
+  type SettingDescriptor,
+  type Unsubscribe,
+} from '@brownie/plugin-api';
 import type { Logger } from '../core/logging/Logger.js';
+import { parseBind, NO_BIND } from '../plugins/pluginBind.js';
 import type { PluginHost } from '../plugins/PluginHost.js';
 
 /** The part of the native link the overlay needs. */
@@ -148,6 +156,22 @@ export class OverlayControlPlane {
         ),
       );
 
+      // Its own record rather than more fields on the plugin's, because it is
+      // not a property of the plugin at all: an overlay that draws no bind
+      // control simply never sees one, a plugin that is not bindable publishes
+      // nothing for one to draw, and a plugin that offers two keys publishes
+      // two records rather than a shape every other plugin has to carry.
+      for (const target of bindTargets(meta)) {
+        const slot = bindSlot(target);
+        // Split into its two halves here so the overlay never parses the
+        // compound value — it draws a key and a mode, and sends back the two it
+        // is holding. The one spelling is this side's to keep.
+        const bind = parseBind(this.#host.bindOf(meta.id, slot)) ?? NO_BIND;
+        // Slot and label appended, so an overlay built before there could be
+        // more than one still draws the last of them rather than nothing.
+        records.push(buildRecord('bind', meta.id, bind.mode, bind.key, slot, bindLabel(target)));
+      }
+
       const settings = this.#host.settingsOf(meta.id);
       if (settings === undefined) continue;
       const values = settings.values();
@@ -195,6 +219,19 @@ export class OverlayControlPlane {
         // sends can be turned into what the setting actually holds.
         if (!settings.apply(key, decodeValue(valueType, value))) {
           this.#log.warn(`overlay sent an unusable value for ${pluginId}.${key}: "${value}"`);
+        }
+        this.publish();
+        return;
+      }
+      case 'bind': {
+        const [pluginId, mode, key, slot] = fields;
+        if (pluginId === undefined || mode === undefined || key === undefined) return;
+        // Joined here and checked by the host: the two halves are how the
+        // overlay holds a bind, the one string is how everything else does, and
+        // neither half is trustworthy on its own. An overlay that names no slot
+        // means the plugin's own switch, which is the only bind it can draw.
+        if (!this.#host.setBind(pluginId, slot ?? SWITCH_SLOT, `${mode}:${key}`)) {
+          this.#log.warn(`overlay sent an unusable bind for "${pluginId}": "${mode}:${key}"`);
         }
         this.publish();
         return;

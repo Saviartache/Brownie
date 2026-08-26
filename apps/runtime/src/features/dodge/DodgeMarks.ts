@@ -23,6 +23,7 @@
  * to send a picture rather than the thing that draws one.
  */
 
+import type { Position } from '@brownie/plugin-api';
 import type { BlastView } from './Blasts.js';
 import { nearEdgeOf, type EnemyBodies } from './EnemyBodies.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
@@ -39,6 +40,8 @@ export const DodgeMarkKind = {
   KeepAway: 3,
   /** An area effect on its way down, drawn where and as wide as it will land. */
   Blast: 4,
+  /** The place the player named, which the planner is holding them to. */
+  Anchor: 5,
 } as const;
 
 export type DodgeMarkKind = (typeof DodgeMarkKind)[keyof typeof DodgeMarkKind];
@@ -143,6 +146,8 @@ export interface PictureScene {
   readonly engageTiles: number;
   /** The room kept around a monster, or `undefined` while they are unminded. */
   readonly keepAwayTiles: number | undefined;
+  /** The place the player is holding, or nothing while they hold none. */
+  readonly anchor: Position | undefined;
   /** The bodies the planner collected, in the order it collected them. */
   readonly bodies: EnemyBodies;
   /** The area effects still on their way down. */
@@ -166,6 +171,13 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   );
   if (scene.engageTiles > 0) {
     marks.push(onPlayer(DodgeMarkKind.Engage, scene.selfX, scene.selfY, scene.engageTiles));
+  }
+  // **Second, because a held place is the one mark that answers "why is it
+  // walking me there".** Drawn as the character's own square would be at it:
+  // what the planner is holding is a body standing on that ground, not a point.
+  const anchor = scene.anchor;
+  if (anchor !== undefined) {
+    marks.push(atPlace(DodgeMarkKind.Anchor, anchor.x, anchor.y, PLAYER_HALF_TILES));
   }
   const keepAwayTiles = scene.keepAwayTiles;
 
