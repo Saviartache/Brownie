@@ -280,13 +280,19 @@ function writeReadme(version) {
 /**
  * Archives the package.
  *
- * Windows ships bsdtar, which picks the format and the compressor from the
- * name. A dependency for one archive would be a dependency to keep updated.
+ * Windows ships bsdtar, which writes zip and every compressor this asks for. A
+ * dependency for one archive would be a dependency to keep updated.
  *
- * **7z rather than zip, for the executable's sake.** Nearly all of this is a
- * 90 MB Node binary, and zip's deflate leaves it at 33 MB where LZMA takes it
- * to 23 — the difference between a 38 MB download and a 25 MB one. Nothing
- * else in here is big enough to change the answer.
+ * **A zip, compressed with LZMA rather than deflate.** Nearly all of this is a
+ * 90 MB Node binary: deflate leaves the archive at 38 MB and LZMA at 25, which
+ * is the difference between fitting a forum's upload limit and not. Nothing
+ * else in here is big enough to change that answer, and no smaller build of
+ * Node closes a 13 MB gap either.
+ *
+ * LZMA inside a zip is in the format's specification but not in Windows'
+ * reader, so Explorer's "Extract All" refuses the file and 7-Zip, WinRAR or
+ * anything built on libarchive opens it. That is the cost of the extension:
+ * `.7z` is what this wants to be, and a zip is what may be uploaded.
  *
  * **By full path, not by name.** A machine with Git installed has GNU tar in
  * front of it on PATH, and GNU tar knows neither format: it writes an
@@ -300,11 +306,12 @@ function archive(version) {
   const bsdtar = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'tar.exe');
   if (!existsSync(bsdtar)) throw new Error(`no bsdtar at ${bsdtar} to write the archive with`);
 
-  const name = `Brownie-${version}-win-x64.7z`;
-  const result = spawnSync(bsdtar, ['-a', '-c', '-f', name, 'Brownie'], {
-    cwd: RELEASE,
-    stdio: 'inherit',
-  });
+  const name = `Brownie-${version}-win-x64.zip`;
+  const result = spawnSync(
+    bsdtar,
+    ['-c', '-f', name, '--format', 'zip', '--options', 'zip:compression=lzma', 'Brownie'],
+    { cwd: RELEASE, stdio: 'inherit' },
+  );
   if (result.status !== 0) throw new Error('archiving failed');
   return join(RELEASE, name);
 }
