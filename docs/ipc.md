@@ -255,10 +255,9 @@ The resolved keys include:
 | `player.arcaneStyle`        | shader id / empty     | apply a local Arcane Style, or restore the previous one      |
 | `player.glow`               | `true` / `false`     | light the local player's glow, and put it out after          |
 | `player.glowColour`         | `#rrggbbaa`          | what colour to repaint the glow's style, refused if malformed |
+| `scene.healthBarTint`       | `true` / `false`     | hold the local player's health bar at a colour of ours       |
+| `scene.healthBarTintColour` | `#rrggbbaa` / `rainbow` | what to hold it at, refused if it is neither              |
 | `shots.noclip`              | `true` / `false`     | let the player's own shots cross walls                       |
-| `shots.shield`              | `true` / `false`     | build the shots aimed at the player harmless                 |
-| `shots.shieldMode`          | `shrink` / `disarm` / `redirect` | which of the three, refused if unknown           |
-| `shots.shieldMultiplier`    | `0` … `1`            | what `shrink` scales a shot's hitbox by, clamped on arrival   |
 
 The boolean switches and the cosmetic selections are leases. These belong
 to plugins or runtime readers that can be disabled, fail, unload, or disappear;
@@ -292,6 +291,17 @@ is: not a claim but the value one applies, kept whether or not the claim is
 live, and refused rather than guessed at when it is not a colour — so a typo
 leaves the glow in the last colour that was one.
 
+`scene.healthBarTint` is the module's **sign**: it has no feature of its own and
+is claimed by whatever needs to be visible while it is on, which today is the
+collider plugin's "no hitbox". `scene.healthBarTintColour` is the value that
+claim applies, on the same terms as `player.glowColour`, with one spelling that
+is not a colour. `rainbow` asks for a cycle through every hue rather than for
+any one of them, and the module's own clock walks it — which is where a moving
+colour has to be computed, because sending one would be a `setFeature` a frame.
+The two live on one key because what to paint with is one choice: a colour turns
+the cycle off, the cycle leaves the last colour where it is, and two keys would
+be two claims that can disagree about which of them the module is obeying.
+
 **`cursor.track` is the one nothing ever ends early**, and it is claimed by the
 runtime rather than by a plugin. Two features read the point now — aim ranks
 enemies by it, the ability is pointed at the one aim picked — and one switch
@@ -311,22 +321,6 @@ nobody. It is stored whether or not the claim is live, because a value refused
 for arriving first would leave the claim acting on whatever came before it. The
 module clamps it to `0` … `1` on arrival rather than trusting the slider it came
 from: above one is a *larger* collision circle than the game built.
-
-`shots.shieldMode` and `shots.shieldMultiplier` are the same kind of exception,
-and they go out in that order: the multiplier first, then the mode, then the
-claim. A mode published ahead of the number it scales by would shrink one volley
-by the number before it. The mode is a **key rather than an index** — a build
-that adds one in the middle cannot then silently turn a shrink into a redirect —
-and an unknown spelling is dropped rather than defaulted, because the mode that
-would be defaulted to is one somebody has to live through.
-
-`shots.shield` is the one boolean claim here whose lapse leaves the *game's* own
-behaviour rather than the module's, and that is the direction it fails in: three
-seconds after a runtime goes quiet, the next shot fired is a shot that can hit.
-What it never leaves behind is a half-applied write. Projectiles are pooled and
-every value the shield changes is written by the game's own initialiser on each
-reuse, so an unload at a moment nobody chose costs the shots already in the air
-and nothing else.
 
 ### `playerTelemetry`
 
@@ -393,7 +387,8 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
-| `marks` | one field per circle: `kind,x·100,y·100,radius·100,ahead‰,anchor,vx·100,vy·100` | every circle the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has. `anchor` is `1` for a circle centred on the character, which the module draws wherever it can see the character is; `vx`/`vy` are tiles a second, and are what lets a monster's circle be drawn between two publishes where the monster is rather than where it was. Both are `0` (or absent) for a circle that sits still where it was stated |
+| `shots` | one field per shot: `half·100,vx·100,vy·100`      | how big each shot in the `trails` record actually is, and how fast it is going — in the same order, one field apiece. `half` is the half-side of the square the game hits with, so a boss's shot is drawn at several times the width of a rat's, and `0` for the ones the game gives no collision at all. Beside the paths rather than inside them because a path is a variable-length list of points, and a field appended after one is a point. Absent means every shot is a bare line that sits where it was stated |
+| `marks` | one field per shape: `kind,x·100,y·100,radius·100,ahead‰,anchor,vx·100,vy·100,shape,corner·100` | every shape the planner is reasoning about: the character, the ring a shot has to enter before it is answered, a monster's body, the room kept around it, or where an area effect will land. `ahead‰` is how much of its wait is left, which only a blast has. `anchor` is `1` for a shape centred on the character, which the module draws wherever it can see the character is; `vx`/`vy` are tiles a second, and are what lets a monster's outline be drawn between two publishes where the monster is rather than where it was. `shape` is `1` for an axis-aligned box and `0` (or absent) for a circle; `radius` is the half-extent either way — middle to flat side — so a module that does not know the field draws the circle through a box's sides. `corner·100` is how much of each of a box's corners is rounded off, which is what makes the room kept around a monster the body's square grown by an even gap. Every appended field is `0` (or absent) for a circle that sits still where it was stated |
 
 `weapon` carries one field of text — the item's own id — so unlike its
 neighbours it is percent-encoded and the module reads it with the same splitter

@@ -38,6 +38,7 @@ import { BLAST_MARGIN_TILES, Blasts, type BlastView } from '../src/features/dodg
 import {
   DodgeMarkAnchor,
   DodgeMarkKind,
+  DodgeMarkShape,
   dodgeMarks,
   MAX_DRAWN_MARKS,
   type DodgeMark,
@@ -1128,10 +1129,15 @@ describe('the ground, one tile at a time', () => {
 
 describe('the shot paths that get drawn', () => {
   /** A shot with a real life, which is what the colour along the line is made of. */
-  function tracked(firedAtMs: number, expiresAtMs: number): ProjectileView {
+  function tracked(
+    firedAtMs: number,
+    expiresAtMs: number,
+    collisionHalfTiles = DEFAULT_PROJECTILE_HALF_TILES,
+  ): ProjectileView {
     return {
       firedAtMs,
       expiresAtMs,
+      collisionHalfTiles,
       positionAt(gameTimeMs: number): Position | undefined {
         if (gameTimeMs < firedAtMs || gameTimeMs > expiresAtMs) return undefined;
         return { x: (gameTimeMs - firedAtMs) / 100, y: 0 };
@@ -1174,6 +1180,28 @@ describe('the shot paths that get drawn', () => {
     for (const path of paths) {
       expect(path.points.length).toBeLessThanOrEqual(MAX_PATH_POINTS * 2);
     }
+  });
+
+  // **A line says where a shot goes and nothing about what it takes with it.**
+  // The game's widest shots are ten times the standard multiplier, so a picture
+  // drawn as hairlines says a boss's wall of fire and a rat's pellet are the
+  // same thing — and it is the size that decides every hit.
+  it('carries how big each shot actually is', () => {
+    expect(shotPaths(400, [tracked(0, 1000)], 8)[0]?.halfTiles).toBe(DEFAULT_PROJECTILE_HALF_TILES);
+    expect(shotPaths(400, [tracked(0, 1000, 3)], 8)[0]?.halfTiles).toBe(3);
+    // The ones the game gives no collision to say so rather than being drawn as
+    // ordinary, which is the whole reason the planner walks through them.
+    expect(shotPaths(400, [tracked(0, 1000, 0)], 8)[0]?.halfTiles).toBe(0);
+  });
+
+  // A set goes out twenty times a second and a shot crosses a tile in less than
+  // that, so a head drawn where it was last stated stutters across the screen.
+  it('carries how fast it is going, so a drawing can fill the gap', () => {
+    // Ten tiles a second east, which is what `tracked` walks.
+    const path = shotPaths(400, [tracked(0, 1000)], 8)[0];
+
+    expect(path?.velocityX).toBeCloseTo(10, 5);
+    expect(path?.velocityY).toBeCloseTo(0, 5);
   });
 });
 
@@ -1387,6 +1415,42 @@ describe('the picture of what it is thinking', () => {
 
     expect(of(marks, DodgeMarkKind.Player)).toHaveLength(1);
     expect(of(marks, DodgeMarkKind.Engage)[0]?.radiusTiles).toBe(2.5);
+  });
+
+  // **Drawn as the shape it is scored as, or the picture is a claim the planner
+  // does not make.** The character and a monster collide as axis-aligned
+  // squares; the room kept around one is that square grown by a gap that is the
+  // same in every direction. Drawing the last as a plain circle put the corner
+  // of a four-tile boss most of a tile inside a ring that said it was outside.
+  it('draws each shape as the model measures it', () => {
+    const bodies = new EnemyBodies();
+    bodies.collect([{ x: 12, y: 10 } as EntityView], 10, 10, 12, sized(4));
+    const bomb: BlastView = { x: 14, y: 10, radiusTiles: 2, armsAtMs: 500 };
+    const marks = dodgeMarks(scene({ bodies, blasts: [bomb] }));
+
+    // The character's own square, at the size a shot is tested against.
+    const player = of(marks, DodgeMarkKind.Player)[0];
+    expect(player?.shape).toBe(DodgeMarkShape.Box);
+    expect(player?.radiusTiles).toBeCloseTo(PLAYER_HALF_TILES, 6);
+    expect(player?.cornerTiles).toBe(0);
+
+    // The body, square and unrounded.
+    const body = of(marks, DodgeMarkKind.Body)[0];
+    expect(body?.shape).toBe(DodgeMarkShape.Box);
+    expect(body?.radiusTiles).toBe(2);
+    expect(body?.cornerTiles).toBe(0);
+
+    // And the room around it: the same square, grown by the gap, with corners
+    // rounded off by exactly that gap.
+    const gap = 2.5 - ENEMY_CONTACT_HALF_TILES;
+    const keepAway = of(marks, DodgeMarkKind.KeepAway)[0];
+    expect(keepAway?.shape).toBe(DodgeMarkShape.Box);
+    expect(keepAway?.radiusTiles).toBeCloseTo(2 + gap, 6);
+    expect(keepAway?.cornerTiles).toBeCloseTo(gap, 6);
+
+    // The two that genuinely are radii stay radii.
+    expect(of(marks, DodgeMarkKind.Engage)[0]?.shape).toBe(DodgeMarkShape.Circle);
+    expect(of(marks, DodgeMarkKind.Blast)[0]?.shape).toBe(DodgeMarkShape.Circle);
   });
 
   // **The picture is drawn far more often than it is published, and where the

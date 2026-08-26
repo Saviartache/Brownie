@@ -35,7 +35,6 @@
 #include "game/PlayerMover.h"
 #include "game/PlayerNoclip.h"
 #include "game/ProjectileNoclip.h"
-#include "game/ProjectileShield.h"
 #include "game/ScreenProjection.h"
 #include "hooks/Hook.h"
 #include "hooks/SwapChain.h"
@@ -609,6 +608,68 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     Check(!picture.fresh(3000), "a reset drops what was committed");
 }
 
+/// How big a shot is and what shape a circle is, both of which arrive appended.
+///
+/// **The two halves of "draw what the planner actually measures".** A shot is a
+/// square the game hits with rather than a line, and a body is a square rather
+/// than a circle — so both sides carry a size and a shape now, and both have to
+/// survive a runtime that says nothing about either.
+void DodgePictureTakesShapesAndShotSizes() {
+    brownie::overlay::DodgePicture picture;
+
+    Check(picture.Apply("dodge-begin", 1000), "a set with sizes in it opens");
+    Check(picture.Apply("trails|1000,0,0,100,0|1000,500,0,600,0", 1000), "two paths are taken");
+    // Beside the paths rather than inside them, in the same order.
+    Check(picture.Apply("shots|150,800,0|0,0,0", 1000), "and the sizes beside them");
+    Check(picture.Apply("marks|2,0,0,200,1000,0,0,0,1,0|3,0,0,400,1000,0,0,0,1,200", 1000),
+          "a square body and the room round it are taken");
+    Check(picture.Apply("dodge-end", 1000), "and it closes");
+
+    Check(picture.trails().size() == 2, "both paths commit");
+    Check(std::fabs(picture.trails()[0].half_tiles - 1.5F) < 0.001F,
+          "the first carries its own half-extent in tiles");
+    Check(std::fabs(picture.trails()[0].velocity_x - 8.0F) < 0.001F,
+          "and how fast it is going, in tiles a second");
+    Check(picture.trails()[1].half_tiles == 0.0F,
+          "a shot the game gives no collision to says so rather than being drawn as ordinary");
+
+    Check(picture.marks().size() == 2, "both shapes commit");
+    Check(picture.marks()[0].shape == brownie::overlay::MarkShape::Box, "the body is a box");
+    Check(picture.marks()[0].corner_tiles == 0.0F, "with square corners");
+    Check(picture.marks()[1].shape == brownie::overlay::MarkShape::Box, "so is the room round it");
+    Check(std::fabs(picture.marks()[1].corner_tiles - 2.0F) < 0.001F,
+          "with its corners rounded off by the gap");
+
+    // What an older runtime sends: no shapes, no sizes. Both have to mean what
+    // this side has always drawn rather than nothing at all.
+    Check(picture.Apply("dodge-begin", 1100), "a set from an older runtime opens");
+    Check(picture.Apply("trails|1000,0,0,100,0", 1100), "with a path and nothing beside it");
+    Check(picture.Apply("marks|2,0,0,200,1000", 1100), "and a circle with no shape stated");
+    Check(picture.Apply("dodge-end", 1100), "and it closes");
+    Check(picture.trails()[0].half_tiles == 0.0F, "the path is a bare line");
+    Check(picture.marks()[0].shape == brownie::overlay::MarkShape::Circle, "and the mark a circle");
+
+    // Nonsense is refused the way every other number here is: a hitbox the size
+    // of the room is not a shot, and a corner cannot be wider than its own box.
+    Check(picture.Apply("dodge-begin", 1200), "a set with nonsense in it opens");
+    Check(picture.Apply("trails|1000,0,0,100,0", 1200), "with a path");
+    Check(picture.Apply("shots|999999,0,0", 1200), "and an impossible size beside it");
+    Check(picture.Apply("marks|3,0,0,100,1000,0,0,0,1,9999", 1200), "and a corner past its box");
+    Check(picture.Apply("dodge-end", 1200), "and it closes");
+    Check(picture.trails()[0].half_tiles == 0.0F, "the size is dropped and the line still drawn");
+    Check(std::fabs(picture.marks()[0].corner_tiles - 1.0F) < 0.001F,
+          "and the corner is held inside the box it rounds");
+
+    // More sizes than paths is a runtime and a module that disagree about how
+    // many there were. Taking what lines up beats taking none of it.
+    Check(picture.Apply("dodge-begin", 1300), "a mismatched set opens");
+    Check(picture.Apply("trails|1000,0,0,100,0", 1300), "with one path");
+    Check(picture.Apply("shots|150,0,0|150,0,0|150,0,0", 1300), "and three sizes");
+    Check(picture.Apply("dodge-end", 1300), "and it closes");
+    Check(picture.trails().size() == 1, "with the one path");
+    Check(std::fabs(picture.trails()[0].half_tiles - 1.5F) < 0.001F, "sized by the first of them");
+}
+
 /// Player noclip refuses what it cannot detour, and either detour stands alone.
 ///
 /// The opposite of the pair above, and deliberately: an overridden answer lasts
@@ -760,90 +821,6 @@ void ProjectileNoclipInstallsBothOrNeither() {
     Check(!noclip.Install(brownie::game::ProjectileTileRoute{}, &method, &method).ok(),
           "nor does a route with nothing resolved");
     Check(!noclip.installed(), "so it stays uninstalled");
-}
-
-/// What each shield mode decides to write, and what it refuses.
-///
-/// The decision is the part worth being sure about: it runs on a shot the game
-/// has just built, and getting it wrong either leaves the player exposed while
-/// the switch says otherwise, or writes into the player's own bullets. Free of
-/// the game, so it is testable at a desk — the same split `PlayerCollision`
-/// makes for the number it writes into the player.
-void EachShieldModeWritesWhatItSays() {
-    using brownie::game::PlanShotEdit;
-    using brownie::game::ShieldMode;
-
-    Check(!PlanShotEdit(ShieldMode::Off, 0.0F).has_value(), "a shield that is off writes nothing");
-
-    const auto shrunk = PlanShotEdit(ShieldMode::Shrink, 0.25F);
-    Check(shrunk.has_value(), "a shrink is an edit");
-    Check(shrunk->scale_collision_half && shrunk->collision_scale == 0.25F,
-          "and it scales the shot's collision square by what was asked");
-    Check(!shrunk->set_flags, "and leaves who the shot may hurt alone");
-
-    const auto gone = PlanShotEdit(ShieldMode::Shrink, 0.0F);
-    Check(gone.has_value() && gone->collision_scale == 0.0F,
-          "a shrink to nought is an edit, not a refusal - it is the whole point");
-
-    // Refused rather than clamped: a scale this cannot make sense of would
-    // otherwise be applied to every shot in the realm.
-    Check(!PlanShotEdit(ShieldMode::Shrink, 1.0F).has_value(),
-          "a scale of one is the game's own shot, so nothing is written");
-    Check(!PlanShotEdit(ShieldMode::Shrink, 1.5F).has_value(), "a scale above one is refused");
-    Check(!PlanShotEdit(ShieldMode::Shrink, -0.5F).has_value(), "so is a negative one");
-    Check(!PlanShotEdit(ShieldMode::Shrink, std::numeric_limits<float>::quiet_NaN()).has_value(),
-          "and so is one that is not a number");
-
-    const auto disarmed = PlanShotEdit(ShieldMode::Disarm, 0.0F);
-    Check(disarmed.has_value() && disarmed->set_flags, "a disarm writes the flags");
-    Check(disarmed->damages_players == 0 && disarmed->damages_enemies == 0,
-          "and leaves the shot hunting nobody");
-    Check(!disarmed->scale_collision_half, "while leaving the shot its own size");
-
-    const auto turned = PlanShotEdit(ShieldMode::Redirect, 0.0F);
-    Check(turned.has_value() && turned->set_flags, "a redirect writes the flags");
-    Check(turned->damages_players == 0 && turned->damages_enemies == 1,
-          "and turns the shot on its own side");
-}
-
-/// The shield installs through a complete route or not at all.
-///
-/// Every write it makes is guarded by an offset, and an offset nothing resolved
-/// is zero — which is a managed object's header. A feature that installed on
-/// half a route would be writing into one.
-void TheShieldInstallsThroughACompleteRouteOnly() {
-    brownie::game::ProjectileShield shield;
-    Check(!shield.installed(), "a fresh shield is not installed");
-    Check(shield.mode() == brownie::game::ShieldMode::Off, "and is switched off");
-    Check(shield.guarded() == 0, "and has taken nothing apart");
-
-    // Never dereferenced: every case below is refused before MinHook is asked
-    // for anything.
-    int method = 0;
-    brownie::game::ShotFieldRoute route;
-    route.damages_players_at = 0x17C;
-    route.damages_enemies_at = 0x17D;
-    route.collision_half_at = 0x1D4;
-    Check(route.complete(), "a route with all three offsets is complete");
-
-    Check(!shield.Install(route, nullptr).ok(), "an unresolved initialiser installs nothing");
-    Check(!shield.Install(brownie::game::ShotFieldRoute{}, &method).ok(),
-          "nor does a route with nothing resolved");
-
-    // Each offset on its own, because "all three or none" is a claim about each
-    // of them and a loop over a copy would only test the last one written.
-    brownie::game::ShotFieldRoute without_players = route;
-    without_players.damages_players_at = 0;
-    brownie::game::ShotFieldRoute without_enemies = route;
-    without_enemies.damages_enemies_at = 0;
-    brownie::game::ShotFieldRoute without_half = route;
-    without_half.collision_half_at = 0;
-
-    for (const auto& partial : {without_players, without_enemies, without_half}) {
-        Check(!partial.complete(), "a route missing any one offset is not complete");
-        Check(!shield.Install(partial, &method).ok(), "and installs nothing");
-    }
-    Check(!shield.installed(), "so it stays uninstalled");
 }
 
 /// What a frame's reads cost, measured rather than argued about.
@@ -1698,6 +1675,46 @@ void AColourSurvivesBeingPacked() {
     Check(PackColour(UiColor{0.0F, 0.0F, 0.0F, 0.0F}) == 0x00000000u, "and nothing is none");
 }
 
+void ARainbowIsEveryColourAndNoGreys() {
+    using brownie::core::ColourChannels;
+    using brownie::core::RainbowColour;
+
+    constexpr std::uint32_t kPeriod = 3000;
+
+    // Three exact corners of the wheel, which is what says the sign walks
+    // through hues rather than fading between two colours.
+    Check(RainbowColour(0, kPeriod) == 0xFF0000FFu, "the cycle starts at red");
+    Check(RainbowColour(kPeriod / 3, kPeriod) == 0x00FF00FFu, "a third of the way round is green");
+    Check(RainbowColour(2 * kPeriod / 3, kPeriod) == 0x0000FFFFu, "and two thirds of it is blue");
+
+    // The clock this is drawn from has been running since injection, so which
+    // turn it is on must not change what colour a moment of it is.
+    Check(RainbowColour(kPeriod, kPeriod) == RainbowColour(0, kPeriod),
+          "a period later it is back at the start");
+    Check(RainbowColour(97 * kPeriod + 41, kPeriod) == RainbowColour(41, kPeriod),
+          "however many turns have gone by");
+
+    // Every step is a colour rather than a shade of one. Without a channel at
+    // nothing the walk passes through white and without one at everything it
+    // passes through black — either of which reads as the bar having gone out
+    // rather than as the module saying something.
+    bool saturated = true;
+    bool opaque = true;
+    for (std::uint32_t at = 0; at < kPeriod; ++at) {
+        const auto channels = ColourChannels(RainbowColour(at, kPeriod));
+        saturated = saturated &&
+                    (channels[0] == 1.0F || channels[1] == 1.0F || channels[2] == 1.0F) &&
+                    (channels[0] == 0.0F || channels[1] == 0.0F || channels[2] == 0.0F);
+        opaque = opaque && channels[3] == 1.0F;
+    }
+    Check(saturated, "every step of the cycle is a full colour");
+    Check(opaque, "and none of them is see-through");
+
+    // The one value the arithmetic has to answer for rather than divide by.
+    Check(RainbowColour(12, 0) == RainbowColour(0, kPeriod),
+          "a period of nothing is where the cycle starts");
+}
+
 void PropertiesAreFoundByTypeAndBounded() {
     const std::vector<brownie::game::FieldDescription> fields{
         {"id", "System.Int32", 0x10, false},
@@ -2227,6 +2244,7 @@ int main() {
     AColourSettingIsDrawnAsOneAndAnUnknownKindIsNot();
     AColourIsReadAndWrittenInOneSpelling();
     AColourSurvivesBeingPacked();
+    ARainbowIsEveryColourAndNoGreys();
     AnUnpreparedClassIsNotAskedAboutItsMembers();
     AnUnverifiedEntryPointIsNoEntryPoint();
     AClassIsDescribedByWhatItTouches();
@@ -2256,8 +2274,6 @@ int main() {
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();
     ProjectileNoclipInstallsBothOrNeither();
-    EachShieldModeWritesWhatItSays();
-    TheShieldInstallsThroughACompleteRouteOnly();
     PlayerNoclipRefusesWhatItCannotDetour();
     UnbindableCallersStayQuiet();
     ReadCostIsMeasured();
@@ -2270,6 +2286,7 @@ int main() {
     SelectOptionsAndVisibilityAreRead();
     MultiSelectIsReadAsAChecklist();
     DodgePictureCommitsWholeSetsAndExpires();
+    DodgePictureTakesShapesAndShotSizes();
     ActionQueueHandsInteractionsOver();
     ActionQueueKeepsTheNewestWhenFull();
     InputQueueHandsMessagesOver();

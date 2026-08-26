@@ -33,11 +33,11 @@
 #include "app/PlayerControl.h"
 #include "app/PlayerCosmetics.h"
 #include "app/ScenePatches.h"
+#include "core/Colour.h"
 #include "core/Result.h"
 #include "core/Snapshot.h"
 #include "game/PlayerNoclip.h"
 #include "game/ProjectileNoclip.h"
-#include "game/ProjectileShield.h"
 #include "game/QuitWatch.h"
 #include "game/ScreenProjection.h"
 #include "hooks/Hook.h"
@@ -168,11 +168,11 @@ class Engine {
     static constexpr std::uint64_t kTintLeaseMs = 3000;
     static constexpr std::uint64_t kShotNoclipLeaseMs = 3000;
 
-    /// The same again, for the runtime's claim on taking the hitbox off the
-    /// shots aimed at the player. **The one lease here that a lapse makes the
-    /// player mortal again for**, which is the direction to fail in: three
-    /// seconds after a runtime goes quiet the next shot fired is the game's own.
-    static constexpr std::uint64_t kShotShieldLeaseMs = 3000;
+    /// How long one turn of the bar's rainbow takes, when a rainbow is what was
+    /// asked for. Slow enough that each colour is one the eye settles on rather
+    /// than a flicker, and short enough that a glance catches it moving.
+    static constexpr std::uint32_t kTintRainbowPeriodMs = 3000;
+
     static constexpr std::uint64_t kArcaneStyleLeaseMs = 3000;
     static constexpr std::uint64_t kSkinLeaseMs = 3000;
     static constexpr std::uint64_t kGlowLeaseMs = 3000;
@@ -313,11 +313,6 @@ class Engine {
     /// on, and asked again until the game has built a projectile.
     void InstallProjectileNoclip();
 
-    /// Puts the projectile initialiser detour in place. Same story as the one
-    /// above and the same retry: the class does not exist until something has
-    /// shot.
-    void InstallProjectileShield();
-
     /// Puts the walkability detours in place, and says so in the runtime's log.
     /// Only called while the runtime's claim is live, and asked again until
     /// both are in.
@@ -352,7 +347,17 @@ class Engine {
         return now_ms < tint_until_ms_.load(std::memory_order_relaxed);
     }
 
-    [[nodiscard]] std::uint32_t TintColour() const noexcept {
+    /// What to hold the bar at now, as `0xRRGGBBAA` — the colour that was
+    /// asked for, or where a rainbow has got to at `now_ms`.
+    ///
+    /// **The cycle is computed here rather than sent.** A colour that moves
+    /// every frame would otherwise be a message a frame, which is the one thing
+    /// the link between the two sides is meant not to carry; what the runtime
+    /// asks for instead is the cycle, once, and the module's own clock walks it.
+    [[nodiscard]] std::uint32_t TintColour(std::uint64_t now_ms) const noexcept {
+        if (tint_rainbow_.load(std::memory_order_relaxed)) {
+            return core::RainbowColour(now_ms, kTintRainbowPeriodMs);
+        }
         return tint_colour_.load(std::memory_order_relaxed);
     }
 
@@ -360,20 +365,6 @@ class Engine {
     /// at `now_ms`.
     [[nodiscard]] bool ShotNoclipWanted(std::uint64_t now_ms) const noexcept {
         return now_ms < shot_noclip_until_ms_.load(std::memory_order_relaxed);
-    }
-
-    /// What to do with the next shot aimed at the player at `now_ms`, which is
-    /// `Off` while nothing is claiming it.
-    ///
-    /// The mode is stored whether or not the claim is live, for the reason the
-    /// collider's multiplier is: it arrives ahead of the claim and only when it
-    /// has moved, so a mode refused for arriving first would leave the claim
-    /// acting on the one before it.
-    [[nodiscard]] game::ShieldMode ShotShieldWanted(std::uint64_t now_ms) const noexcept {
-        if (now_ms >= shot_shield_until_ms_.load(std::memory_order_relaxed)) {
-            return game::ShieldMode::Off;
-        }
-        return shot_shield_mode_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] bool ArcaneStyleWanted(std::uint64_t now_ms) const noexcept {
@@ -465,7 +456,6 @@ class Engine {
     ScenePatches patches_;
     PlayerCosmetics cosmetics_;
     game::ProjectileNoclip shot_noclip_;
-    game::ProjectileShield shot_shield_;
     game::PlayerNoclip walk_noclip_;
     game::QuitWatch quit_;
     /// Holds no hook — three method addresses and nothing else — so it needs no
@@ -576,7 +566,18 @@ class Engine {
     std::vector<overlay::ScreenPoint> trail_points_;
     std::vector<int> trail_lengths_;
     std::vector<float> trail_lives_;
+    /// How wide each shot's own collision square is, in pixels, and where that
+    /// square is right now — four projected corners apiece.
+    std::vector<float> trail_widths_;
+    std::vector<overlay::ScreenPoint> trail_heads_;
     std::vector<overlay::RingMark> ring_marks_;
+    /// Every box outline end to end, with each mark's start in the next vector.
+    ///
+    /// Offsets rather than pointers while it is being filled, because the
+    /// buffer moves as it grows and a pointer taken into it beforehand is a
+    /// pointer into freed memory. Resolved once, after the last one is in.
+    std::vector<overlay::ScreenPoint> ring_outlines_;
+    std::vector<int> ring_outline_at_;
     /// What was last said to the runtime about wanting them, and whether
     /// anything has been said at all on this connection.
     bool sent_dodge_view_ = false;
@@ -617,22 +618,17 @@ class Engine {
     std::atomic<std::uint64_t> tint_until_ms_{0};
     std::atomic<std::uint32_t> tint_colour_{game::PackColour(game::HealthBarTint::kDefaultColour)};
 
+    /// Whether what was asked for is a cycle rather than the colour beside it.
+    ///
+    /// The two live on one key and cannot disagree: a colour arriving turns
+    /// this off, and the word that asks for a rainbow leaves the last colour
+    /// where it is for whoever asks for one next.
+    std::atomic<bool> tint_rainbow_{false};
+
     /// When the runtime's claim on letting shots through walls runs out.
     ///
     /// Written by the IPC thread, read by the game's on every frame.
     std::atomic<std::uint64_t> shot_noclip_until_ms_{0};
-
-    /// When the runtime's claim on the projectile shield runs out, which mode
-    /// it asked for, and what a shrink scales by.
-    ///
-    /// The mode and the multiplier are kept whether or not the claim is live,
-    /// like the collider's number and the tint's colour: both arrive ahead of
-    /// the claim and only when they have moved.
-    ///
-    /// Written by the IPC thread, read by the game's on every frame.
-    std::atomic<std::uint64_t> shot_shield_until_ms_{0};
-    std::atomic<game::ShieldMode> shot_shield_mode_{game::ShieldMode::Off};
-    std::atomic<float> shot_shield_multiplier_{0.0F};
 
     /// The selected ShaderProperties id and the lease that owns the override.
     /// The IPC thread publishes it only when a claim arrives; the render thread

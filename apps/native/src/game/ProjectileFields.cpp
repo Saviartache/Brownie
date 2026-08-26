@@ -43,19 +43,6 @@ constexpr MethodQuery kHitsWallQuery{kProjectile, "GJFKGLJEGKO", {}, "System.Boo
 constexpr MethodQuery kTileBlocksQuery{kProjectile, "IACODGNOFMH", {}, "System.Boolean",
                                        kTileCheckParameters};
 
-/// The initialiser, by name and argument count rather than by signature.
-///
-/// **Its return type is the projectile class itself**, which is obfuscator
-/// output — and a query only uses its signature when a return type is given,
-/// so writing out the twelve parameters would buy nothing while the one type
-/// that cannot be written is the one that decides. An argument count does not
-/// change with a rename, and twelve of them is not a shape this class has
-/// twice: the name occurs once on the projectile and on none of its bases, so
-/// the count is here to refuse a *different* twelve-argument method that a
-/// later build gives the same name, not to pick among today's.
-constexpr MethodQuery kInitQuery{
-    kProjectile, "KOBMINBDOBD", {}, {}, {}, /*fingerprint=*/false, /*parameter_count=*/12};
-
 struct KeyedMethodQuery {
     std::string_view key;
     MethodQuery query;
@@ -64,7 +51,6 @@ struct KeyedMethodQuery {
 constexpr std::array kMethods{
     KeyedMethodQuery{kShotHitsWall, kHitsWallQuery},
     KeyedMethodQuery{kShotTileBlocks, kTileBlocksQuery},
-    KeyedMethodQuery{kShotInit, kInitQuery},
 };
 
 struct KeyedFieldQuery {
@@ -82,8 +68,6 @@ struct KeyedFieldQuery {
 /// looked.
 constexpr std::array kFields{
     KeyedFieldQuery{kShotDamagesEnemies, FieldQuery{kProjectile, "NPMECLDKGEF", {}}},
-    KeyedFieldQuery{kShotDamagesPlayers, FieldQuery{kProjectile, "IIJFKHOLODP", {}}},
-    KeyedFieldQuery{kShotCollisionHalf, FieldQuery{kProjectile, "HHFDCMIIIHF", {}}},
     KeyedFieldQuery{kMapObjectTile, FieldQuery{kMapObject, "EOKJOGFPLOA", {}}},
     KeyedFieldQuery{kTileCollisionLayer, FieldQuery{kTile, "EBCLNFDKKEH", {}}},
 };

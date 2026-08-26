@@ -66,6 +66,13 @@ struct TrailMarkers {
     const ScreenPoint* points = nullptr;
     const int* lengths = nullptr;
     const float* lives = nullptr;
+    /// How wide each shot's own collision square is, in pixels. Nought for a
+    /// shot the game gives no collision at all, which draws as a bare line.
+    const float* widths = nullptr;
+    /// Where each shot is *now*, as the four corners of its collision square —
+    /// projected rather than sized here, because the camera can be turned and a
+    /// square in the world is not one on the screen. Four per trail, in order.
+    const ScreenPoint* heads = nullptr;
     int count = 0;
 };
 
@@ -99,7 +106,7 @@ enum class RingRole : int {
     Blast = 4,
 };
 
-/// One circle on the ground, already projected.
+/// One shape on the ground, already projected.
 struct RingMark {
     RingRole role = RingRole::Player;
     ScreenPoint centre;
@@ -108,7 +115,19 @@ struct RingMark {
     /// How much of its wait is still ahead, from one to nought. Only a blast
     /// has a wait; everything else carries one and ignores it.
     float ahead = 1.0F;
+    /// The outline to draw instead of a circle, in window pixels, closed.
+    ///
+    /// **A body collides as an axis-aligned square and a circle is a different
+    /// shape**, so the ones that are squares arrive as their own corners — and
+    /// as corners rather than as a size, because the camera can be turned and a
+    /// square in the world is a slanted quad on the screen. Null for the shapes
+    /// that genuinely are radii: a ring round the character, a blast.
+    const ScreenPoint* outline = nullptr;
+    int outline_count = 0;
 };
+
+/// The most points an outline may carry, which bounds what one shape costs.
+inline constexpr int kMaxOutlinePoints = 64;
 
 /// Draws the distances the planner is reasoning about.
 ///

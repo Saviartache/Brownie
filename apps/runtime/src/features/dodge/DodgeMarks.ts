@@ -10,10 +10,12 @@
  * inside is where the shots are being answered or it is not, and either the
  * circle it refuses to enter is around the monster or it is around a pillar.
  *
- * **Circles, because every one of them genuinely is one.** The engagement ring,
- * the room kept around a monster and a blast's footprint are all radii — see
- * `EnemyBodies` for why the room is round while the shot hitboxes are square.
- * Squares would be a second shape to draw and a second thing to get wrong.
+ * **Two shapes, because the model has two.** A ring the shots are answered
+ * inside and a blast's footprint are radii and nothing else. A body is the
+ * axis-aligned square the game collides with, and the room kept around one is
+ * that square grown by a round gap — see `EnemyBodies`. Drawing all of them as
+ * circles was drawing a claim the planner does not make: it put the corner of a
+ * four-tile boss most of a tile inside a ring that said it was outside.
  *
  * **Built here rather than in the plugin** for the same reason `ShotPaths` is:
  * it is arithmetic over what the planner already holds, it is worth testing
@@ -61,13 +63,38 @@ export const DodgeMarkAnchor = {
 
 export type DodgeMarkAnchor = (typeof DodgeMarkAnchor)[keyof typeof DodgeMarkAnchor];
 
-/** One circle on the ground. */
+/**
+ * What outline to draw round a mark's centre.
+ *
+ * A box is stated by the same `radiusTiles` a circle is — its half-extent, the
+ * distance from the middle to a flat side — plus how much of each corner is
+ * rounded off. So an older drawing that knows only circles draws a circle
+ * through the flat sides of the box, which is the nearest true thing it can say.
+ */
+export const DodgeMarkShape = {
+  Circle: 0,
+  Box: 1,
+} as const;
+
+export type DodgeMarkShape = (typeof DodgeMarkShape)[keyof typeof DodgeMarkShape];
+
+/** One shape on the ground. */
 export interface DodgeMark {
   readonly kind: DodgeMarkKind;
   readonly anchor: DodgeMarkAnchor;
+  readonly shape: DodgeMarkShape;
   readonly x: number;
   readonly y: number;
   readonly radiusTiles: number;
+  /**
+   * How far in from a box's corners its rounding starts, in tiles.
+   *
+   * Nought for a plain square and for every circle. It is what draws the room
+   * kept around a monster as what it is — the body's square grown by a gap that
+   * is the same in every direction, so the corners are quarter-circles of the
+   * gap rather than right angles.
+   */
+  readonly cornerTiles: number;
   /**
    * How fast the thing this describes is moving, in tiles per second.
    *
@@ -132,7 +159,11 @@ export interface PictureScene {
 export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   const marks: DodgeMark[] = [];
 
-  marks.push(onPlayer(DodgeMarkKind.Player, scene.selfX, scene.selfY, PLAYER_HALF_TILES));
+  // The character's own square, at the size a shot is tested against — which is
+  // the one number in this picture that decides every hit.
+  marks.push(
+    onPlayer(DodgeMarkKind.Player, scene.selfX, scene.selfY, PLAYER_HALF_TILES, DodgeMarkShape.Box),
+  );
   if (scene.engageTiles > 0) {
     marks.push(onPlayer(DodgeMarkKind.Engage, scene.selfX, scene.selfY, scene.engageTiles));
   }
@@ -162,10 +193,12 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
     // is what a sweep multiplies by.
     const velocityX = scene.bodies.velocityXOf(i) * A_SECOND_MS;
     const velocityY = scene.bodies.velocityYOf(i) * A_SECOND_MS;
-    marks.push(onBody(DodgeMarkKind.Body, x, y, half, velocityX, velocityY));
-    marks.push(
-      onBody(DodgeMarkKind.KeepAway, x, y, nearEdgeOf(half, keepAwayTiles), velocityX, velocityY),
-    );
+    // The body as the square it collides as, and the room as that square grown
+    // by the gap the setting asks for — which is the shape the planner scores,
+    // corners and all. See `EnemyBodies.crowdingAt`.
+    const outer = nearEdgeOf(half, keepAwayTiles);
+    marks.push(onBody(DodgeMarkKind.Body, x, y, half, velocityX, velocityY, 0));
+    marks.push(onBody(DodgeMarkKind.KeepAway, x, y, outer, velocityX, velocityY, outer - half));
   }
 
   return marks;
@@ -174,13 +207,21 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
 /** Milliseconds in the second the wire counts velocities in. */
 const A_SECOND_MS = 1000;
 
-function onPlayer(kind: DodgeMarkKind, x: number, y: number, radiusTiles: number): DodgeMark {
+function onPlayer(
+  kind: DodgeMarkKind,
+  x: number,
+  y: number,
+  radiusTiles: number,
+  shape: DodgeMarkShape = DodgeMarkShape.Circle,
+): DodgeMark {
   return {
     kind,
     anchor: DodgeMarkAnchor.Player,
+    shape,
     x,
     y,
     radiusTiles,
+    cornerTiles: 0,
     velocityX: 0,
     velocityY: 0,
     permille: NOT_WAITING,
@@ -197,9 +238,11 @@ function atPlace(
   return {
     kind,
     anchor: DodgeMarkAnchor.Place,
+    shape: DodgeMarkShape.Circle,
     x,
     y,
     radiusTiles,
+    cornerTiles: 0,
     velocityX: 0,
     velocityY: 0,
     permille,
@@ -213,13 +256,16 @@ function onBody(
   radiusTiles: number,
   velocityX: number,
   velocityY: number,
+  cornerTiles: number,
 ): DodgeMark {
   return {
     kind,
     anchor: DodgeMarkAnchor.Place,
+    shape: DodgeMarkShape.Box,
     x,
     y,
     radiusTiles,
+    cornerTiles,
     velocityX,
     velocityY,
     permille: NOT_WAITING,

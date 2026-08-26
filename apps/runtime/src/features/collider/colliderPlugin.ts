@@ -40,26 +40,32 @@ const FEATURE_KEY = 'player.collider';
 const MULTIPLIER_KEY = 'player.colliderMultiplier';
 
 /**
- * The health bar, held at one colour, and the colour to hold it at.
+ * The health bar, painted by the module, and what to paint it with.
  *
  * **A sign rather than a feature of its own.** Nothing about the collision
  * circle is visible: a player with no hitbox looks exactly like a player with
  * one until something fails to hit them, and by then it is too late to notice
- * the switch was off. So the bar says which it is, in a colour nothing in this
- * game's palette is near, and it says it for as long as the claim below is
- * live — see `game::HealthBarTint` for how the module paints it.
+ * the switch was off. So the bar says which it is, in something no state of the
+ * game paints it, and it says it for as long as the claim below is live — see
+ * `game::HealthBarTint` for how the module paints it.
  */
 const TINT_KEY = 'scene.healthBarTint';
 const TINT_COLOUR_KEY = 'scene.healthBarTintColour';
 
 /**
- * The sign's colour: violet, as `#rrggbbaa`.
+ * The sign: a cycle through every hue rather than any one colour.
  *
- * The one spelling the module reads — see `FeatureColour` in
- * `apps/native/src/app/Engine.cpp`, which refuses any other rather than
- * guessing, because a colour read wrong looks like a feature that worked.
+ * **A single colour is one the bar might have worn anyway.** The game paints it
+ * green, amber and red as health drains, so a violet bar is a bar at some
+ * health somebody has to know the shade of — while no state of the game walks
+ * it through the whole wheel. The cycle itself is the module's, and it has to
+ * be: a colour that moves every frame sent over the link would be a message a
+ * frame. See `RainbowColour` in `apps/native/src/core/Colour.h`.
+ *
+ * One of the two spellings that key reads, and anything else is dropped rather
+ * than guessed at, because a sign read wrong looks like a feature that worked.
  */
-const NO_HITBOX_COLOUR = '#a855f7ff';
+const NO_HITBOX_SIGN = 'rainbow';
 
 /**
  * How often the claim is restated. The second player noclip restates on, and
@@ -124,7 +130,7 @@ export function createColliderPlugin(): Plugin {
        */
       let sent: number | undefined;
 
-      /** Whether the module was last told to hold the bar at the sign colour. */
+      /** Whether the module was last told to paint the bar with the sign. */
       let signing = false;
 
       const claim = (): void => {
@@ -139,11 +145,11 @@ export function createColliderPlugin(): Plugin {
         context.native.setFeature(FEATURE_KEY, true);
 
         if (gone) {
-          // The colour once, ahead of the claim that applies it, for the same
+          // The sign once, ahead of the claim that applies it, for the same
           // reason the multiplier goes first. The claim itself is restated on
           // every tick, because it is the same kind of lease as the collider's.
           if (!signing) {
-            context.native.setFeature(TINT_COLOUR_KEY, NO_HITBOX_COLOUR);
+            context.native.setFeature(TINT_COLOUR_KEY, NO_HITBOX_SIGN);
             signing = true;
           }
           context.native.setFeature(TINT_KEY, true);

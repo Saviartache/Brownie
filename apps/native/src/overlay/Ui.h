@@ -27,7 +27,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "game/ShieldMode.h"
 #include "overlay/Inspector.h"
 
 namespace brownie::overlay {
@@ -243,15 +242,6 @@ struct OverlayModel {
     bool shot_noclip_wanted = false;
     bool shot_noclip_installed = false;
     std::uint32_t shots_passed = 0;
-    /// What the projectile shield is doing to the shots aimed at the player,
-    /// what a shrink is scaling by, and how many shots have been taken apart.
-    /// The mode rather than a flag, for the reason `collision_scale` is a
-    /// number: "on" says nothing about which of three things is happening, and
-    /// two of them are not the one most people mean by it.
-    game::ShieldMode shot_shield_mode = game::ShieldMode::Off;
-    float shot_shield_scale = 0.0F;
-    bool shot_shield_installed = false;
-    std::uint32_t shots_guarded = 0;
     bool walk_noclip_wanted = false;
     std::uint32_t walks_allowed = 0;
     /// How many walkability predicates are detoured.

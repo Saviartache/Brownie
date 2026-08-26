@@ -8,6 +8,7 @@ namespace {
 
 constexpr std::string_view kBeginKind = "dodge-begin";
 constexpr std::string_view kTrailKind = "trails";
+constexpr std::string_view kShotKind = "shots";
 constexpr std::string_view kMarkKind = "marks";
 constexpr std::string_view kEndKind = "dodge-end";
 
@@ -122,7 +123,7 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
         return true;
     }
 
-    if (kind != kTrailKind && kind != kMarkKind) {
+    if (kind != kTrailKind && kind != kShotKind && kind != kMarkKind) {
         return false;
     }
     // Outside a set. Ignored rather than drawn, for the reason above.
@@ -169,11 +170,26 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
             int anchor = 0;
             int velocity_x = 0;
             int velocity_y = 0;
+            int shape = 0;
+            int corner = 0;
             (void)ParseInt(TakeNumber(field), anchor);
             (void)ParseInt(TakeNumber(field), velocity_x);
             (void)ParseInt(TakeNumber(field), velocity_y);
+            (void)ParseInt(TakeNumber(field), shape);
+            (void)ParseInt(TakeNumber(field), corner);
             DodgeMark mark;
             mark.kind = static_cast<MarkKind>(mark_kind);
+            // A shape from a newer runtime is drawn as the circle it also is,
+            // for the same reason an unknown kind is dropped: the nearest true
+            // thing beats an invented one. The rounding is held inside the
+            // radius, so a corner can never be larger than the box it is on.
+            mark.shape = shape == static_cast<int>(MarkShape::Box) && shape <= kMaxMarkShape
+                             ? MarkShape::Box
+                             : MarkShape::Circle;
+            const float corner_tiles = static_cast<float>(corner) / kHundredths;
+            mark.corner_tiles = corner_tiles < 0.0F
+                                    ? 0.0F
+                                    : (corner_tiles > radius_tiles ? radius_tiles : corner_tiles);
             mark.centre =
                 TilePoint{static_cast<float>(x) / kHundredths, static_cast<float>(y) / kHundredths};
             mark.radius_tiles = radius_tiles;
@@ -183,6 +199,42 @@ bool DodgePicture::Apply(std::string_view record, std::uint64_t now_ms) {
             mark.velocity_x = Believable(static_cast<float>(velocity_x) / kHundredths);
             mark.velocity_y = Believable(static_cast<float>(velocity_y) / kHundredths);
             staged_marks_.push_back(mark);
+        }
+        return true;
+    }
+
+    // How big each shot is and where it is going, beside the paths rather than
+    // inside them: a path is a variable-length list of points, so a field
+    // appended after one is a point. One field per path, in the order the paths
+    // were stated — a runtime that says nothing here leaves every shot at the
+    // size and stillness this side starts them at, which is what it only ever
+    // sent.
+    if (kind == kShotKind) {
+        std::size_t at = 0;
+        for (;;) {
+            std::string_view field = TakeField(rest);
+            if (field.empty() || at >= staged_trails_.size()) {
+                break;
+            }
+            int half = 0;
+            int velocity_x = 0;
+            int velocity_y = 0;
+            if (!ParseInt(TakeNumber(field), half)) {
+                at += 1;
+                continue;
+            }
+            (void)ParseInt(TakeNumber(field), velocity_x);
+            (void)ParseInt(TakeNumber(field), velocity_y);
+            ShotTrail& trail = staged_trails_[at];
+            const float half_tiles = static_cast<float>(half) / kHundredths;
+            // A hitbox the size of the room is not a shot, and a negative one is
+            // not a number anybody meant. Drawn as a line instead of dropping
+            // the path, because where it goes is still true.
+            trail.half_tiles =
+                half_tiles < 0.0F || half_tiles > kMaxRadiusTiles ? 0.0F : half_tiles;
+            trail.velocity_x = Believable(static_cast<float>(velocity_x) / kHundredths);
+            trail.velocity_y = Believable(static_cast<float>(velocity_y) / kHundredths);
+            at += 1;
         }
         return true;
     }

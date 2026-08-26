@@ -26,7 +26,6 @@ import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
 import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
-import { createShotShieldPlugin } from './features/shotshield/shotShieldPlugin.js';
 import { createSkinChangerPlugin } from './features/skinchanger/skinChangerPlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
 import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
@@ -598,6 +597,21 @@ export class Application {
                 fields.push(numbers.join(','));
               }
               this.#native.publishRecord(fields.join('|'));
+              // **Beside the paths rather than inside them**, because a path is
+              // a variable-length list of points and a field appended after one
+              // is a point. One field per path, in the same order: a module that
+              // has not heard of this record draws the lines it always drew.
+              const boxes: string[] = ['shots'];
+              for (const path of paths) {
+                boxes.push(
+                  [
+                    Math.round(path.halfTiles * 100),
+                    Math.round(path.velocityX * 100),
+                    Math.round(path.velocityY * 100),
+                  ].join(','),
+                );
+              }
+              this.#native.publishRecord(boxes.join('|'));
             }
             if (marks.length > 0) {
               const fields: string[] = ['marks'];
@@ -616,6 +630,11 @@ export class Application {
                     mark.anchor,
                     Math.round(mark.velocityX * 100),
                     Math.round(mark.velocityY * 100),
+                    // And after those, what shape the radius describes. An older
+                    // module draws the circle through a box's flat sides, which
+                    // is the nearest true thing it can say about one.
+                    mark.shape,
+                    Math.round(mark.cornerTiles * 100),
                   ].join(','),
                 );
               }
@@ -790,13 +809,6 @@ export class Application {
     // handed over. Built here rather than dropped in `plugins/` because what it
     // claims — and what expiry puts back — is worth having tests for.
     this.#plugins.load(createColliderPlugin());
-
-    // The collider's sibling, on the other side of the same collision test:
-    // that one shrinks the player, this one shrinks what is shot at them.
-    // Built here for the same reason — it says a mode and a number to the
-    // module and the module does the rest, so nothing has to be handed over,
-    // and what its lease puts back is worth having tests for.
-    this.#plugins.load(createShotShieldPlugin());
 
     // Movement too, but by rewriting the stream rather than by writing into the
     // game. It is built here for the one reason auto-aim and anti-lag are:

@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include <cstddef>
+
 namespace brownie::overlay {
 namespace {
 
@@ -21,6 +23,16 @@ constexpr float kStroke = 2.0F;
 /// where every shot is as loud as the character is a picture of nothing.
 constexpr float kShotRadius = 3.0F;
 constexpr float kTrailStroke = 1.5F;
+/// Below this a shot's own square is thinner than the line describing it, so
+/// there is nothing to see and ImGui draws a degenerate quad as a smear.
+constexpr float kMinBandWidth = 2.0F;
+/// How solid the swept band and the shot's own square are.
+///
+/// The band is the fainter of the two on purpose: fifty of them overlapping is
+/// the ordinary state of a fight, and a corridor drawn as loudly as the shot
+/// hides the thing it belongs to.
+constexpr float kBandAlpha = 0.16F;
+constexpr float kHeadFill = 0.35F;
 /// The planner's own circles, which are drawn at whatever size the world says.
 ///
 /// Thinner than the marks above: several of them overlap around every monster,
@@ -64,6 +76,21 @@ constexpr float kBlastFill = 0.22F;
     const float red = amount > 0.5F ? (1.0F - amount) * 2.0F : 1.0F;
     const float green = amount > 0.5F ? 1.0F : amount * 2.0F;
     return ImGui::ColorConvertFloat4ToU32(ImVec4{red, green, 0.15F, alpha});
+}
+
+/// Copies an outline into the buffer ImGui wants, and says how much it took.
+///
+/// **A copy rather than a cast**, even though the two structs hold the same two
+/// floats: `ScreenPoint` is this file's own shape and `ImVec2` is the drawing
+/// library's, and one of them being laid out like the other is not a promise
+/// either of them makes. A bounded stack buffer, so the cost is a memcpy of at
+/// most a few hundred bytes per shape.
+[[nodiscard]] int Gather(const ScreenPoint* outline, int count, ImVec2* into) {
+    const int taken = count > kMaxOutlinePoints ? kMaxOutlinePoints : count;
+    for (int i = 0; i < taken; ++i) {
+        into[i] = At(outline[i]);
+    }
+    return taken;
 }
 
 }  // namespace
@@ -117,6 +144,20 @@ void DrawShotTrails(const TrailMarkers& markers) {
             continue;
         }
         const float life = markers.lives[trail];
+        const float width = markers.widths == nullptr ? 0.0F : markers.widths[trail];
+
+        // **The band the shot actually sweeps, under the line that says where
+        // it goes.** The line alone is a claim about a point, and nothing in
+        // this game is a point: the widest shots are ten times the standard
+        // multiplier, so a picture of hairlines says a boss's wall of fire and
+        // a rat's pellet are the same thing. Faint, because it is the corridor
+        // rather than the shot, and drawn first so the line reads over it.
+        if (width > kMinBandWidth) {
+            for (int i = 0; i + 1 < length; ++i) {
+                list->AddLine(At(markers.points[offset + i]), At(markers.points[offset + i + 1]),
+                              Lifetime(life, kBandAlpha), width);
+            }
+        }
 
         // **The line is a gradient because the shot ages along it.** The head is
         // where the shot is now, with whatever life it has left; the far end is
@@ -135,8 +176,20 @@ void DrawShotTrails(const TrailMarkers& markers) {
                           Lifetime(left, alpha), kTrailStroke);
         }
 
-        // The shot itself, marked where it is right now.
-        list->AddCircleFilled(At(markers.points[offset]), kShotRadius, Lifetime(life, 1.0F));
+        // **The shot itself, at the size the game hits with.** Its own square
+        // rather than a dot, because that square is what every hit in this
+        // feature is decided by — and drawn as four projected corners because
+        // the camera can be turned. A shot with no collision at all keeps the
+        // dot: there is no square to draw, and the dot is what says it is there.
+        const ImU32 solid = Lifetime(life, 1.0F);
+        if (markers.heads != nullptr && width > kMinBandWidth) {
+            const ScreenPoint* head = markers.heads + static_cast<std::size_t>(trail) * 4;
+            list->AddQuadFilled(At(head[0]), At(head[1]), At(head[2]), At(head[3]),
+                                Lifetime(life, kHeadFill));
+            list->AddQuad(At(head[0]), At(head[1]), At(head[2]), At(head[3]), solid, kTrailStroke);
+        } else {
+            list->AddCircleFilled(At(markers.points[offset]), kShotRadius, solid);
+        }
         offset += length;
     }
 }
@@ -188,6 +241,23 @@ void DrawDodgeRings(const RingMark* marks, int count) {
             continue;
         }
         const ImVec2 centre = At(ring.centre);
+
+        // **The shapes that are squares are drawn as squares**, because that is
+        // what the planner measures them as: a body collides as an axis-aligned
+        // box, and the room kept around one is that box grown by a gap. Drawn
+        // through the corners the caller projected, so a turned camera slants
+        // them the way it slants everything else.
+        if (ring.outline != nullptr && ring.outline_count >= 3) {
+            ImVec2 outline[kMaxOutlinePoints];
+            const int taken = Gather(ring.outline, ring.outline_count, outline);
+            if (ring.role == RingRole::Body) {
+                list->AddConvexPolyFilled(outline, taken, Faded(mark, kBodyFill));
+            }
+            const ImU32 colour = ring.role == RingRole::Player ? line : mark;
+            const float stroke = ring.role == RingRole::KeepAway ? kStroke : kRingStroke;
+            list->AddPolyline(outline, taken, colour, ImDrawFlags_Closed, stroke);
+            continue;
+        }
 
         switch (ring.role) {
             case RingRole::Player:

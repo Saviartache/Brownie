@@ -175,14 +175,19 @@ constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultipli
 constexpr std::string_view kTintFeature = "scene.healthBarTint";
 constexpr std::string_view kTintColourFeature = "scene.healthBarTintColour";
 constexpr std::string_view kShotNoclipFeature = "shots.noclip";
-constexpr std::string_view kShotShieldFeature = "shots.shield";
-constexpr std::string_view kShotShieldModeFeature = "shots.shieldMode";
-constexpr std::string_view kShotShieldMultiplierFeature = "shots.shieldMultiplier";
 constexpr std::string_view kArcaneStyleFeature = "player.arcaneStyle";
 constexpr std::string_view kSkinFeature = "player.skin";
 constexpr std::string_view kGlowFeature = "player.glow";
 constexpr std::string_view kGlowColourFeature = "player.glowColour";
 constexpr std::string_view kFeatureOn = "true";
+
+/// The one thing a colour key carries that is not a colour: hold the bar at a
+/// cycle through every hue instead of at any one of them.
+///
+/// **A spelling on the colour's own key rather than a key of its own**, because
+/// the two are the same choice — what to paint with — and two keys would be two
+/// claims that can disagree about which of them the module is obeying.
+constexpr std::string_view kRainbowColour = "rainbow";
 
 /// The number a feature value carries, or nothing when it does not carry one.
 ///
@@ -219,34 +224,77 @@ constexpr std::string_view kFeatureOn = "true";
     return parsed;
 }
 
-/// The projectile shield mode a feature value names, or nothing when it names
-/// none of them.
-///
-/// **Spelled out rather than numbered.** A mode is what the plugin's `select`
-/// setting already carries — a key, not an index — so sending the key is one
-/// less table for the two sides to disagree about, and a build that adds a mode
-/// in the middle cannot silently turn a shrink into a redirect. An unknown
-/// spelling is refused rather than defaulted, because the mode that would be
-/// defaulted to is one somebody has to live through.
-[[nodiscard]] std::optional<game::ShieldMode> FeatureShieldMode(std::string_view value) noexcept {
-    if (value == "shrink") {
-        return game::ShieldMode::Shrink;
-    }
-    if (value == "disarm") {
-        return game::ShieldMode::Disarm;
-    }
-    if (value == "redirect") {
-        return game::ShieldMode::Redirect;
-    }
-    return std::nullopt;
-}
-
 /// How much of a chunk to fill before sending it.
 ///
 /// Well under the frame's 256 KB cap, and large enough that a whole image goes
 /// in a few hundred frames rather than a few thousand. One name per record
 /// would be the same bytes and a hundred times the round trips.
 constexpr std::size_t kDumpChunkBytes = 48u * 1024u;
+
+/// How many points each rounded corner of a box outline is drawn with.
+///
+/// Four is where a quarter turn stops looking like a chamfer at the zoom this
+/// is read at, and it keeps the whole outline at twenty points — well under
+/// what the overlay will copy for one shape.
+constexpr int kCornerSteps = 4;
+
+/// Below this a corner is a right angle, in tiles.
+constexpr float kSquareCorner = 0.01F;
+
+/// Appends the outline of an axis-aligned box, already projected.
+///
+/// **In tiles first and projected point by point**, because the camera can be
+/// turned: a square in the world is a slanted quad on the screen, and a
+/// rectangle drawn in window pixels would be a claim about the world that is
+/// only true while nobody has pressed the turn key.
+///
+/// The corners are quarter-circles of `corner_tiles`, which is what the room
+/// kept around a monster actually is — the body's square grown by a gap that is
+/// the same in every direction. A corner of nought is a plain square.
+///
+/// @returns how many points were appended.
+[[nodiscard]] int ProjectBoxOutline(const game::ScreenBasis& basis, game::WorldPoint centre,
+                                    float half_tiles, float corner_tiles,
+                                    std::vector<overlay::ScreenPoint>& into) {
+    if (!(half_tiles > 0.0F)) {
+        return 0;
+    }
+    const float corner = corner_tiles < 0.0F
+                             ? 0.0F
+                             : (corner_tiles > half_tiles ? half_tiles : corner_tiles);
+    const float flat = half_tiles - corner;
+
+    const auto add = [&](float x, float y) {
+        overlay::ScreenPoint on_screen;
+        game::ToScreen(basis, game::WorldPoint{centre.x + x, centre.y + y}, on_screen.x,
+                       on_screen.y);
+        into.push_back(on_screen);
+    };
+
+    if (corner < kSquareCorner) {
+        add(-half_tiles, -half_tiles);
+        add(half_tiles, -half_tiles);
+        add(half_tiles, half_tiles);
+        add(-half_tiles, half_tiles);
+        return 4;
+    }
+
+    // Clockwise from the top edge, one quarter turn at a time. The straight
+    // sides fall out of it: consecutive arcs end and start at the two ends of
+    // the edge between them, and the outline joins those with a line.
+    constexpr float kQuarter = 3.14159265F / 2.0F;
+    constexpr float kSign[4][2] = {{1.0F, -1.0F}, {1.0F, 1.0F}, {-1.0F, 1.0F}, {-1.0F, -1.0F}};
+    for (int quadrant = 0; quadrant < 4; ++quadrant) {
+        const float from = -kQuarter + static_cast<float>(quadrant) * kQuarter;
+        for (int step = 0; step <= kCornerSteps; ++step) {
+            const float angle =
+                from + kQuarter * (static_cast<float>(step) / static_cast<float>(kCornerSteps));
+            add(kSign[quadrant][0] * flat + corner * std::cos(angle),
+                kSign[quadrant][1] * flat + corner * std::sin(angle));
+        }
+    }
+    return 4 * (kCornerSteps + 1);
+}
 
 }  // namespace
 
@@ -399,44 +447,23 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     if (key == kTintColourFeature) {
         // Kept whether or not the claim is live, like the multiplier above and
         // for the same reason: it arrives ahead of the claim. A value that is
-        // not a colour is dropped, so the bar keeps the last one that was.
+        // neither a colour nor the cycle is dropped, so the bar keeps the last
+        // one that was.
+        if (value == kRainbowColour) {
+            tint_rainbow_.store(true, std::memory_order_relaxed);
+            return;
+        }
         const auto parsed = core::ParseColour(value);
         if (parsed.has_value()) {
             tint_colour_.store(*parsed, std::memory_order_relaxed);
+            // Last, so a frame between the two reads the cycle with the old
+            // colour behind it rather than the new colour without the cycle.
+            tint_rainbow_.store(false, std::memory_order_relaxed);
         }
         return;
     }
     if (key == kShotNoclipFeature) {
         shot_noclip_until_ms_.store(on ? now + kShotNoclipLeaseMs : 0, std::memory_order_relaxed);
-        return;
-    }
-    if (key == kShotShieldFeature) {
-        shot_shield_until_ms_.store(on ? now + kShotShieldLeaseMs : 0, std::memory_order_relaxed);
-        return;
-    }
-    if (key == kShotShieldModeFeature) {
-        // Kept whether or not the claim is live, like the collider's multiplier
-        // and for the same reason: it arrives ahead of the claim. A spelling
-        // this build does not know is dropped, so the shield keeps the last
-        // mode that was one rather than falling back to a mode nobody chose.
-        const auto parsed = FeatureShieldMode(value);
-        if (parsed.has_value()) {
-            shot_shield_mode_.store(*parsed, std::memory_order_relaxed);
-        }
-        return;
-    }
-    if (key == kShotShieldMultiplierFeature) {
-        // Clamped rather than trusted, exactly as the player's own collider
-        // multiplier is: above one is a *bigger* shot than the game built, and
-        // the module is not the plugin's to believe. What the shield does with
-        // a number it still cannot use is refuse the whole edit — see
-        // `PlanShotEdit` — so the clamp here is the first of two guards rather
-        // than the only one.
-        const auto parsed = FeatureNumber(value);
-        if (parsed.has_value()) {
-            shot_shield_multiplier_.store(std::clamp(*parsed, 0.0F, 1.0F),
-                                          std::memory_order_relaxed);
-        }
         return;
     }
     if (key == kArcaneStyleFeature) {
@@ -655,14 +682,6 @@ void Engine::AdvanceSetup() {
         InstallProjectileNoclip();
     }
 
-    // The shield's detour, on the same terms and for the same reason — it is
-    // the same class that has to exist first. Asked off the mode rather than
-    // off the lease so that this runs on the IPC thread's turn like its
-    // neighbours: the mode is only ever non-`Off` while a claim is live.
-    if (shot_shield_.mode() != game::ShieldMode::Off && !shot_shield_.installed()) {
-        InstallProjectileShield();
-    }
-
     // And again for the walkability predicates, with one difference: the world
     // manager exists as soon as the game builds a realm, so these resolve early
     // and the retry is for the case of switching the feature on at the login
@@ -724,9 +743,6 @@ void Engine::LetGo() noexcept {
     // with this off they forward every call, which is what they do when nobody
     // wants them.
     shot_noclip_.SetEnabled(false);
-    // And the shield, on the same terms. Its detour stays too, and with the
-    // mode off it builds shots exactly as the game does.
-    shot_shield_.SetMode(game::ShieldMode::Off);
 
     // Deliberately not stopped here: the link is the module's own and outlives
     // the game, and the runtime is told the game went away by the connection
@@ -748,17 +764,6 @@ void Engine::InstallProjectileNoclip() {
     // the loop is the retry, so it stays out of the runtime's log.
     (void)shot_noclip_.Install(route, binding_.MethodAddress(game::kShotHitsWall).value_or(nullptr),
                                binding_.MethodAddress(game::kShotTileBlocks).value_or(nullptr));
-}
-
-void Engine::InstallProjectileShield() {
-    game::ShotFieldRoute route;
-    route.damages_players_at = binding_.FieldOffset(game::kShotDamagesPlayers).value_or(0);
-    route.damages_enemies_at = binding_.FieldOffset(game::kShotDamagesEnemies).value_or(0);
-    route.collision_half_at = binding_.FieldOffset(game::kShotCollisionHalf).value_or(0);
-
-    // Failure is the ordinary answer until the first shot of the session, and
-    // the loop is the retry, so it stays out of the runtime's log.
-    (void)shot_shield_.Install(route, binding_.MethodAddress(game::kShotInit).value_or(nullptr));
 }
 
 void Engine::InstallPlayerNoclip() {
@@ -968,18 +973,11 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
     trail_points_.clear();
     trail_lengths_.clear();
     trail_lives_.clear();
+    trail_widths_.clear();
+    trail_heads_.clear();
     ring_marks_.clear();
-
-    for (const overlay::ShotTrail& trail : picture_.trails()) {
-        for (const overlay::TilePoint& point : trail.points) {
-            overlay::ScreenPoint on_screen;
-            game::ToScreen(screen->basis, game::WorldPoint{point.x, point.y}, on_screen.x,
-                           on_screen.y);
-            trail_points_.push_back(on_screen);
-        }
-        trail_lengths_.push_back(static_cast<int>(trail.points.size()));
-        trail_lives_.push_back(trail.life);
-    }
+    ring_outlines_.clear();
+    ring_outline_at_.clear();
 
     // **A radius in tiles is a different number of pixels at every zoom**, and
     // the camera is the only thing that knows which — so the conversion happens
@@ -994,10 +992,10 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
 
     // **What the picture was published at, and how long ago that was.** A set
     // arrives twenty times a second against a frame that draws several times
-    // faster, so a circle pinned to the tile it was stated at steps visibly
+    // faster, so anything pinned to the tile it was stated at steps visibly
     // across whatever it belongs to. Carried forward by its own velocity
     // instead — bounded, because a runtime that has gone quiet must not send
-    // circles flying off the map while the set is still counted as fresh.
+    // shapes flying off the map while the set is still counted as fresh.
     const std::uint64_t stated_ms = picture_.committed_at_ms();
     const std::uint64_t since_ms = now_ms > stated_ms ? now_ms - stated_ms : 0;
     const float carried_seconds =
@@ -1005,12 +1003,43 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
                                                               : since_ms) /
         1000.0F;
 
+    for (const overlay::ShotTrail& trail : picture_.trails()) {
+        for (const overlay::TilePoint& point : trail.points) {
+            overlay::ScreenPoint on_screen;
+            game::ToScreen(screen->basis, game::WorldPoint{point.x, point.y}, on_screen.x,
+                           on_screen.y);
+            trail_points_.push_back(on_screen);
+        }
+        trail_lengths_.push_back(static_cast<int>(trail.points.size()));
+        trail_lives_.push_back(trail.life);
+        trail_widths_.push_back(trail.half_tiles * 2.0F * pixels_per_tile);
+        // The shot's own square, where the shot is on *this* frame rather than
+        // where the set said it was a moment ago. Four corners because a turned
+        // camera slants a square, and always four so the overlay can index them
+        // without a second length to keep in step.
+        const overlay::TilePoint head =
+            trail.points.empty() ? overlay::TilePoint{} : trail.points.front();
+        const float head_x = head.x + trail.velocity_x * carried_seconds;
+        const float head_y = head.y + trail.velocity_y * carried_seconds;
+        const float half = trail.half_tiles;
+        const float corners[4][2] = {{head_x - half, head_y - half},
+                                     {head_x + half, head_y - half},
+                                     {head_x + half, head_y + half},
+                                     {head_x - half, head_y + half}};
+        for (const auto& corner : corners) {
+            overlay::ScreenPoint on_screen;
+            game::ToScreen(basis, game::WorldPoint{corner[0], corner[1]}, on_screen.x,
+                           on_screen.y);
+            trail_heads_.push_back(on_screen);
+        }
+    }
+
     for (const overlay::DodgeMark& mark : picture_.marks()) {
         overlay::RingMark ring;
         ring.role = static_cast<overlay::RingRole>(mark.kind);
-        // The player's own three are drawn where the character actually is:
-        // this side reads that every frame, and the runtime hears about it five
-        // times a second. See `DodgeMark::follows_player`.
+        // The player's own are drawn where the character actually is: this side
+        // reads that every frame, and the runtime hears about it five times a
+        // second. See `DodgeMark::follows_player`.
         const game::WorldPoint centre =
             mark.follows_player
                 ? game::WorldPoint{screen->player.x, screen->player.y}
@@ -1019,7 +1048,24 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
         game::ToScreen(basis, centre, ring.centre.x, ring.centre.y);
         ring.radius = mark.radius_tiles * pixels_per_tile;
         ring.ahead = mark.ahead;
+        // A box arrives as its own outline, worked out in tiles and projected
+        // point by point — the camera can be turned, and an axis-aligned square
+        // in the world is a slanted quad on the screen.
+        ring_outline_at_.push_back(static_cast<int>(ring_outlines_.size()));
+        ring.outline_count = mark.shape == overlay::MarkShape::Box
+                                 ? ProjectBoxOutline(basis, centre, mark.radius_tiles,
+                                                     mark.corner_tiles, ring_outlines_)
+                                 : 0;
         ring_marks_.push_back(ring);
+    }
+
+    // Resolved now rather than as each was pushed: the buffer moves as it
+    // grows, and a pointer taken into it beforehand points at freed memory.
+    for (std::size_t i = 0; i < ring_marks_.size(); ++i) {
+        if (ring_marks_[i].outline_count <= 0) {
+            continue;
+        }
+        ring_marks_[i].outline = ring_outlines_.data() + ring_outline_at_[i];
     }
 
     // The circles under the paths: the paths are what moves, and a line lost
@@ -1031,6 +1077,8 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
     markers.points = trail_points_.data();
     markers.lengths = trail_lengths_.data();
     markers.lives = trail_lives_.data();
+    markers.widths = trail_widths_.data();
+    markers.heads = trail_heads_.data();
     markers.count = count;
     overlay::DrawShotTrails(markers);
     return count;
@@ -1326,7 +1374,7 @@ void Engine::DrawFrame() {
     const std::optional<game::UiColor> glow =
         GlowWanted(now) ? std::optional<game::UiColor>{game::UnpackColour(GlowColour())}
                         : std::nullopt;
-    patches_.Want({tint, game::UnpackColour(TintColour()), collider});
+    patches_.Want({tint, game::UnpackColour(TintColour(now)), collider});
     patches_.Apply(now);
     cosmetics_.Want(skin, arcane_style, glow);
     cosmetics_.Apply(now);
@@ -1338,13 +1386,6 @@ void Engine::DrawFrame() {
     // failed and switched itself off.
     const bool shots_pass_walls = ShotNoclipWanted(now);
     shot_noclip_.SetEnabled(shots_pass_walls);
-
-    // The same store again, for the shield. The multiplier goes first: the
-    // shield reads both when a shot is built, and a mode published ahead of the
-    // number it scales by would shrink one volley by whatever came before.
-    const game::ShieldMode shield = ShotShieldWanted(now);
-    shot_shield_.SetMultiplier(shot_shield_multiplier_.load(std::memory_order_relaxed));
-    shot_shield_.SetMode(shield);
 
     // The same store again, for the claim that made the pattern.
     const bool walk_wanted = WalkNoclipWanted(now);
@@ -1376,13 +1417,6 @@ void Engine::DrawFrame() {
     frame_model_.shot_noclip_wanted = shots_pass_walls;
     frame_model_.shot_noclip_installed = shot_noclip_.installed();
     frame_model_.shots_passed = shot_noclip_.passed();
-    // What this feature produces is *nothing happening*, so the count is not a
-    // nicety here: a shield that resolved nothing and a realm that has not shot
-    // at the player yet look identical without it.
-    frame_model_.shot_shield_mode = shield;
-    frame_model_.shot_shield_scale = shot_shield_.multiplier();
-    frame_model_.shot_shield_installed = shot_shield_.installed();
-    frame_model_.shots_guarded = shot_shield_.guarded();
     frame_model_.walk_noclip_wanted = walk_wanted;
     frame_model_.walks_allowed = walk_noclip_.allowed();
     frame_model_.walk_gates = walk_noclip_.hooked();

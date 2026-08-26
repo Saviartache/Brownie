@@ -47,6 +47,55 @@ namespace brownie::core {
            (channel(channels[2]) << 8) | channel(channels[3]);
 }
 
+/// Where a rainbow has got to at `now_ms`, as one word.
+///
+/// **A sign is only a sign while nothing else can be mistaken for it.** The bar
+/// the game paints goes green, amber and red as health drains, so any one
+/// colour is a colour the bar might have worn anyway — but no state of the game
+/// walks it through every hue in turn, which is what makes the cycle readable
+/// at a glance and unmistakable when it is read.
+///
+/// Full saturation and full brightness at every step: one channel at everything
+/// and one at nothing, so the walk never passes through a grey that reads as
+/// the bar having gone out. The step is a byte because that is what a channel
+/// is — 1530 of them go round the wheel, and a finer period would repeat
+/// colours rather than add any.
+///
+/// A period of nothing is the colour the cycle starts at. The period is this
+/// module's own constant, so that is a division which cannot happen rather than
+/// a case with a meaning.
+[[nodiscard]] constexpr std::uint32_t RainbowColour(std::uint64_t now_ms,
+                                                    std::uint32_t period_ms) noexcept {
+    constexpr std::uint32_t kFull = 255;
+    constexpr std::uint32_t kSextants = 6;
+    if (period_ms == 0) {
+        return PackColourChannels({1.0F, 0.0F, 0.0F, 1.0F});
+    }
+
+    // Taken modulo the period first, so the multiplication below is bounded by
+    // one turn however long the module has been running.
+    const auto step =
+        static_cast<std::uint32_t>((now_ms % period_ms) * (kFull * kSextants) / period_ms);
+    const float rising = static_cast<float>(step % kFull) / static_cast<float>(kFull);
+    const float falling = 1.0F - rising;
+    switch (step / kFull) {
+        case 0:
+            return PackColourChannels({1.0F, rising, 0.0F, 1.0F});
+        case 1:
+            return PackColourChannels({falling, 1.0F, 0.0F, 1.0F});
+        case 2:
+            return PackColourChannels({0.0F, 1.0F, rising, 1.0F});
+        case 3:
+            return PackColourChannels({0.0F, falling, 1.0F, 1.0F});
+        case 4:
+            return PackColourChannels({rising, 0.0F, 1.0F, 1.0F});
+        // The sixth and last, and the only value left: the step is bounded by
+        // six sextants of a byte, so there is no seventh to fall through to.
+        default:
+            return PackColourChannels({1.0F, 0.0F, falling, 1.0F});
+    }
+}
+
 /// `#rrggbbaa` as one word, or nothing when the text is not that.
 ///
 /// **One spelling, and everything else refused.** A short form accepted here

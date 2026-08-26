@@ -50,6 +50,18 @@ struct ShotTrail {
     /// How much of its life is left, from one at the moment it was fired to
     /// nought as it expires. What the colour along the line is made of.
     float life = 0.0F;
+    /// Half the side of the square this shot collides with, in tiles.
+    ///
+    /// **A line says where a shot goes and nothing about what it takes with
+    /// it.** The game's widest shots are ten times the standard multiplier, so
+    /// hairlines say a boss's wall of fire and a rat's pellet are the same
+    /// thing. Nought for the ones the game gives no collision at all — the
+    /// warning telegraphs — which is why the planner walks through them.
+    float half_tiles = 0.0F;
+    /// How fast it is travelling, in tiles a second, for drawing it between
+    /// publishes where it is rather than where it was last stated.
+    float velocity_x = 0.0F;
+    float velocity_y = 0.0F;
     std::vector<TilePoint> points;
 };
 
@@ -70,11 +82,27 @@ enum class MarkKind : int {
 /// The largest kind this build knows, for refusing the ones it does not.
 inline constexpr int kMaxMarkKind = 4;
 
-/// One circle on the ground.
+/// What outline the radius describes. Mirrors `DodgeMarkShape` in the runtime.
+///
+/// A box is stated by the same half-extent a circle is — middle to flat side —
+/// so a build that does not know this field draws a circle through the box's
+/// sides, which is the nearest true thing it can say about one.
+enum class MarkShape : int {
+    Circle = 0,
+    Box = 1,
+};
+
+inline constexpr int kMaxMarkShape = 1;
+
+/// One shape on the ground.
 struct DodgeMark {
     MarkKind kind = MarkKind::Player;
+    MarkShape shape = MarkShape::Circle;
     TilePoint centre;
     float radius_tiles = 0.0F;
+    /// How far in from a box's corners its rounding starts, in tiles. Nought
+    /// for a plain square and for every circle.
+    float corner_tiles = 0.0F;
     /// How much of this one's wait is still ahead, from one to nought. Only a
     /// blast has a wait; everything else is a fact about now and carries one.
     float ahead = 1.0F;

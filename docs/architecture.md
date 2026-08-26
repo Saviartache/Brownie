@@ -535,7 +535,7 @@ process ends: `DllMain` may not tear anything down (loader lock), and
 ### The scene
 
 `ScenePatches` owns what the module does through the scene itself: the local
-player's health bar held at one colour, the local player's collision radius
+player's health bar held at a colour of ours, the local player's collision radius
 scaled, and a line of the game's own floating text shown over the player. Area
 damage is not decided by that Unity field: the collider plugin handles its
 separate `AOEACK` protocol path in the runtime.
@@ -552,9 +552,14 @@ until the runtime sends a `text` record, which today is noclip's countdown.
 
 The health bar tint has no switch of its own either, and deliberately: it is a
 **sign**, claimed by whatever feature needs to be visible while it is on. Today
-that is "no hitbox", which paints the bar purple — a player with no collision
-circle looks exactly like one with a circle until something fails to hit them,
-and by then it is too late to notice the switch was off.
+that is "no hitbox", which cycles the bar through every hue — a player with no
+collision circle looks exactly like one with a circle until something fails to
+hit them, and by then it is too late to notice the switch was off. A cycle
+rather than a colour because the game paints that bar green, amber and red as
+health drains, so any one colour is one the bar might have worn anyway, while no
+state of the game walks it round the wheel. The runtime asks for the cycle once
+and the module's own clock walks it: a colour that moves every frame would
+otherwise be a `setFeature` a frame.
 
 **Each of those is a lease, not a flag**, for the reason player noclip's is: a
 plugin can be disabled, can fail, can be unloaded, and the runtime behind it can

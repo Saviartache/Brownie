@@ -1,15 +1,14 @@
 // What the projectile features need to find, and where it lives.
 //
 // The counterpart of `PlayerFields.h` for the things a *shot* is made of: the
-// tick and the wall check, the two flags that say who a shot is allowed to
-// hurt, the square it stands on, and the one number that decides what it can
-// overlap. Same rules as the player's queries — obfuscated names carried with
-// their signatures, every answer resolved from the game that is running, and no
+// tick and the wall check, the flag that says whose shot it is, and the two
+// hops from a projectile to the collision layer of the square it is standing
+// on. Same rules as the player's queries — obfuscated names carried with their
+// signatures, every answer resolved from the game that is running, and no
 // constant anywhere.
 //
-// Two features read this table and they want different halves of it:
-// `ProjectileNoclip.h` lets the player's own shots cross walls, and
-// `ProjectileShield.h` takes the hitbox off the shots aimed at the player.
+// One feature reads this table: `ProjectileNoclip.h`, which lets the player's
+// own shots cross walls.
 //
 // **The reference implementation kept fallback offsets for two of these three
 // fields**, and used them whenever the lookup failed. That is the failure mode
@@ -53,48 +52,23 @@ inline constexpr std::string_view kShotHitsWall = "shot.hitsWall";
 /// that this is the wall check and the key above is not.
 inline constexpr std::string_view kShotTileBlocks = "shot.tileBlocks";
 
-/// Who a shot is allowed to hurt — two adjacent bytes, and they are opposites.
+/// The shot's "I may hurt monsters" flag, set on the player's own shots.
 ///
 /// **Proven, where the previous reading was a guess.** The projectile's
-/// initialiser sets them together off the owner's own descriptor:
+/// initialiser sets this and its neighbour together off the owner's own
+/// descriptor:
 ///
 /// ```text
-/// damagesPlayers = owner.isEnemy
-/// damagesEnemies = !owner.isEnemy
+/// damagesPlayers = owner.isEnemy       // the byte before this one
+/// damagesEnemies = !owner.isEnemy      // this one
 /// ```
 ///
-/// so a monster's shot carries the first and the player's own carries the
-/// second, and never both. The reference implementation read the second as "I
-/// am in flight" and this project carried that on as `shot.active`; it is the
-/// same byte and — for projectile noclip, which wants exactly the player's own
-/// shots — it guards the same set. The name was still wrong, and with its
-/// neighbour now in the table beside it, wrong in a way that would mislead.
-///
-/// Both are read into the Burst job that scans for a target, so writing either
-/// changes who the very next scan considers. See `ProjectileShield.h`.
-inline constexpr std::string_view kShotDamagesPlayers = "shot.damagesPlayers";
+/// so a monster's shot carries the first and the player's own carries this,
+/// and never both. The reference implementation read this as "I am in flight"
+/// and this project carried that on as `shot.active`; it is the same byte, and
+/// for projectile noclip — which wants exactly the player's own shots — it
+/// guards the same set. The guard was right for the wrong reason.
 inline constexpr std::string_view kShotDamagesEnemies = "shot.damagesEnemies";
-
-/// The half-side of the square a shot is tested by, in tiles.
-///
-/// The game's collision test is Chebyshev — `|dx| < r && |dy| < r` — and this
-/// is `r`. The initialiser writes `CollisionMult × 0.5` into it off the shot's
-/// own properties, which is the same number `features/dodge/hitbox.ts` computes
-/// out of `objects.xml` without being in the process.
-///
-/// **Nought is a shot nothing can ever overlap**, because the test is a strict
-/// `<` on both axes: at `r = 0` even a dead-centre hit fails. That is not an
-/// edge case the game would trip over either — sixty-odd of its own projectiles
-/// declare a collision multiplier of nought and fly through everything.
-inline constexpr std::string_view kShotCollisionHalf = "shot.collisionHalf";
-
-/// The projectile's initialiser, and the one place every shot passes through.
-///
-/// Twelve parameters, returning the projectile it just built. Projectiles are
-/// pooled, so this runs again on every reuse — which is what makes a write made
-/// here need no undoing: the game puts its own number back the next time the
-/// shot is fired. See `ProjectileShield.h`, which detours it.
-inline constexpr std::string_view kShotInit = "shot.init";
 
 /// The square a map object is standing on, and that square's collision layer.
 ///

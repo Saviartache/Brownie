@@ -136,17 +136,19 @@ describe('the collider plugin', () => {
 
     settings.apply('noHitbox', true);
 
-    // The colour once, ahead of the claim that applies it; the multiplier is
-    // nought whatever the slider was left at.
+    // The sign once, ahead of the claim that applies it; the multiplier is
+    // nought whatever the slider was left at. A cycle rather than a colour,
+    // because the module walks it and a colour a frame would be a message a
+    // frame.
     expect(features).toEqual([
       ['player.colliderMultiplier', 0],
       ['player.collider', true],
-      ['scene.healthBarTintColour', '#a855f7ff'],
+      ['scene.healthBarTintColour', 'rainbow'],
       ['scene.healthBarTint', true],
     ]);
   });
 
-  it('restates the sign with the claim, and says the colour only once', () => {
+  it('restates the sign with the claim, and says what to paint it with once', () => {
     const { settings } = load(true);
     settings.apply('noHitbox', true);
     features.length = 0;

@@ -36,6 +36,28 @@ export interface ShotPath {
   readonly lifePermille: number;
   /** Flat `x, y` pairs in tiles, the first being where the shot is now. */
   readonly points: readonly number[];
+  /**
+   * Half the side of this shot's own collision square, in tiles.
+   *
+   * **A line says where a shot goes and nothing about what it takes with it**,
+   * and the two are different questions: the game's widest shots are ten times
+   * the standard multiplier, so a picture drawn as hairlines says a boss's wall
+   * of fire and a rat's pellet are the same thing. Nought for the ones the game
+   * gives no collision at all — the warning telegraphs — which is worth seeing
+   * as much as the rest, because it is why the planner ignores them.
+   */
+  readonly halfTiles: number;
+  /**
+   * How fast it is travelling right now, in tiles a second.
+   *
+   * **Because a set goes out twenty times a second and a shot crosses a tile in
+   * less than that.** Drawn where it was last stated, the head of a fast shot
+   * steps a third of a tile at a time while the shot itself moves smoothly —
+   * and a hitbox that stutters is one nobody can check against the game's own.
+   * The same reason a monster's circle carries one; see `DodgeMarks`.
+   */
+  readonly velocityX: number;
+  readonly velocityY: number;
 }
 
 /**
@@ -75,9 +97,10 @@ export function shotPaths(
     // Evenly across what is left, so a shot near the end of its life is drawn
     // as a short line rather than a dozen points on top of each other.
     const steps = Math.min(MAX_PATH_POINTS, Math.max(2, Math.ceil(left / 60)));
+    const spanMs = left / (steps - 1);
     const points: number[] = [];
     for (let i = 0; i < steps; i += 1) {
-      const at = gameTimeMs + (left * i) / (steps - 1);
+      const at = gameTimeMs + spanMs * i;
       const position = shot.positionAt(at);
       // The last sample lands exactly on expiry, where the shot no longer
       // exists. Stopping is right: the line should end where the shot does.
@@ -89,6 +112,12 @@ export function shotPaths(
     paths.push({
       lifePermille: Math.max(0, Math.min(1000, Math.round((left / life) * 1000))),
       points,
+      halfTiles: shot.collisionHalfTiles,
+      // The first sampled step, which is the one the drawing carries the head
+      // along — not the shot's stated speed, because a curving or decelerating
+      // one is going somewhere its speed alone does not describe.
+      velocityX: ((points[2] ?? 0) - (points[0] ?? 0)) * (1000 / spanMs),
+      velocityY: ((points[3] ?? 0) - (points[1] ?? 0)) * (1000 / spanMs),
     });
   }
 
