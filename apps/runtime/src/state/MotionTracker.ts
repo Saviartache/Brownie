@@ -17,6 +17,23 @@
  * can be built on. A sustained heading change is treated separately as an arc:
  * averaging its axes would lag behind every turn and project the target along a
  * tangent it has already left.
+ *
+ * **A tick is the unit of time here, not a millisecond of ours.** The server
+ * moves everything one tick's worth between two descriptions of the world; what
+ * the network varies is when the packet carrying a description arrives. So a
+ * velocity is a displacement per *tick*, and the local clock is used only for
+ * the two questions it is the right clock for — how old a sighting is, and when
+ * to forget one. Dividing by the local interval instead is what let a stalled
+ * connection delivering three ticks in five milliseconds report a monster
+ * walking at two hundred tiles a second, and an aim led by that number lands on
+ * the far side of the room. That is why a sighting has no timestamp of its own:
+ * it belongs to the tick it arrived on. See {@link MotionTracker.tick}.
+ *
+ * **What could not have been walked is not a velocity.** A teleport, a `GOTO`
+ * and the server putting an entity back where it belongs all look like one
+ * enormous step, and dividing any of them by the time it took produces a lead
+ * measured in screens. Anything above {@link MAX_TILES_PER_MS} is taken as a
+ * reposition: the position is believed, the motion is re-learned.
  */
 
 export interface Motion {
@@ -67,10 +84,48 @@ const MAX_PREDICT_MS = 250;
 /** Smaller heading changes are more likely packet noise than a real turn. */
 const MIN_TURN_RADIANS = 0.05;
 
+/**
+ * Larger ones are a jink or a reversal, and not a circle to follow.
+ *
+ * The arc model answers a big heading change with a tight circle the entity is
+ * held to keep going round, so a monster that simply turned about is predicted
+ * onto the far side of that circle — which is a worse answer than the straight
+ * blend it would otherwise have got. It is also what keeps `halfTurn` away from
+ * `π`, where the chord-to-tangent correction below divides by a sine on its way
+ * to zero and comes back out the other side negative.
+ */
+const MAX_TURN_RADIANS = 1.2;
+
+/**
+ * The game's own server tick, for a tick that did not state its own length.
+ *
+ * `NEWTICK` carries the figure and it has been 200 ms for the life of the game;
+ * this is the fallback, not the number relied on.
+ */
+const SERVER_TICK_MS = 200;
+
+/** What a stated tick length is believed within, before it is a bad reading. */
+const MIN_TICK_MS = 20;
+const MAX_TICK_MS = 1000;
+
+/**
+ * The fastest anything in this game is taken to travel under its own power, in
+ * tiles per millisecond.
+ *
+ * Twenty tiles a second — over twice what the fastest possible character
+ * manages, see `MAX_WALK_TILES_PER_SECOND`, and clear of the bosses that
+ * charge. Nothing that walks is refused by it. What exceeds it did not walk,
+ * and the two cases are told apart because only one of them can be led.
+ */
+const MAX_TILES_PER_MS = 0.02;
+
 interface Track {
   x: number;
   y: number;
+  /** Local, and only ever asked how old a sighting is and when to forget it. */
   atMs: number;
+  /** On the tracker's own tick clock, which is what a velocity divides by. */
+  serverAtMs: number;
   velocityX: number;
   velocityY: number;
   angularVelocityPerMs: number;
@@ -102,26 +157,71 @@ export class MotionTracker {
   readonly #tracks = new Map<number, Track>();
   /** When the last sweep ran, so a tick that cannot find anything skips one. */
   #lastSweepAtMs = 0;
+  /**
+   * The server's own clock, advanced one tick per tick.
+   *
+   * Never read off a packet's timestamp and never off ours: what a velocity
+   * needs is how much *world* time separates two sightings, and that is one
+   * tick per tick however late the packets carrying them turn up.
+   */
+  #serverNowMs = 0;
+  /** When the tick being described arrived here. */
+  #atMs = 0;
+  #started = false;
 
   get size(): number {
     return this.#tracks.size;
   }
 
   /**
-   * Records where an entity is now.
+   * Opens a server tick. **Call once per `NEWTICK`, before its sightings.**
    *
-   * A sighting after a long gap restarts the estimate rather than dividing the
-   * distance by the gap: an entity that was out of view has not been walking in
-   * a straight line the whole time, and treating it as though it had produces a
-   * velocity of several tiles a second pointing wherever it re-appeared.
+   * Everything {@link observe} is told until the next call belongs to this
+   * tick, which is what makes a velocity a displacement per tick rather than
+   * per millisecond of network weather. Sweeping the stale tracks is folded in
+   * because it is the same event — the world has just been described again, and
+   * whatever went unmentioned for a while is gone.
+   *
+   * @param atMs When this tick reached us, on the world's own clock.
+   * @param tickLengthMs What the tick said it lasted — `NEWTICK.tickTime`. A
+   *   reading outside {@link MIN_TICK_MS}…{@link MAX_TICK_MS}, and a tick that
+   *   stated nothing, fall back to {@link SERVER_TICK_MS}.
    */
-  observe(objectId: number, x: number, y: number, atMs: number): void {
+  tick(atMs: number, tickLengthMs?: number): void {
+    if (!Number.isFinite(atMs)) return;
+    const stated = tickLengthMs ?? SERVER_TICK_MS;
+    const believable =
+      Number.isFinite(stated) && stated >= MIN_TICK_MS && stated <= MAX_TICK_MS
+        ? stated
+        : SERVER_TICK_MS;
+
+    this.#serverNowMs += believable;
+    this.#atMs = atMs;
+    this.#started = true;
+    this.#prune(atMs);
+  }
+
+  /**
+   * Records where an entity is on the tick that is open.
+   *
+   * A sighting after a long gap, and one that has moved further than anything
+   * walks, both restart the estimate rather than becoming a velocity: an entity
+   * that was out of view has not been walking in a straight line the whole
+   * time, and one that was picked up and put down did not walk at all.
+   *
+   * Silent until the first {@link tick}, because a sighting outside a tick has
+   * no interval to be a velocity over.
+   */
+  observe(objectId: number, x: number, y: number): void {
+    if (!this.#started || !Number.isFinite(x) || !Number.isFinite(y)) return;
+
     const track = this.#tracks.get(objectId);
     if (track === undefined) {
       this.#tracks.set(objectId, {
         x,
         y,
-        atMs,
+        atMs: this.#atMs,
+        serverAtMs: this.#serverNowMs,
         velocityX: 0,
         velocityY: 0,
         angularVelocityPerMs: 0,
@@ -135,28 +235,30 @@ export class MotionTracker {
       return;
     }
 
-    const elapsed = atMs - track.atMs;
+    // The same tick saying the same thing twice. Nothing new to derive, and no
+    // reason to disturb what is already known.
+    const elapsed = this.#serverNowMs - track.serverAtMs;
     if (elapsed <= 0) return;
+
     // Kept across a stale gap and across a stop, unlike the velocity: having
     // walked once is a fact about what the thing is, and the answer wanted is
     // "can this go anywhere", not "is it going somewhere this instant".
-    if (Math.abs(x - track.x) > MOVED_TILES || Math.abs(y - track.y) > MOVED_TILES) {
+    const stepX = x - track.x;
+    const stepY = y - track.y;
+    if (Math.abs(stepX) > MOVED_TILES || Math.abs(stepY) > MOVED_TILES) {
       track.moved = true;
     }
-    if (elapsed > STALE_MS) {
-      track.x = x;
-      track.y = y;
-      track.atMs = atMs;
-      track.velocityX = 0;
-      track.velocityY = 0;
-      track.angularVelocityPerMs = 0;
-      track.hasVelocitySample = false;
-      track.moving = false;
+
+    if (
+      this.#atMs - track.atMs > STALE_MS ||
+      Math.hypot(stepX, stepY) > MAX_TILES_PER_MS * elapsed
+    ) {
+      this.#restart(track, x, y);
       return;
     }
 
-    const sampleX = (x - track.x) / elapsed;
-    const sampleY = (y - track.y) / elapsed;
+    const sampleX = stepX / elapsed;
+    const sampleY = stepY / elapsed;
     const previousSpeed = Math.hypot(track.sampleVelocityX, track.sampleVelocityY);
     const sampleSpeed = Math.hypot(sampleX, sampleY);
     const hasTurn = track.hasVelocitySample && previousSpeed > 0 && sampleSpeed > 0;
@@ -167,7 +269,7 @@ export class MotionTracker {
         )
       : 0;
 
-    if (Math.abs(turn) >= MIN_TURN_RADIANS) {
+    if (Math.abs(turn) >= MIN_TURN_RADIANS && Math.abs(turn) <= MAX_TURN_RADIANS) {
       const betweenSamplesMs = (track.sampleElapsedMs + elapsed) / 2;
       track.angularVelocityPerMs = turn / betweenSamplesMs;
 
@@ -189,13 +291,17 @@ export class MotionTracker {
       track.angularVelocityPerMs = 0;
       track.moving = true;
     }
+    // Last, because the arc reconstruction above is the one step that can hand
+    // back more speed than the sample it was built from.
+    capSpeed(track);
     track.sampleVelocityX = sampleX;
     track.sampleVelocityY = sampleY;
     track.sampleElapsedMs = elapsed;
     track.hasVelocitySample = true;
     track.x = x;
     track.y = y;
-    track.atMs = atMs;
+    track.atMs = this.#atMs;
+    track.serverAtMs = this.#serverNowMs;
   }
 
   /**
@@ -215,7 +321,7 @@ export class MotionTracker {
    */
   motionAt(objectId: number, nowMs: number): Sighting | undefined {
     const track = this.#tracks.get(objectId);
-    if (track === undefined || !track.moving) return undefined;
+    if (track === undefined || !track.moving || !Number.isFinite(nowMs)) return undefined;
 
     const ahead = Math.min(Math.max(nowMs - track.atMs, 0), MAX_PREDICT_MS);
     const turn = track.angularVelocityPerMs * ahead;
@@ -258,19 +364,40 @@ export class MotionTracker {
   }
 
   /**
+   * Keeps where it is and forgets what it was doing.
+   *
+   * For the two cases nothing can be derived across: an entity that has been
+   * out of view, and one that was moved rather than having walked. A restarted
+   * track is in the same state as a freshly seen one — the position is known,
+   * the motion is not — so {@link motionAt} says nothing about it until two
+   * more ticks have described it.
+   */
+  #restart(track: Track, x: number, y: number): void {
+    track.x = x;
+    track.y = y;
+    track.atMs = this.#atMs;
+    track.serverAtMs = this.#serverNowMs;
+    track.velocityX = 0;
+    track.velocityY = 0;
+    track.angularVelocityPerMs = 0;
+    track.hasVelocitySample = false;
+    track.moving = false;
+  }
+
+  /**
    * Forgets anything not seen for a while.
    *
-   * **Safe to call every tick, and it does not walk every tick.** Nothing can
-   * go stale faster than {@link STALE_MS}, so sweeping more often than that
-   * cannot find anything a later sweep would not — and the sweep is over every
-   * entity being tracked, five times a second, for the length of a session.
+   * **Runs on every tick, and it does not walk every tick.** Nothing can go
+   * stale faster than {@link STALE_MS}, so sweeping more often than that cannot
+   * find anything a later sweep would not — and the sweep is over every entity
+   * being tracked, five times a second, for the length of a session.
    *
    * `forEach` rather than `for…of`: iterating a map's entries hands back a
    * fresh two-element array per entry, which for a realm's worth of monsters is
    * the largest thing this class would otherwise allocate. Deleting during it
    * is defined behaviour for a `Map`.
    */
-  prune(nowMs: number): void {
+  #prune(nowMs: number): void {
     if (nowMs - this.#lastSweepAtMs < STALE_MS) return;
     this.#lastSweepAtMs = nowMs;
 
@@ -282,5 +409,24 @@ export class MotionTracker {
   clear(): void {
     this.#tracks.clear();
     this.#lastSweepAtMs = 0;
+    this.#serverNowMs = 0;
+    this.#atMs = 0;
+    this.#started = false;
   }
+}
+
+/**
+ * Holds a track's velocity to what could have been walked.
+ *
+ * The sample it was built from is already inside the bound — anything above it
+ * restarted the track instead — but the arc reconstruction scales a chord up to
+ * its tangent, and a blend of two believable samples is believable only because
+ * this says so rather than because the arithmetic guarantees it.
+ */
+function capSpeed(track: Track): void {
+  const speed = Math.hypot(track.velocityX, track.velocityY);
+  if (speed <= MAX_TILES_PER_MS) return;
+  const scale = MAX_TILES_PER_MS / speed;
+  track.velocityX *= scale;
+  track.velocityY *= scale;
 }

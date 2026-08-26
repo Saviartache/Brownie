@@ -192,16 +192,19 @@ export class DodgeScene {
    * standing still. Auto-aim reached the same conclusion first, and this is its
    * rule.
    */
-  sight(session: SessionView): void {
+  sight(session: SessionView, tickLengthMs?: number): void {
     const world = session.world;
     const now = world.gameTimeMs;
+    // The tick's own length, because a velocity is a displacement per tick and
+    // our clock only says when the packet carrying one turned up. See
+    // `MotionTracker.tick`.
+    this.#motion.tick(now, tickLengthMs);
     // Everything visible, not just what is in reach: a monster walking into
     // reach has to arrive with a velocity already known, or the first plan that
     // can see it is a plan that thinks it is standing still.
     for (const enemy of world.enemies()) {
-      if (enemy.hp > 0) this.#motion.observe(enemy.objectId, enemy.x, enemy.y, now);
+      if (enemy.hp > 0) this.#motion.observe(enemy.objectId, enemy.x, enemy.y);
     }
-    this.#motion.prune(now);
     this.#sightedAtMs = now;
   }
 

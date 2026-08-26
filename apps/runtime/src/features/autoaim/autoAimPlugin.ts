@@ -251,19 +251,29 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       // Everything visible is sampled, not just what is in range: an enemy
       // walking into range has to arrive with a velocity already known, or the
       // first tick it can be shot at is a tick aimed at where it was.
-      context.packets.on('NEWTICK', (_packet, session) => {
+      //
+      // **The tick's own length goes with them.** A velocity is a displacement
+      // per server tick, and the tick states how long it was — which is the one
+      // figure a stalled connection cannot distort. Measuring the interval with
+      // our own clock instead is what let three ticks delivered in five
+      // milliseconds read as a monster at two hundred tiles a second, and an
+      // aim led by that goes to the far side of the room. See `MotionTracker`.
+      context.packets.on('NEWTICK', (packet, session) => {
         const world = session.world;
-        const now = world.gameTimeMs;
+        tracker.tick(world.gameTimeMs, packet.number('tickTime'));
         for (const enemy of world.enemies()) {
-          if (enemy.hp > 0) tracker.observe(enemy.objectId, enemy.x, enemy.y, now);
+          if (enemy.hp > 0) tracker.observe(enemy.objectId, enemy.x, enemy.y);
         }
-        tracker.prune(now);
       });
 
       /** Points the shots at whatever is worth shooting, or at nothing. */
       const aim = (session: SessionView): void => {
         const self = session.self;
         if (!self.alive) return;
+        // Everything below is measured from here, so a position that is not a
+        // number is a whole plan's worth of `NaN` — ending at a point handed to
+        // the module that points the shots.
+        if (!Number.isFinite(self.x) || !Number.isFinite(self.y)) return;
 
         const world = session.world;
         const now = world.gameTimeMs;
@@ -284,7 +294,18 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         // silently either way. The figure comes from `objects.xml` and can be
         // read off the World tab beside the name of the weapon it came from.
         const range = projectile.reachTiles;
+        if (!(range > 0)) return;
         const lead = leadPercent.get() / 100;
+
+        // **How long a shot has to hit something with, which is not its
+        // lifetime.** The two agree for an ordinary weapon and do not for one
+        // whose reach the data states outright, and the difference is the whole
+        // guard on how far this can aim: a solution is a point exactly
+        // `speed × flight` from the player, so bounding the flight by the reach
+        // is what makes every aim point somewhere the shot actually arrives.
+        // Without it a target with a mistaken velocity is answered with a
+        // meeting a screen away, which is the shot going nowhere near anything.
+        const maxFlightMs = Math.min(projectile.lifetimeMs, range / projectile.speedTilesPerMs);
 
         const aimPointFor = (enemy: EntityView): { x: number; y: number } | undefined => {
           // Where it is *now*, not where the last tick put it: between two
@@ -294,7 +315,10 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
           if (motion === undefined) {
             // Seen once, so there is no lead to apply. Aiming where it is now
             // is still aiming, and it is right for anything standing still —
-            // which is most of what a shot connects with anyway.
+            // which is most of what a shot connects with anyway. The only
+            // branch that publishes a number straight off the wire, so it is
+            // also the only one that has to ask whether it is one.
+            if (!Number.isFinite(enemy.x) || !Number.isFinite(enemy.y)) return undefined;
             return { x: enemy.x, y: enemy.y };
           }
           const intercept = solveIntercept({
@@ -302,13 +326,26 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             shooterY: self.y,
             targetX: motion.x,
             targetY: motion.y,
-            targetVelocityX: motion.velocityX * lead,
-            targetVelocityY: motion.velocityY * lead,
-            targetAngularVelocityPerMs: (motion.angularVelocityPerMs ?? 0) * lead,
+            targetVelocityX: motion.velocityX,
+            targetVelocityY: motion.velocityY,
+            targetAngularVelocityPerMs: motion.angularVelocityPerMs ?? 0,
             bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
-            maxFlightMs: projectile.lifetimeMs,
+            maxFlightMs,
           });
-          return intercept === undefined ? undefined : { x: intercept.x, y: intercept.y };
+          if (intercept === undefined) return undefined;
+
+          // **A share of the offset the solution names, not of the speed fed
+          // into it.** Scaling the velocity changes the question being asked:
+          // at 150% a target moving at three quarters of the shot's speed
+          // becomes one moving faster than it, which has no meeting point at
+          // all — so the setting meant to lead harder made the feature go
+          // silent against exactly the targets it was turned up for. Scaling
+          // the answer instead is monotone, always defined, and is what the
+          // words on the slider say.
+          return {
+            x: motion.x + (intercept.x - motion.x) * lead,
+            y: motion.y + (intercept.y - motion.y) * lead,
+          };
         };
 
         const rules = {

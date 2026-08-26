@@ -121,32 +121,115 @@ describe('solveIntercept', () => {
     ).toBeUndefined();
   });
 
+  // Every one of these would otherwise come back out as a pair of `NaN`, which
+  // is an angle handed to the module that points the player's shots.
+  it('refuses a problem stated in numbers that are not numbers', () => {
+    const at = { ...still, targetX: 5, targetY: 0 };
+    expect(solveIntercept({ ...at, targetX: Number.NaN })).toBeUndefined();
+    expect(solveIntercept({ ...at, shooterY: Number.NaN })).toBeUndefined();
+    expect(solveIntercept({ ...at, targetVelocityY: Number.NaN })).toBeUndefined();
+    expect(solveIntercept({ ...at, targetAngularVelocityPerMs: Number.NaN })).toBeUndefined();
+    expect(solveIntercept({ ...at, bulletSpeedTilesPerMs: Number.NaN })).toBeUndefined();
+    expect(solveIntercept({ ...at, maxFlightMs: Number.NaN })).toBeUndefined();
+    // Unbounded is not a bound: it is every solution accepted, however far off.
+    expect(solveIntercept({ ...at, maxFlightMs: Number.POSITIVE_INFINITY })).toBeUndefined();
+  });
+
   it('is a zero-length flight when the target is already on top of you', () => {
     expect(solveIntercept({ ...still, targetX: 0, targetY: 0 })?.flightMs).toBe(0);
   });
 });
 
 describe('MotionTracker', () => {
+  /** One server tick, arriving at `atMs`, carrying one entity's position. */
+  const sight = (tracker: MotionTracker, atMs: number, x: number, y: number): void => {
+    tracker.tick(atMs);
+    tracker.observe(1, x, y);
+  };
+
   it('has no opinion after a single sighting', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
+    sight(tracker, 0, 0, 0);
     expect(tracker.motionAt(1, 0)).toBeUndefined();
+  });
+
+  it('has no opinion about a sighting that arrived outside any tick', () => {
+    // A velocity is a displacement per tick, so a sighting belonging to no tick
+    // has no interval to be one over.
+    const tracker = new MotionTracker();
+    tracker.observe(1, 0, 0);
+    tracker.observe(1, 2, 0);
+    expect(tracker.motionAt(1, 0)).toBeUndefined();
+    expect(tracker.size).toBe(0);
   });
 
   it('derives a velocity from two sightings', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(1, 2, 0, 200);
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
     expect(tracker.motionAt(1, 200)?.velocityX).toBeCloseTo(0.01);
     expect(tracker.motionAt(1, 200)?.velocityY).toBeCloseTo(0);
   });
 
+  // **The bug this class exists to not have.** A stalled connection does not
+  // deliver ticks late one at a time; it delivers the backlog at once, and a
+  // velocity measured against our own clock reads a tick of walking as having
+  // happened in the millisecond it was unpacked in. That number is two hundred
+  // tiles a second, and an aim led by it lands on the far side of the room.
+  it('measures a tick of walking as a tick, however late the tick arrives', () => {
+    const tracker = new MotionTracker();
+    sight(tracker, 1000, 0, 0);
+    sight(tracker, 1001, 2, 0);
+    sight(tracker, 1002, 4, 0);
+    expect(tracker.motionAt(1, 1002)?.velocityX).toBeCloseTo(0.01);
+  });
+
+  it('says the same about a tick that states its own length', () => {
+    const tracker = new MotionTracker();
+    tracker.tick(1000, 100);
+    tracker.observe(1, 0, 0);
+    tracker.tick(1001, 100);
+    tracker.observe(1, 1, 0);
+    expect(tracker.motionAt(1, 1001)?.velocityX).toBeCloseTo(0.01);
+  });
+
+  it('ignores a tick length nothing could have run at', () => {
+    const tracker = new MotionTracker();
+    tracker.tick(0, 0);
+    tracker.observe(1, 0, 0);
+    tracker.tick(200, Number.NaN);
+    tracker.observe(1, 2, 0);
+    // Both readings fell back to the game's own tick, so this is the ordinary
+    // two tiles in two hundred milliseconds.
+    expect(tracker.motionAt(1, 200)?.velocityX).toBeCloseTo(0.01);
+  });
+
+  it('is not two sightings when one tick describes the same thing twice', () => {
+    const tracker = new MotionTracker();
+    tracker.tick(0);
+    tracker.observe(1, 0, 0);
+    tracker.observe(1, 2, 0);
+    expect(tracker.motionAt(1, 0)).toBeUndefined();
+  });
+
+  it('takes a step nothing could have walked as a reposition, not a velocity', () => {
+    const tracker = new MotionTracker();
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
+    expect(tracker.motionAt(1, 200)).toBeDefined();
+
+    // Forty tiles in one tick is a teleport, a `GOTO` or the server putting it
+    // back where it belongs. None of the three is a heading to lead.
+    sight(tracker, 400, 42, 0);
+    expect(tracker.motionAt(1, 400)).toBeUndefined();
+  });
+
   it('settles towards a steady velocity rather than following one tick', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(1, 2, 0, 200);
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
     // One tick where it did not move: a follower would call it stopped.
-    tracker.observe(1, 2, 0, 400);
+    sight(tracker, 400, 2, 0);
     const velocity = tracker.motionAt(1, 400)?.velocityX ?? 0;
     expect(velocity).toBeGreaterThan(0);
     expect(velocity).toBeLessThan(0.01);
@@ -156,7 +239,7 @@ describe('MotionTracker', () => {
     const tracker = new MotionTracker();
     const radius = 3;
     const observeAt = (angle: number, atMs: number): void => {
-      tracker.observe(1, radius * Math.cos(angle), radius * Math.sin(angle), atMs);
+      sight(tracker, atMs, radius * Math.cos(angle), radius * Math.sin(angle));
     };
 
     observeAt(0, 0);
@@ -169,19 +252,36 @@ describe('MotionTracker', () => {
     expect(motion?.velocityY).toBeCloseTo(0.006 * Math.cos(0.8), 6);
   });
 
+  // A monster that turns about has not started going round in a circle, and
+  // saying it has puts the aim on the far side of one — a worse answer than the
+  // straight line the reversal replaced.
+  it('does not read a reversal as a circle to follow', () => {
+    const tracker = new MotionTracker();
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 1, 0);
+    sight(tracker, 400, 0, 0);
+    sight(tracker, 600, -1, 0);
+
+    const motion = tracker.motionAt(1, 600);
+    expect(motion?.angularVelocityPerMs).toBe(0);
+    // Settling back the way it is actually going, not swinging round an arc.
+    expect(motion?.velocityX).toBeLessThan(0);
+    expect(motion?.y).toBeCloseTo(0);
+  });
+
   it('restarts rather than averaging over a gap it did not watch', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(1, 1, 0, 100);
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 100, 1, 0);
     // Out of view for five seconds, then somewhere else entirely.
-    tracker.observe(1, 40, 40, 5100);
+    sight(tracker, 5100, 40, 40);
     expect(tracker.motionAt(1, 5100)).toBeUndefined();
   });
 
   it('carries a track forward to the moment it is asked about', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(1, 2, 0, 200);
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
     // Where the sighting put it, and where a hundred more milliseconds of the
     // same walking would have.
     expect(tracker.motionAt(1, 200)?.x).toBeCloseTo(2);
@@ -190,12 +290,27 @@ describe('MotionTracker', () => {
 
   it('stops carrying a track that nothing has confirmed for a while', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(1, 2, 0, 200);
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
     // A second of silence is not a second of walking: the monster has been free
     // to turn, stop or die, and nothing here saw it.
     const carried = tracker.motionAt(1, 1200)?.x ?? 0;
     expect(carried).toBeLessThan(2 + 0.01 * 1000);
+  });
+
+  it('has nothing to say about a moment that is not a number', () => {
+    const tracker = new MotionTracker();
+    sight(tracker, 0, 0, 0);
+    sight(tracker, 200, 2, 0);
+    expect(tracker.motionAt(1, Number.NaN)).toBeUndefined();
+  });
+
+  it('drops a position that did not parse rather than tracking it', () => {
+    const tracker = new MotionTracker();
+    tracker.tick(0);
+    tracker.observe(1, Number.NaN, 0);
+    tracker.observe(2, 0, Number.POSITIVE_INFINITY);
+    expect(tracker.size).toBe(0);
   });
 
   // **Not the same claim as having a velocity.** Two sightings of a thing that
@@ -203,25 +318,25 @@ describe('MotionTracker', () => {
   // monster from a spawn anchor is whether it has ever gone anywhere at all.
   it('tells a thing that has walked from one that has only been measured', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 5, 5, 0);
+    sight(tracker, 0, 5, 5);
     expect(tracker.hasMoved(1)).toBe(false);
 
-    tracker.observe(1, 5, 5, 200);
+    sight(tracker, 200, 5, 5);
     expect(tracker.motionAt(1, 200)).toBeDefined();
     expect(tracker.hasMoved(1)).toBe(false);
 
-    tracker.observe(1, 6, 5, 400);
+    sight(tracker, 400, 6, 5);
     expect(tracker.hasMoved(1)).toBe(true);
     // And it stays true once it stops: having walked is a fact about what the
     // thing is, not about what it is doing this tick.
-    tracker.observe(1, 6, 5, 600);
+    sight(tracker, 600, 6, 5);
     expect(tracker.hasMoved(1)).toBe(true);
   });
 
   it('does not call a rounding a step', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 5, 5, 0);
-    tracker.observe(1, 5.01, 4.99, 200);
+    sight(tracker, 0, 5, 5);
+    sight(tracker, 200, 5.01, 4.99);
     expect(tracker.hasMoved(1)).toBe(false);
   });
 
@@ -231,10 +346,12 @@ describe('MotionTracker', () => {
 
   it('forgets what it has not seen, so it cannot grow without bound', () => {
     const tracker = new MotionTracker();
-    tracker.observe(1, 0, 0, 0);
-    tracker.observe(2, 0, 0, 0);
-    tracker.observe(2, 1, 0, 200);
-    tracker.prune(2000);
+    tracker.tick(0);
+    tracker.observe(1, 0, 0);
+    tracker.observe(2, 0, 0);
+    tracker.tick(200);
+    tracker.observe(2, 1, 0);
+    tracker.tick(2000);
     expect(tracker.size).toBe(0);
   });
 });
@@ -694,6 +811,98 @@ describe('the auto-aim plugin', () => {
     setTime(300);
     plan();
     expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(onTheTick);
+  });
+
+  // **The complaint this was rewritten for.** A stalled connection does not
+  // deliver its ticks late one at a time; it delivers the backlog at once, and
+  // a velocity measured against our own clock reads a tick of walking as having
+  // happened in the millisecond it was unpacked in. The monster then appears to
+  // be moving faster than the shot, and the aim is either sent across the room
+  // after it or given up on entirely — both of which are a shot at nothing.
+  it('is not fooled by a stall that delivers three ticks at once', () => {
+    const { aimAt, enemies, setTime, tick } = harness();
+    const walker = { ...enemy(1, 3, 0) };
+    enemies.push(walker);
+
+    setTime(1000);
+    tick();
+    walker.y = 0.8;
+    setTime(1001);
+    tick();
+    walker.y = 1.6;
+    setTime(1002);
+    tick();
+
+    const last = aimAt.mock.calls.at(-1);
+    const x = Number(last?.[0]);
+    const y = Number(last?.[1]);
+    // Ahead of it, because it is walking — and inside what the weapon reaches,
+    // which is the bound a lead cannot argue with.
+    expect(y).toBeGreaterThan(1.6);
+    expect(Math.hypot(x, y)).toBeLessThanOrEqual(WEAPON.reachTiles);
+  });
+
+  it('drops a track the server moved rather than leading where it was thrown', () => {
+    const { aimAt, enemies, setTime, tick } = harness();
+    const blinker = { ...enemy(1, 3, 0) };
+    enemies.push(blinker);
+
+    tick();
+    setTime(200);
+    blinker.y = 0.8;
+    tick();
+    expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(0.8);
+
+    // A teleport, a `GOTO`, or the server putting it back where it belongs.
+    // None of the three is a heading, and none of them may be led.
+    setTime(400);
+    blinker.x = -3;
+    tick();
+    expect(aimAt.mock.calls.at(-1)?.[0]).toBeCloseTo(-3);
+    expect(aimAt.mock.calls.at(-1)?.[1]).toBeCloseTo(0.8);
+  });
+
+  it('will not name a meeting the shot stops short of', () => {
+    // A weapon whose reach the data states outright instead of as speed times
+    // life — a fixed-arc one. Bounding the lead by the lifetime alone names a
+    // meeting well beyond anywhere the shot gets, which is a shot at nothing.
+    const { aimAt, enemies, setTime, tick } = harness({
+      weapon: { speedTilesPerMs: 0.008, lifetimeMs: 1500, reachTiles: 4 },
+    });
+    const runner = { ...enemy(1, 3.5, 0) };
+    enemies.push(runner);
+
+    tick();
+    expect(aimAt).toHaveBeenCalledTimes(1);
+
+    setTime(200);
+    runner.y = 1;
+    tick();
+    expect(aimAt).toHaveBeenCalledTimes(1);
+  });
+
+  it('leads harder when asked to, rather than falling silent', () => {
+    // The lead is a share of the offset the solution names, not of the speed
+    // fed into it. Scaling the speed asks a different question — at 150% a
+    // target at three quarters of the shot's speed becomes one faster than it,
+    // which has no meeting at all — so turning the slider up used to turn the
+    // feature off against exactly the targets it was turned up for.
+    const { host, aimAt, enemies, setTime, tick, plan } = harness();
+    const walker = { ...enemy(1, 3, 0) };
+    enemies.push(walker);
+
+    tick();
+    setTime(200);
+    walker.y = 0.8;
+    tick();
+    const at100 = Number(aimAt.mock.calls.at(-1)?.[1]);
+
+    host.settingsOf('auto-aim')?.apply('leadPercent', 150);
+    plan();
+    const at150 = Number(aimAt.mock.calls.at(-1)?.[1]);
+
+    expect(at100).toBeGreaterThan(0.8);
+    expect(at150).toBeGreaterThan(at100);
   });
 
   it('says nothing about an enemy that cannot be hurt', () => {

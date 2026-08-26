@@ -288,8 +288,8 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       // Where the monsters are is only news when the server says so, and a
       // velocity derived on any other schedule is a velocity of nought. See
       // `DodgeScene.sight`.
-      context.packets.on('NEWTICK', (_packet, session) => {
-        scene.sight(session);
+      context.packets.on('NEWTICK', (packet, session) => {
+        scene.sight(session, packet.number('tickTime'));
       });
 
       // **Which `SHOWEFFECT` types are a telegraph was a question for a log**,

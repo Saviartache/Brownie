@@ -24,7 +24,16 @@ export interface InterceptRequest {
   readonly targetAngularVelocityPerMs: number;
   /** Tiles per millisecond, as the game's own projectile data states it. */
   readonly bulletSpeedTilesPerMs: number;
-  /** The shot's lifetime. A solution beyond it is a shot that expires first. */
+  /**
+   * How long the shot has to hit something with. A solution beyond it is a shot
+   * that stops mattering first.
+   *
+   * **Not simply the lifetime**, and the caller is the one that knows the
+   * difference: a shot that stops at a stated range gets there before it
+   * expires. Whatever the figure is, it is also what bounds the aim point —
+   * `|aim − shooter|` is `speed × flight` by construction, so a meeting the
+   * shot could not reach is refused rather than aimed at.
+   */
   readonly maxFlightMs: number;
 }
 
@@ -39,15 +48,30 @@ export interface Intercept {
 /**
  * Solves for the meeting point, or reports that there is not one.
  *
- * `undefined` rather than a best effort, in three cases that are genuinely
+ * `undefined` rather than a best effort, in four cases that are genuinely
  * different from a bad answer: the shot has no speed to give, the target has no
- * reachable meeting point, and the meeting happens after the shot has expired.
+ * reachable meeting point, the meeting happens after the shot has stopped
+ * mattering, and one of the numbers describing the problem is not a number.
  * Each of those is "do not fire at this", and a plugin that received a
- * plausible angle instead would fire at nothing.
+ * plausible angle instead would fire at nothing — or, for the last of them,
+ * hand a `NaN` straight to the module that points the shots.
  */
 export function solveIntercept(request: InterceptRequest): Intercept | undefined {
   const speed = request.bulletSpeedTilesPerMs;
-  if (!(speed > 0) || !(request.maxFlightMs > 0)) return undefined;
+  if (!(speed > 0) || !(request.maxFlightMs > 0) || !Number.isFinite(request.maxFlightMs)) {
+    return undefined;
+  }
+  if (
+    !Number.isFinite(request.shooterX) ||
+    !Number.isFinite(request.shooterY) ||
+    !Number.isFinite(request.targetX) ||
+    !Number.isFinite(request.targetY) ||
+    !Number.isFinite(request.targetVelocityX) ||
+    !Number.isFinite(request.targetVelocityY) ||
+    !Number.isFinite(request.targetAngularVelocityPerMs)
+  ) {
+    return undefined;
+  }
 
   const dx = request.targetX - request.shooterX;
   const dy = request.targetY - request.shooterY;
@@ -63,7 +87,9 @@ export function solveIntercept(request: InterceptRequest): Intercept | undefined
     request.targetAngularVelocityPerMs === 0
       ? solveFlightTime(a, b, c)
       : solveTurningFlightTime(request, dx, dy);
-  if (flightMs === undefined || flightMs > request.maxFlightMs) return undefined;
+  if (flightMs === undefined || !(flightMs >= 0) || flightMs > request.maxFlightMs) {
+    return undefined;
+  }
 
   const target = targetAt(request, flightMs);
 
