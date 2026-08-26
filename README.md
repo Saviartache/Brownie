@@ -292,6 +292,10 @@ remembers the choice per class.
 - **Main colour / effect** and **accessory colour / effect** — dyes.
 - **Arcane Style.**
 
+Both of them on one character, changed from the overlay while the game runs:
+
+![Skins and glow, changing in game](assets/skins.gif)
+
 ### Anti-lag
 
 Trims what the client has to simulate and draw, which is what a crowded realm
