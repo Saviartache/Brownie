@@ -5,6 +5,12 @@
  * a player has to walk around — rather than the walls of a dungeon, which are
  * the server's opinion as much as the client's.
  *
+ * **The ground stops costing anything while it is on.** Water and slow floors
+ * multiply the player's speed down, and walking through a tree slowly is not
+ * what anyone switched this on for, so the module answers that multiplier as
+ * one for as long as the claim below stands. Nothing here says so separately —
+ * it is the same claim.
+ *
  * **Two halves, and neither works alone.** The module silences the client's own
  * walkability check, so the player walks where the client would have stopped
  * them; the server keeps its own idea of where they are and pulls them back,

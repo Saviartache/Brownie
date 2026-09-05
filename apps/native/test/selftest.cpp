@@ -36,6 +36,7 @@
 #include "game/PlayerFields.h"
 #include "game/PlayerMover.h"
 #include "game/PlayerNoclip.h"
+#include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
 #include "game/ScreenProjection.h"
 #include "hooks/Hook.h"
@@ -724,6 +725,45 @@ void PlayerNoclipRefusesWhatItCannotDetour() {
     // from this object, but the check is what a stray call is caught by.
     Check(noclip.original(brownie::game::PlayerNoclip::kMaxGates) == nullptr,
           "a gate past the last has nothing to call through");
+}
+
+/// The tile-speed gate installs both detours or neither, and denies nothing
+/// until it is switched on.
+///
+/// The opposite of player noclip above, and for the reason the projectile pair
+/// gives: the game's own movement takes the *lower* of the number it stored and
+/// the number the ground answers, so either half alone is undone by the other.
+void PlayerTileSpeedInstallsBothOrNeither() {
+    brownie::game::PlayerTileSpeed gate;
+    Check(!gate.installed(), "a fresh tile-speed gate is not installed");
+    Check(!gate.enabled(), "and is switched off");
+    Check(gate.denied() == 0, "and has denied nothing");
+
+    // Never dereferenced: every case below is refused before MinHook is asked
+    // for anything.
+    int method = 0;
+    constexpr std::uint32_t kMultiplierAt = 0x5D8;
+
+    Check(!gate.Install(nullptr, &method, kMultiplierAt).ok(),
+          "one method alone installs nothing");
+    Check(!gate.Install(&method, nullptr, kMultiplierAt).ok(), "whichever of the two it is");
+    Check(!gate.Install(&method, &method, 0).ok(),
+          "nor does a pair with nowhere to put the number back");
+    Check(!gate.installed(), "so it stays uninstalled");
+
+    // Counted only while the feature is on, which is what makes the count mean
+    // "this did something" rather than "this was called".
+    Check(!gate.DenyTileSpeed(), "a switched-off gate lets the ground answer");
+    Check(gate.denied() == 0, "and counts nothing");
+
+    gate.SetEnabled(true);
+    Check(gate.DenyTileSpeed(), "a switched-on one answers for it");
+    Check(gate.denied() == 1, "counting the one it answered");
+
+    // The write is refused rather than attempted: a gate that never installed
+    // has no offset to write at, and a player that is not there has no memory.
+    gate.KeepFullSpeed(nullptr);
+    Check(gate.denied() == 1, "and a store with nothing to store into counts nothing");
 }
 
 /// The aim hook redirects nothing until it is told to, and nothing that is not
@@ -2555,6 +2595,7 @@ int main() {
     ATileSwapPutsBackWhatItTook();
     ProjectileNoclipInstallsBothOrNeither();
     PlayerNoclipRefusesWhatItCannotDetour();
+    PlayerTileSpeedInstallsBothOrNeither();
     UnbindableCallersStayQuiet();
     ReadCostIsMeasured();
     ControlFieldsRoundTrip();

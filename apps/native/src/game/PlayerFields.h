@@ -86,6 +86,19 @@ inline constexpr std::string_view kWorldObjectsAlt = "world.objects.alt";
 /// reports itself exactly as it would have anyway.
 inline constexpr std::string_view kPlayerMoveTo = "self.moveTo";
 
+/// The ground's say in how fast the player walks, and where the client keeps
+/// its answer.
+///
+/// **One number, written once a tick and multiplied into every step.** A
+/// floor's `<Speed>` sets it, and a sinking one — water — drives it lower for
+/// as long as the player stands there. Player noclip answers the first and
+/// corrects the second, so that walking through what stands on the map is not
+/// also walking slowly; see `game/PlayerTileSpeed.h` for why both are needed
+/// and neither is enough.
+inline constexpr std::string_view kTileSpeedHere = "self.tileSpeedHere";
+inline constexpr std::string_view kApplyTileSpeed = "self.applyTileSpeed";
+inline constexpr std::string_view kPlayerMoveMultiplier = "self.moveMultiplier";
+
 /// The two methods silent aim detours — see `AimHook.h`.
 ///
 /// **Neither is called; both are intercepted.** The first is where the client

@@ -266,6 +266,12 @@ struct OverlayModel {
     std::uint32_t walks_allowed = 0;
     /// How many walkability predicates are detoured.
     std::size_t walk_gates = 0;
+    /// Whether the other half of player noclip — the one that keeps water and
+    /// slow floors from costing the player speed — is detoured, and how many
+    /// times it has denied the ground its say. Told apart from the predicates
+    /// above because the two resolve from different classes and fail apart.
+    bool walk_speed_held = false;
+    std::uint32_t walk_speeds_denied = 0;
     /// The game's own floating text: whether the detours are in, and how many
     /// lines of ours have gone out through them.
     bool text_installed = false;

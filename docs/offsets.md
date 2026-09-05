@@ -228,6 +228,8 @@ against:
 | `shot.hitsWall`          | `bool GJFKGLJEGKO(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `shot.tileBlocks`        | `bool IACODGNOFMH(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `map.walkable.<name>`    | every `bool(float, float)` on the world manager       | player noclip, through `PlayerNoclip` |
+| `self.tileSpeedHere`     | `float GCFKGLKAPND()`                                | player noclip, through `PlayerTileSpeed` |
+| `self.applyTileSpeed`    | `void CNPNFDNDIJC()`                                 | player noclip, through `PlayerTileSpeed` |
 | `world.objects` / `world.objects.alt` | the world manager's two `Dictionary<int, MapObject>` fields | auto-aim, through `MapObjects` — where the *client* has a monster, which is what a shot is tested against |
 | `ui.MapObjectUIManager.ShowFloatingText` | `void ShowFloatingText(kind, string, …)` | floating text, through `FloatingText` |
 | `ui.MapObjectUIManager.ShowFloatingText.number` | `void ShowFloatingText(kind, int, …)` | the same, read for the style the game draws with |
@@ -259,6 +261,15 @@ shape is what is wanted: they are taken as a set, every member has the same
 prototype by construction, and nothing is picked. A rename changes nothing and a
 build that adds an eighth gets it hooked. Each is registered under its own key
 so the report names them, in the order the detours go on.
+
+The two speed methods are the other half of player noclip, and they are **both
+or neither** for a reason the game's own movement states outright: it keeps
+`min(the multiplier it stored, the multiplier the ground answers)`. Detouring
+the answer alone leaves the low number the previous tick stored; correcting the
+stored number alone is taken back by the next `min`. Together they agree on one,
+and the player crosses water at the speed the character was built with. They
+need the field key `self.moveMultiplier` with them — where the client keeps that
+number — and refuse to install until all three have answered.
 
 They were **counted separately for one live run**, which is the half of the
 reference implementation's design that earned its keep: of the nine this build

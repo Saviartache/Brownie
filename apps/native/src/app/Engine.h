@@ -38,6 +38,7 @@
 #include "core/Result.h"
 #include "core/Snapshot.h"
 #include "game/PlayerNoclip.h"
+#include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
 #include "game/QuitWatch.h"
 #include "game/ScreenProjection.h"
@@ -347,6 +348,12 @@ class Engine {
     /// both are in.
     void InstallPlayerNoclip();
 
+    /// Puts the tile-speed gate in place: the other half of player noclip, and
+    /// the half that keeps water from slowing the player it just let through a
+    /// tree. Only called once the runtime has claimed noclip, for the reason
+    /// the walkability predicates are.
+    void InstallWalkSpeedGate();
+
     /// Whether the runtime's claim on player noclip is still good at `now_ms`.
     [[nodiscard]] bool WalkNoclipWanted(std::uint64_t now_ms) const noexcept {
         return now_ms < walk_noclip_until_ms_.load(std::memory_order_relaxed);
@@ -486,6 +493,7 @@ class Engine {
     PlayerCosmetics cosmetics_;
     game::ProjectileNoclip shot_noclip_;
     game::PlayerNoclip walk_noclip_;
+    game::PlayerTileSpeed walk_speed_;
     game::QuitWatch quit_;
     /// Holds no hook — three method addresses and nothing else — so it needs no
     /// place in the ordering above.

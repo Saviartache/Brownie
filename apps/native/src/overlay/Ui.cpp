@@ -164,12 +164,14 @@ void CopyStateAsJson(const OverlayModel& model) {
     append(
         "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsWritten\": %u,"
         " \"shotNoclipInstalled\": %s, \"shotsPassed\": %u, \"noclipWanted\": %s,"
-        " \"walkGates\": %d, \"walksAllowed\": %u, \"textInstalled\": %s, \"textsShown\": %u",
+        " \"walkGates\": %d, \"walksAllowed\": %u, \"walkSpeedHeld\": %s,"
+        " \"walkSpeedsDenied\": %u, \"textInstalled\": %s, \"textsShown\": %u",
         model.tint_installed ? "true" : "false", model.tinted,
         model.collision_bound ? "true" : "false", model.collisions_written,
         model.shot_noclip_installed ? "true" : "false", model.shots_passed,
         model.walk_noclip_wanted ? "true" : "false", static_cast<int>(model.walk_gates),
-        model.walks_allowed, model.text_installed ? "true" : "false", model.texts_shown);
+        model.walks_allowed, model.walk_speed_held ? "true" : "false", model.walk_speeds_denied,
+        model.text_installed ? "true" : "false", model.texts_shown);
     // Null rather than absent when nothing is scaling the circle: a report that
     // drops the key leaves a reader unable to tell "off" from "this build did
     // not say".
@@ -374,9 +376,17 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
     } else if (!model.walk_noclip_wanted) {
         StatusLine(column, kNoclipStatus, "off from the runtime, %d gate(s) watched",
                    static_cast<int>(model.walk_gates));
-    } else {
-        StatusLine(column, kNoclipStatus, "%u answer(s) forced across %d gate(s)",
+    } else if (!model.walk_speed_held) {
+        // Worth saying rather than folding into the line below: the ground
+        // still slows the player, and a player who is walking through trees at
+        // half speed is looking at a feature that is half in.
+        StatusLine(column, kNoclipStatus, "%u answer(s) forced across %d gate(s), speed not held",
                    model.walks_allowed, static_cast<int>(model.walk_gates));
+    } else {
+        StatusLine(column, kNoclipStatus,
+                   "%u answer(s) forced across %d gate(s), %u speed(s) denied",
+                   model.walks_allowed, static_cast<int>(model.walk_gates),
+                   model.walk_speeds_denied);
     }
 
     if (!model.text_installed) {

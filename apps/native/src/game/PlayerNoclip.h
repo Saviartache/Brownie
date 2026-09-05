@@ -21,6 +21,12 @@
 // not a predicate the game does not have, and the six cost nothing precisely
 // because nothing calls them.
 //
+// **The ground is somebody else's.** Answering yes to "may they stand here"
+// says nothing about how fast they get there, and water and slow floors cost
+// the player speed whatever this module answers. That number is one detour of
+// its own on the player rather than on the map, so it lives in
+// `PlayerTileSpeed.h`; the runtime's one switch reaches both.
+//
 // **This is half of a feature.** Silencing the client's own gate is not what
 // keeps the player where it let them go: the server has its own idea of where
 // they are and pulls them back, so the runtime holds the client's uplink for as

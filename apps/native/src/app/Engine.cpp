@@ -709,8 +709,16 @@ void Engine::AdvanceSetup() {
     // manager exists as soon as the game builds a realm, so these resolve early
     // and the retry is for the case of switching the feature on at the login
     // screen.
-    if (WalkNoclipWanted(NowMs()) && !walk_noclip_.installed()) {
+    const bool walk_noclip_wanted = WalkNoclipWanted(NowMs());
+    if (walk_noclip_wanted && !walk_noclip_.installed()) {
         InstallPlayerNoclip();
+    }
+
+    // And the other half of the same switch, asked for on the same turns. It
+    // fails apart from the predicates above — the two want different methods of
+    // different classes — so a build that gives up one still gets the other.
+    if (walk_noclip_wanted && !walk_speed_.installed()) {
+        InstallWalkSpeedGate();
     }
 }
 
@@ -787,6 +795,14 @@ void Engine::InstallProjectileNoclip() {
     // the loop is the retry, so it stays out of the runtime's log.
     (void)shot_noclip_.Install(route, binding_.MethodAddress(game::kShotHitsWall).value_or(nullptr),
                                binding_.MethodAddress(game::kShotTileBlocks).value_or(nullptr));
+}
+
+void Engine::InstallWalkSpeedGate() {
+    // Failure is the ordinary answer until the game has built a local player,
+    // and the loop is the retry, so it stays out of the runtime's log.
+    (void)walk_speed_.Install(binding_.MethodAddress(game::kTileSpeedHere).value_or(nullptr),
+                              binding_.MethodAddress(game::kApplyTileSpeed).value_or(nullptr),
+                              binding_.FieldOffset(game::kPlayerMoveMultiplier).value_or(0));
 }
 
 void Engine::InstallPlayerNoclip() {
@@ -1462,6 +1478,9 @@ void Engine::DrawFrame() {
     // The same store again, for the claim that made the pattern.
     const bool walk_wanted = WalkNoclipWanted(now);
     walk_noclip_.SetEnabled(walk_wanted);
+    // The same claim, because the ground slowing the player down is the same
+    // feature failing to do what was asked of it.
+    walk_speed_.SetEnabled(walk_wanted);
 
     model_.Refresh(frame_model_, frame_model_version_);
 
@@ -1492,6 +1511,8 @@ void Engine::DrawFrame() {
     frame_model_.walk_noclip_wanted = walk_wanted;
     frame_model_.walks_allowed = walk_noclip_.allowed();
     frame_model_.walk_gates = walk_noclip_.hooked();
+    frame_model_.walk_speed_held = walk_speed_.installed();
+    frame_model_.walk_speeds_denied = walk_speed_.denied();
     frame_model_.text_installed = patches_.text_installed();
     frame_model_.texts_shown = patches_.texts_shown();
     frame_model_.camera_bound = projection_.bound();

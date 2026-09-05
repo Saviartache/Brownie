@@ -67,6 +67,13 @@ constexpr std::array kQueries{
     KeyedFieldQuery{kPlayerGlow,
                     FieldQuery{kLocalPlayerClass, "EGMPAONNMFA", {}, "System.Int32", 0, 0}},
 
+    // **By name alone, and the empty fingerprint is not an oversight.** A
+    // fingerprint may only be written from a live class that said it — see the
+    // header — and no run has reported this one yet. `System.Single` is also
+    // among the commonest types the class declares, so a shape would be the
+    // layer that guesses rather than the one that refuses.
+    KeyedFieldQuery{kPlayerMoveMultiplier, FieldQuery{kLocalPlayerClass, "EOMJKKBOKOE", {}}},
+
     // The two hops to the player object itself. The first is a C# auto-property
     // whose compiler-generated wrapper survived obfuscation even though the
     // property name inside it did not — which is why it looks half-readable.
@@ -138,6 +145,17 @@ constexpr MethodQuery kSetPlayerShaderQuery{kLocalPlayerClass, "CNAOFINEJPK", {}
 constexpr MethodQuery kSetPlayerGlowQuery{kLocalPlayerClass, "JEDNHGGONPP", {}, "System.Void",
                                           kIntParameter};
 
+/// `float TileSpeedHere()` and `void ApplyTileSpeed()`, the two halves of what
+/// the ground does to the player's speed.
+///
+/// **Detoured, not called.** The first is asked by the game's own movement code
+/// and the second is the tick that stores its answer on the player; player
+/// noclip answers one and corrects the other. A return type with no parameters
+/// is what tells either from an overload — the shape identifies nothing on its
+/// own, and neither carries a fingerprint for that reason.
+constexpr MethodQuery kTileSpeedHereQuery{kLocalPlayerClass, "GCFKGLKAPND", {}, "System.Single"};
+constexpr MethodQuery kApplyTileSpeedQuery{kLocalPlayerClass, "CNPNFDNDIJC", {}, "System.Void"};
+
 struct KeyedMethodQuery {
     std::string_view key;
     MethodQuery query;
@@ -150,6 +168,8 @@ constexpr std::array kMethods{
     KeyedMethodQuery{kSetPlayerSkin, kSetPlayerSkinQuery},
     KeyedMethodQuery{kSetPlayerShader, kSetPlayerShaderQuery},
     KeyedMethodQuery{kSetPlayerGlow, kSetPlayerGlowQuery},
+    KeyedMethodQuery{kTileSpeedHere, kTileSpeedHereQuery},
+    KeyedMethodQuery{kApplyTileSpeed, kApplyTileSpeedQuery},
 };
 
 }  // namespace
