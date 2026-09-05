@@ -10,9 +10,10 @@
  *
  * The folding matters as much as the shapes. Spam in this game is written to
  * survive a substring search: a Cyrillic letter standing in for its Latin twin,
- * a zero-width space inside `paypal`, fullwidth punctuation. Stripping the
- * invisible characters, normalising compatibility forms and mapping the
- * lookalikes back to ASCII is what makes a needle list worth having at all.
+ * a zero-width space inside `paypal`, fullwidth punctuation, a zero typed for
+ * the `o` of `c0m`. Stripping the invisible characters, normalising
+ * compatibility forms and mapping the lookalikes back to ASCII is what makes a
+ * needle list worth having at all.
  *
  * The tables below are written as code points rather than as the characters
  * themselves, and that is not a style choice: a table of lookalikes is
@@ -96,6 +97,35 @@ const HOMOGLYPHS = new Map<number, string>([
 ]);
 
 /**
+ * Digits and symbols typed in place of a letter, and the letter each stands for.
+ *
+ * Only {@link compactOf} consults this, and that bound is the point: `24/7` and
+ * `rp6` mean what they say, so a signal reading the message with its spacing and
+ * punctuation intact still sees every digit. The compacted form has already
+ * thrown away the dots and spaces those signals need, and in what is left a
+ * digit is far more often a disguise than a number — `st0ck c0m` is the message
+ * that motivated the table.
+ *
+ * `l` maps to `i`, which is the one entry that is not a spammer's substitution.
+ * `1` stands for both letters and nothing in the text says which, so rather than
+ * guess, both letters and the digit are folded onto one of them. Needles go
+ * through the same function, so `multitool` is stored as `muititooi` and both
+ * `mu1titool` and `multitool` reach it.
+ */
+const LEET = new Map<string, string>([
+  ['0', 'o'],
+  ['1', 'i'],
+  ['3', 'e'],
+  ['4', 'a'],
+  ['5', 's'],
+  ['7', 't'],
+  ['8', 'b'],
+  ['@', 'a'],
+  ['$', 's'],
+  ['l', 'i'],
+]);
+
+/**
  * One message, in the shapes the signals read it in.
  *
  * All of them but {@link raw} are folded and lower-cased, so a signal never has
@@ -112,7 +142,10 @@ export interface ScannedText {
   readonly raw: string;
   /** Folded and lower-cased, with the original spacing left alone. */
   readonly lower: string;
-  /** {@link lower} with every non-alphanumeric character removed. */
+  /**
+   * {@link lower} through {@link compactOf}: no punctuation, no spacing, and no
+   * digit standing in for a letter.
+   */
   readonly compact: string;
   /** {@link lower} as space-separated words, padded, so ` wts ` is a word. */
   readonly loose: string;
@@ -127,10 +160,38 @@ export function scanText(message: string): ScannedText {
   return {
     raw,
     lower,
-    compact: lower.replace(/[^a-z0-9]+/g, ''),
+    compact: compactOf(lower),
     loose: ` ${lower.replace(/[^a-z0-9]+/g, ' ').trim()} `,
     flat: lower.replace(/\s+/g, ' '),
   };
+}
+
+/**
+ * Reduces a string to the letters and digits a needle is looked for in.
+ *
+ * Everything else goes — so `realm-stock . com` and `realmstock.com` are the
+ * same string — and the leet substitutions are undone on the way, so `st0ck` is
+ * the same string as `stock`.
+ *
+ * Exported because both sides of the comparison have to be folded the same way:
+ * a needle list written in ordinary spelling only meets this form if it has been
+ * through this function too. The input is expected to be folded and lower-cased
+ * already, which is what {@link scanText} guarantees and what a needle written
+ * as lower-case ASCII satisfies on its own.
+ */
+export function compactOf(text: string): string {
+  let compacted = '';
+  for (let index = 0; index < text.length; index++) {
+    const character = text.charAt(index);
+    const letter = LEET.get(character);
+    if (letter !== undefined) {
+      compacted += letter;
+      continue;
+    }
+    const code = text.charCodeAt(index);
+    if ((code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)) compacted += character;
+  }
+  return compacted;
 }
 
 /**

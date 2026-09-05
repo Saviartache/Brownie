@@ -32,14 +32,31 @@ const ZERO_WIDTH_SPACE = String.fromCodePoint(0x200b);
 const EVERY_CATEGORY: ReadonlySet<SpamCategory> = new Set(Object.values(SpamCategory));
 
 describe('scanning a message', () => {
+  /** What the plainly spelled word compacts to, which is what a needle is. */
+  const PAYPAL = scanText('paypal').compact;
+
   it('folds the lookalikes a needle list would otherwise miss', () => {
     // `paypal`, with the Cyrillic twins of its `p` and both its `a`s.
     const disguised = `${CYRILLIC_ER}${CYRILLIC_A}yp${CYRILLIC_A}l`;
-    expect(scanText(disguised).compact).toBe('paypal');
+    expect(scanText(disguised).compact).toBe(PAYPAL);
   });
 
   it('drops the invisible characters hidden inside a word', () => {
-    expect(scanText(`pay${ZERO_WIDTH_SPACE}pal`).compact).toBe('paypal');
+    expect(scanText(`pay${ZERO_WIDTH_SPACE}pal`).compact).toBe(PAYPAL);
+  });
+
+  it('undoes the digits typed in place of a letter, in the compacted form', () => {
+    // `l` and `i` are folded together because `1` stands for either.
+    expect(scanText('Realm St0ck c0m').compact).toBe(scanText('realmstock com').compact);
+    expect(scanText('mu1t1t00l').compact).toBe(scanText('multitool').compact);
+    expect(scanText('p@yp4l').compact).toBe(PAYPAL);
+  });
+
+  it('leaves the digits alone in every form a signal reads for meaning', () => {
+    // `24/7` is a claim rather than a disguise, and the pipe banner reads it.
+    const scanned = scanText('24/7 delivery');
+    expect(scanned.flat).toBe('24/7 delivery');
+    expect(scanned.lower).toBe('24/7 delivery');
   });
 
   it('keeps the invisible characters in the raw form, where a flood shows', () => {
@@ -139,6 +156,12 @@ describe('the spam signals', () => {
     ['whitebag.net is open again', 'shop-domain'],
     ['realmshop.info oldest store', 'shop-domain'],
     ['rp6.rip pots', 'shop-domain'],
+    // A digit typed for the letter it looks like, which is the whole disguise.
+    ['Realm St0ck c0m', 'shop-domain'],
+    ['rea1mstock.com cheapest', 'shop-domain'],
+    ['realm | st0ck | c0m', 'shop-domain'],
+    ['che4p f4me service', 'shop-word'],
+    ['selling on ep1cnpc', 'shop-domain'],
     ['rp6.shop cheap', 'shop-domain'],
     // Seen in the wild: the dot spelled out so the name is not a domain, and
     // `g` for `6` so it is not the name either.
@@ -182,6 +205,9 @@ describe('the spam signals', () => {
     'back to the realm, shop later',
     'anyone else play this rpg? rip my streak',
     'the realm stock of pots is gone',
+    // The digits that the compacted form folds are still ordinary numbers here.
+    'hit 24/7 dps on that boss',
+    'need 3 more for a run',
     // A bare mention of the app is not a contact handle: the colon is.
     'anyone on discord tonight?',
   ])('leave %j alone', (message) => {

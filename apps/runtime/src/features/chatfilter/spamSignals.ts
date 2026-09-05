@@ -19,7 +19,7 @@
  * that motivated it.
  */
 
-import type { ScannedText } from './scanText.js';
+import { compactOf, type ScannedText } from './scanText.js';
 
 /** The headings a signal is filed under, and switched on and off by. */
 export const SpamCategory = {
@@ -87,9 +87,13 @@ export interface SpamSignal {
 /**
  * Words that survive having their punctuation and spacing removed.
  *
- * Matched against {@link ScannedText.compact}, so `gift card`, `gift-card` and
- * `g i f t c a r d` are all one entry here. Stems rather than whole phrases for
- * the same reason: `giftcard` covers the plural without a second line.
+ * Matched against {@link ScannedText.compact}, so `gift card`, `gift-card`,
+ * `g i f t c a r d` and `g1ftcard` are all one entry here. Stems rather than
+ * whole phrases for the same reason: `giftcard` covers the plural without a
+ * second line.
+ *
+ * Written in ordinary spelling and folded by {@link compactOf} on the way in,
+ * because a needle only meets that form if it has been through it as well.
  */
 const SHOP_WORDS: readonly string[] = [
   'multitool',
@@ -112,15 +116,16 @@ const SHOP_WORDS: readonly string[] = [
   'r2wins',
   'r2realm',
   'coinsstocks',
-];
+].map(compactOf);
 
 /**
  * The shops themselves, by name.
  *
  * Matched against {@link ScannedText.compact}, where every dot, bracket and
- * space is already gone — so one entry covers `realmstock.com`,
- * `realmstock[.]com`, `r e a l m s t o c k . c o m` and `hxxps://realmstock.com`
- * without a spelling of its own for each.
+ * space is already gone and no digit is standing in for a letter — so one entry
+ * covers `realmstock.com`, `realmstock[.]com`, `r e a l m s t o c k . c o m`,
+ * `Realm St0ck c0m` and `hxxps://realmstock.com` without a spelling of its own
+ * for each.
  *
  * **Two lists, because the names are not equally distinctive.** These below can
  * be recognised on their own: none of them is something a player types by
@@ -132,7 +137,7 @@ const SHOP_BRANDS: readonly string[] = [
   'realmgoods',
   'epicnpc',
   'oryxsp',
-];
+].map(compactOf);
 
 /**
  * And these cannot, so they are only a shop with a domain after them.
@@ -147,7 +152,9 @@ const SHOP_BRANDS: readonly string[] = [
  * could confirm, which is why they are in the list that needs a domain beside
  * them rather than the one that does not.
  */
-const SHOP_HOSTS: readonly string[] = ['realmstock', 'whitebag', 'realmshop', 'rp6', 'pr6'];
+const SHOP_HOSTS: readonly string[] = ['realmstock', 'whitebag', 'realmshop', 'rp6', 'pr6'].map(
+  compactOf,
+);
 
 /**
  * Where these turn up, and **only where they have been seen to**.
@@ -156,7 +163,7 @@ const SHOP_HOSTS: readonly string[] = ['realmstock', 'whitebag', 'realmshop', 'r
  * `white bag gg` — an ordinary thing to say about an ordinary drop — became
  * spam.
  */
-const SHOP_TLDS = 'com|net|info|shop';
+const SHOP_TLDS = ['com', 'net', 'info', 'shop'].map(compactOf).join('|');
 
 /**
  * A shop name followed by a domain, with `dot` spelled out or not.
@@ -165,7 +172,7 @@ const SHOP_TLDS = 'com|net|info|shop';
  * five chances to get one wrong, and the shape is the whole point.
  */
 const SHOP_DOMAINS: readonly RegExp[] = SHOP_HOSTS.map(
-  (host) => new RegExp(`${host}(?:dot)?(?:${SHOP_TLDS})`),
+  (host) => new RegExp(`${host}(?:${compactOf('dot')})?(?:${SHOP_TLDS})`),
 );
 
 /**
@@ -212,6 +219,9 @@ const MASKED_SCHEME = [
 
 const SHORTENERS =
   /\btinyurl\b|\bbit\s*[._-]*ly\b|\bis\.gd\b|\bclck\.ru\b|\btiny\.(?:cc|one)\b|\blnk\.bio\b|\blinktr\b/;
+
+/** The one platform whose name survives the compacting, folded to match it. */
+const TELEGRAM = compactOf('telegram');
 
 /** Where the conversation is being moved to, which is never in the game. */
 const OFF_GAME_PLATFORMS =
@@ -311,7 +321,7 @@ export const SPAM_SIGNALS: readonly SpamSignal[] = [
   {
     id: 'off-game-platform',
     category: SpamCategory.Link,
-    matches: (text) => OFF_GAME_PLATFORMS.test(text.flat) || text.compact.includes('telegram'),
+    matches: (text) => OFF_GAME_PLATFORMS.test(text.flat) || text.compact.includes(TELEGRAM),
   },
   {
     id: 'obfuscated-address',
