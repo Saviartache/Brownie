@@ -172,9 +172,15 @@ describe('the spam signals', () => {
     // recognised once the bot moves off the domain above.
     ['24/7 fast delivery, maxing, buffs', 'shop-word'],
     ['cheap fame service, message me', 'shop-word'],
+    // Nobody in this game says "stock", so the word alone is enough — in every
+    // spelling the compacted form folds together.
+    ['stock up now', 'shop-word'],
+    ['st0ck available', 'shop-word'],
+    ['s t o c k ready', 'shop-word'],
+    ['restocking tonight', 'shop-word'],
     ['pay by venmo or cash app', 'payment-method'],
     ['shipping to your vault today', 'shop-phrase'],
-    ['realm | stocks | coins | 24/7 delivery', 'shop-columns'],
+    ['realm | keys | coins | 24/7 delivery', 'shop-columns'],
     ['visit h t t p s :// shop', 'masked-scheme'],
     ['hxxps://realm.shop', 'masked-scheme'],
     ['go to tinyurl for keys', 'link-shortener'],
@@ -204,7 +210,6 @@ describe('the spam signals', () => {
     'nice white bag gg',
     'back to the realm, shop later',
     'anyone else play this rpg? rip my streak',
-    'the realm stock of pots is gone',
     // The digits that the compacted form folds are still ordinary numbers here.
     'hit 24/7 dps on that boss',
     'need 3 more for a run',

@@ -94,6 +94,13 @@ export interface SpamSignal {
  *
  * Written in ordinary spelling and folded by {@link compactOf} on the way in,
  * because a needle only meets that form if it has been through it as well.
+ *
+ * `stock` is the one entry that is an ordinary English word on its own, and it
+ * is here deliberately: nobody in this game's chat talks about stock, and every
+ * shop bot does. Being a substring of the compacted form is the whole width of
+ * it — `st0ck`, `$t0ck`, `s t o c k` and `restocking` all go with it, and that
+ * width is the point rather than the cost of it. It replaces `coinsstocks`,
+ * which said less in more characters.
  */
 const SHOP_WORDS: readonly string[] = [
   'multitool',
@@ -115,7 +122,7 @@ const SHOP_WORDS: readonly string[] = [
   'leancrown',
   'r2wins',
   'r2realm',
-  'coinsstocks',
+  'stock',
 ].map(compactOf);
 
 /**
@@ -201,15 +208,15 @@ const SHOP_PHRASES: readonly RegExp[] = [
 /** How money changes hands, which an in-game trade never involves. */
 const PAYMENT_METHODS = /pay\s*pal|venmo|zelle|cash\s*app|\bcrypto\b|\bbtc\b|\busdt\b/;
 
-/** What a banner laid out in columns is selling. */
+/**
+ * What a banner laid out in columns is selling.
+ *
+ * `stock` is not among them, and the `realm | stock | coins` spellings that used
+ * to sit beside them are gone: `stock` is a word list entry now, and the word
+ * list is read first, so nothing they could still reach gets this far.
+ */
 const PIPE_SHOP_HINTS =
-  /pay\s*pal|venmo|zelle|\bcrypto\b|[$€£]|gift\s*card|instant|delivery|24\s*[/ ]\s*7|\bstocks?\b|\bcoins?\b/;
-
-/** `realm | stock | coins`, in the spellings that keep it out of a word list. */
-const PIPE_SHOP_COLUMNS = [
-  /\brealms?\s*\|+\s*stocks?/,
-  /\brealm\s+[il|]\s+stock\s+[il|]\s+(?:com|coin)\b/,
-];
+  /pay\s*pal|venmo|zelle|\bcrypto\b|[$€£]|gift\s*card|instant|delivery|24\s*[/ ]\s*7|\bcoins?\b/;
 
 /** `http` spelled with something between the letters, and `hxxp`. */
 const MASKED_SCHEME = [
@@ -299,12 +306,9 @@ export const SPAM_SIGNALS: readonly SpamSignal[] = [
   {
     id: 'shop-columns',
     category: SpamCategory.Advertising,
-    matches: (text) => {
-      if (PIPE_SHOP_COLUMNS.some((columns) => columns.test(text.flat))) return true;
-      // Three bars is a layout rather than a turn of phrase — but on its own it
-      // is also a hand-drawn table of nothing, so it has to be selling.
-      return countOf(text.flat, '|') >= 3 && PIPE_SHOP_HINTS.test(text.flat);
-    },
+    // Three bars is a layout rather than a turn of phrase — but on its own it is
+    // also a hand-drawn table of nothing, so it has to be selling.
+    matches: (text) => countOf(text.flat, '|') >= 3 && PIPE_SHOP_HINTS.test(text.flat),
   },
   {
     id: 'masked-scheme',
