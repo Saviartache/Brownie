@@ -1,12 +1,5 @@
 /**
- * The hop: one frame's worth of movement spent all at once.
- *
- * **What it is for is the case walking cannot answer.** A step of the search's
- * lattice is a tick of walking — about seven tenths of a tile in a tenth of a
- * second — so a shot arriving sooner than that has already settled the matter
- * before the character has gone anywhere, and the route is then only a choice
- * between hits. A hop covers the same ground on the frame it is issued, which is
- * the difference between being a tenth of a second late and being on time.
+ * The hop: one frame's worth of movement, spent all at once.
  *
  * **It is not a teleport, and the distinction is the whole reason it is safe.**
  * The module already carries a walk as a target the frame steps towards, capped
@@ -21,20 +14,28 @@
  * makes the two sides disagree about what was asked for, which is how a landing
  * place gets chosen that nothing ever reaches.
  *
- * **Where it is decided, and where it is not.** This says *where* to land.
- * Whether a hop is warranted at all — the route is being hit sooner than walking
- * can answer, and one has not just been spent — belongs to the planner, which is
- * the thing holding the route and the clock.
+ * **What a hop is *for* changed with this generation, and it is the more
+ * interesting half.** It used to be the emergency — the answer to a shot landing
+ * before a step of walking could finish. It is still that, and it is now also
+ * the *precise* action: a walk is published as an offset the frame resolves
+ * against the character's live position and steps along at whatever budget the
+ * frame has, so a walk of a twentieth of a tile is not a thing the module can
+ * deliver, while a hop of a twentieth of a tile is exactly a twentieth of a
+ * tile. Every micro-dodge in this feature is therefore a hop, and the optimizer
+ * ranks the two actions on one scale rather than treating either as a fallback.
+ * See `TrajectoryPlanner`.
+ *
+ * **Nothing here decides anything**, which is why the file is four constants
+ * long: where to hop is a candidate like any other and belongs to the optimizer,
+ * and whether one may be spent at all is the planner's, because it is the thing
+ * holding the clock.
  */
-
-import type { BlastField, DodgeGround } from './DodgeSearch.js';
-import type { ThreatIndex } from './ThreatIndex.js';
 
 /**
  * The furthest a single hop may carry, in tiles.
  *
- * **The module's own per-frame limit, restated here because this side is the
- * one that has to respect it.** `app::kMaxStepTiles` bounds what one frame may
+ * **The module's own per-frame limit, restated here because this side is the one
+ * that has to respect it.** `app::kMaxStepTiles` bounds what one frame may
  * command whatever speed is asked for, so a hop longer than this is a hop the
  * module quietly shortens — and a planner believing its own number would be
  * choosing a landing place the character never arrives at.
@@ -51,214 +52,3 @@ export const MAX_HOP_TILES = 0.7;
  * so this only has to be large enough to reach it.
  */
 export const HOP_SPEED_TILES_PER_SECOND = 120;
-
-/**
- * The radii a hop is offered at, as fractions of the distance asked for.
- *
- * **The full hop can overshoot.** Landing places are what a tight pattern is
- * short of, and a fixed radius can step clean over the only gap there was — so
- * the shorter offer is not caution, it is reach of a different kind.
- */
-const HOP_FRACTIONS = [1, 0.5] as const;
-
-export interface HopRequest {
-  readonly x: number;
-  readonly y: number;
-  /** How far to hop, before {@link MAX_HOP_TILES} has its say. */
-  readonly tiles: number;
-  /** How many directions to try, evenly spaced. The search's own ring. */
-  readonly headings: number;
-  /** How much room a landing place needs before more of it stops being better. */
-  readonly safeClearanceTiles: number;
-  /**
-   * How far from ground that hurts a landing place has to be, in tiles.
-   *
-   * **The same barrier the walk respects, because a hop is the easier way
-   * through it.** A hop that lands a hair from a pool is a hop that a server
-   * correction puts in one, and it is worse than a walk doing the same: there is
-   * no next step in which the planner could change its mind. Refused from
-   * outside the margin only — a character already inside one has to be able to
-   * hop *within* it, and outwards.
-   */
-  readonly hazardClearTiles: number;
-  readonly ground: DodgeGround;
-  readonly threats: ThreatIndex;
-  readonly blasts: BlastField | undefined;
-  readonly leadMs: number;
-  readonly tickMs: number;
-}
-
-/** Where to hop, measured from wherever the character actually is. */
-export interface Hop {
-  readonly offsetX: number;
-  readonly offsetY: number;
-  /** The least room the landing place has over the next two ticks. */
-  readonly clearanceTiles: number;
-  /** How far inside a monster's keep-away distance it lands. */
-  readonly crowdingTiles: number;
-}
-
-/** Rewritten in place: a hop is chosen at worst once per plan. */
-const CHOICE = { offsetX: 0, offsetY: 0, clearanceTiles: 0, crowdingTiles: 0 };
-
-/**
- * Picks somewhere to land, or nothing when nowhere in reach beats standing
- * still.
- *
- * **Two ticks of room, not one.** A hop that clears the shot arriving now and
- * lands under the one behind it has spent the character's one instant reaction
- * moving the problem a tenth of a second. Holding the landing place still across
- * the next two steps of the lattice is the cheapest question that tells the two
- * apart, and it reuses the index the search was going to build anyway.
- *
- * **Among the ones with room to spare, the shortest wins — and there is nowhere
- * it is trying to get to.** A hop is one frame of movement bought to be out of
- * the way of something, and that is the only thing it is ever for. It used to be
- * pointed at the ground the planner was walking the character back to, which
- * quietly made it a fast way home: a landing that was merely *nearer* that place
- * could win, so somebody on their way back was jumped there instead of walked.
- * There is no such place here now. Standing still travels nothing and therefore
- * wins every tie this decides, so a landing has to be genuinely safer to be
- * taken at all, and going home is left to the walk — which is what it is for.
- *
- * @returns a hop valid until the next call, or `undefined` when there is nothing
- *   better to do than what the ordinary route already said.
- */
-export function chooseHop(request: HopRequest): Hop | undefined {
-  const reach = Math.min(MAX_HOP_TILES, Math.max(0, request.tiles));
-  if (reach <= 0) return undefined;
-
-  const headings = Math.max(4, Math.round(request.headings));
-  const safe = request.safeClearanceTiles;
-
-  // What staying put is worth, so a hop has something to beat. A landing place
-  // no better than the ground already underfoot is movement for its own sake.
-  let bestRoom = roomAt(request, request.x, request.y);
-  let bestCrowding = request.ground.crowdingAt(request.x, request.y, request.leadMs);
-  // **Unless the ground underfoot is burning, in which case staying put is not
-  // a candidate at all.** Every landing considered below is already refused if
-  // it is damaging, so anywhere that survives the ring is somewhere better —
-  // and ranked on their own ground alone, standing in the pool would win every
-  // time, because it is by definition nought tiles from where they are.
-  const fromGap = request.ground.hazardGapTiles(request.x, request.y);
-  // Nothing at all, because standing still travels nothing — which is what
-  // makes a landing have to be safer rather than merely somewhere else.
-  let bestTravel = fromGap < 0 ? Infinity : 0;
-  let found = false;
-
-  for (const fraction of HOP_FRACTIONS) {
-    const distance = reach * fraction;
-    for (let i = 0; i < headings; i += 1) {
-      const angle = (i * 2 * Math.PI) / headings;
-      const toX = request.x + Math.cos(angle) * distance;
-      const toY = request.y + Math.sin(angle) * distance;
-      // The midpoint too: a hop is a frame of travel through the world, and a
-      // pillar narrower than the hop would otherwise be jumped straight over.
-      if (!request.ground.canStand(toX, toY)) continue;
-      if (!request.ground.canStand((request.x + toX) / 2, (request.y + toY) / 2)) continue;
-      // A hop out of a shot and into lava is not an escape, and unlike a walk
-      // there is no next step to take back out of it before the ground bites.
-      // The midpoint too, for the same reason a walk checks it: a hop that
-      // clips the corner of a pool is a hop through it.
-      const gap = request.ground.hazardGapTiles(toX, toY);
-      const middle = request.ground.hazardGapTiles((request.x + toX) / 2, (request.y + toY) / 2);
-      const worstGap = gap < middle ? gap : middle;
-      // **The same ratchet the walk obeys, and it has to be**: a hop is the
-      // easier way through a barrier, and it is the one movement with no next
-      // step in which the planner could change its mind. Never nearer a pool
-      // than the better of where they already are and the margin they keep, and
-      // never into one at all.
-      if (worstGap < 0) continue;
-      const floor = fromGap < request.hazardClearTiles ? fromGap : request.hazardClearTiles;
-      if (worstGap < floor) continue;
-      // **Nor into a monster.** A hop is instant, so unlike a step there is no
-      // moment in which the planner could change its mind about the landing —
-      // and landing inside a body is contact damage and a shot fired from
-      // nowhere, which is the thing this was reached for in the first place.
-      if (request.ground.contactAt(toX, toY, request.leadMs) > 0) continue;
-
-      const room = roomAt(request, toX, toY);
-      const crowding = request.ground.crowdingAt(toX, toY, request.leadMs);
-      if (!beats(room, crowding, distance, bestRoom, bestCrowding, bestTravel, safe)) continue;
-
-      bestRoom = room;
-      bestCrowding = crowding;
-      bestTravel = distance;
-      found = true;
-      CHOICE.offsetX = toX - request.x;
-      CHOICE.offsetY = toY - request.y;
-      CHOICE.clearanceTiles = room;
-      CHOICE.crowdingTiles = crowding;
-    }
-  }
-
-  return found ? CHOICE : undefined;
-}
-
-/**
- * Whether one landing place is better than another.
- *
- * **Room settles it right up to the point where there is enough**, and then it
- * stops mattering at all: two places a shot misses by more than the margin are
- * equally survivable, and splitting them by room would send the character
- * sprinting away from a bullet that was already going to miss.
- *
- * **Then the room to dodge in, and only then their own ground.** A hop taken to
- * get out from under a monster is answering that monster, so among landing
- * places a shot misses equally, the one that is not inside a body wins — where
- * ranking on the anchor alone would hop the shortest distance, which is back
- * where the monster is.
- */
-function beats(
-  room: number,
-  crowdingTiles: number,
-  travelTiles: number,
-  bestRoom: number,
-  bestCrowdingTiles: number,
-  bestTravelTiles: number,
-  safeTiles: number,
-): boolean {
-  const enough = room >= safeTiles;
-  const bestEnough = bestRoom >= safeTiles;
-  if (enough !== bestEnough) return enough;
-  if (!enough) return room > bestRoom;
-  // **Fine, and it used to be coarse.** A ring of landing places differs by a
-  // few hundredths of a tile of room between neighbours, so a quarter-tile
-  // quantum made the best four of them tie — and the tie then fell to the term
-  // below, which knows nothing about the monster. Against something that is
-  // *following*, more distance is the whole of the answer, so let it decide.
-  if (Math.abs(crowdingTiles - bestCrowdingTiles) > CROWD_QUANTUM_TILES) {
-    return crowdingTiles < bestCrowdingTiles;
-  }
-  return travelTiles < bestTravelTiles;
-}
-
-/**
- * How finely two landing places are told apart by the room they leave.
- *
- * Small enough that "further from the body" is never a tie, and not nought so
- * that two places genuinely the same distance off still fall through to the
- * shorter hop.
- */
-const CROWD_QUANTUM_TILES = 0.05;
-
-/**
- * How much room a body standing at a place has over the next two ticks.
- *
- * Standing rather than walking, because that is what a hop leaves the character
- * doing: it arrives, and the next plan decides what happens after that.
- */
-function roomAt(request: HopRequest, x: number, y: number): number {
-  let room = Infinity;
-  const steps = Math.min(2, request.threats.steps);
-  for (let step = 0; step < steps; step += 1) {
-    const here = request.threats.clearanceOf(step, x, y, x, y);
-    if (here < room) room = here;
-  }
-  if (request.blasts !== undefined) {
-    const until = request.leadMs + Math.max(1, steps) * request.tickMs;
-    const blast = request.blasts.clearanceAt(x, y, request.leadMs, until);
-    if (blast < room) room = blast;
-  }
-  return room;
-}

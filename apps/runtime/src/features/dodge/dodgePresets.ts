@@ -15,12 +15,12 @@
  * would be a preset that undoes somebody's setup every time they try another
  * one.
  *
- * **Two of them are about how hard it thinks, and that is new.** The planner is
- * a search now, so how far ahead it looks, how finely it steps and how much
- * slack it allows itself are the levers that buy the cautious end its accuracy —
- * where the previous generation bought the same thing with a wider hitbox. They
+ * **Two of them are about how hard it thinks.** The planner rolls futures
+ * forward now, so how far ahead it looks, how finely it slices that and how many
+ * candidates it may try are the levers that buy the cautious end its accuracy —
+ * where an older generation bought the same thing with a wider hitbox. They
  * belong to the preset for exactly that reason: thinking harder is what makes
- * caution affordable rather than merely twitchy.
+ * both caution and precision affordable rather than merely twitchy.
  *
  * Each preset is a **full** assignment of the numbers it owns, so switching
  * between them can never leave a leftover from the previous one behind. They are
@@ -33,11 +33,11 @@
 export interface DodgeTuning {
   /** How far ahead routes are searched. */
   readonly horizonMs: number;
-  /** How long one step of the search's lattice lasts. */
+  /** How long one tick of the planner's horizon lasts. */
   readonly tickMs: number;
   /** How soon trouble has to be to be this moment's problem. */
   readonly reactWithinMs: number;
-  /** How many directions the search considers. */
+  /** How many directions the optimizer considers. */
   readonly headings: number;
   /** How much bigger than life every shot is treated as. */
   readonly hitScale: number;
@@ -49,10 +49,10 @@ export interface DodgeTuning {
   readonly safeClearanceTiles: number;
   /** How hard it tries to give the player their own ground back. */
   readonly holdGroundWeight: number;
-  /** How much slack the search allows itself, as a multiplier. */
-  readonly greed: number;
-  /** The most nodes one plan may expand. */
-  readonly maxExpansions: number;
+  /** How far off that ground the character can still fight from. */
+  readonly dpsRadiusTiles: number;
+  /** The most futures one plan may roll out. */
+  readonly budget: number;
   /** How much space to keep between the character and a monster. */
   readonly keepAwayTiles: number;
 }
@@ -62,7 +62,7 @@ export const DodgePresetId = {
   Relaxed: 'relaxed',
   /** What the planner was tuned and measured at. */
   Balanced: 'balanced',
-  /** Wide margins, early reactions, a finer lattice and more of it. */
+  /** Wide margins, early reactions, a finer horizon and more futures in it. */
   Cautious: 'cautious',
 } as const;
 
@@ -85,8 +85,10 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     // alone" comes to. Safe to ask for now that the pull cannot be spent on a
     // tight step at all — see `DodgeSettings.holdGroundWeight`.
     holdGroundWeight: 0.4,
-    greed: 2,
-    maxExpansions: 300,
+    // The widest of the three, because "leave me alone" also means "do not
+    // fuss about a tenth of a tile".
+    dpsRadiusTiles: 0.35,
+    budget: 140,
     keepAwayTiles: 2,
   },
   balanced: {
@@ -99,8 +101,8 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     driftTilesPerSecond: 0.2,
     safeClearanceTiles: 0.25,
     holdGroundWeight: 0.35,
-    greed: 1.6,
-    maxExpansions: 400,
+    dpsRadiusTiles: 0.2,
+    budget: 200,
     keepAwayTiles: 2.5,
   },
   cautious: {
@@ -117,12 +119,16 @@ export const DODGE_PRESETS: Readonly<Record<DodgePresetId, DodgeTuning>> = {
     // this is the preset the pull costs least: measured across four fights and
     // five firing phases, doubling it changed its hits not at all.
     holdGroundWeight: 0.3,
-    greed: 1.4,
+    // **The tightest ring of the three, and it is not caution — it is the
+    // point.** Thinking harder is what makes a tenth of a tile a real answer
+    // instead of a rounding, so the preset that thinks hardest is the one that
+    // can afford to insist on staying put.
+    dpsRadiusTiles: 0.12,
     // **Measured, not chosen.** A screen with six ranks of fire on it is what
     // spends a budget, and this is what keeps that plan inside a few
     // milliseconds — which at fifty plans a second is the difference between a
     // few per cent of a core and a third of one.
-    maxExpansions: 500,
+    budget: 280,
     keepAwayTiles: 3,
   },
 };

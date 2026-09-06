@@ -18,6 +18,13 @@
  * the arithmetic that turns a plan into a step is `dodgeCommand`, the picture is
  * `DodgePictureFeed`, and the planner itself is `DodgePlanner`.
  *
+ * **One thing here is state rather than wiring, and it is here because it is fed
+ * by packets.** What geometry each monster is firing is the difference between
+ * consecutive `ENEMYSHOOT`s — see `AttackPatterns` — and a plan is not a packet:
+ * sampled on the planning interval it would see the same volley ten times and
+ * none of the gaps between them. So the table is filled where the packets
+ * arrive and handed to the planner, which asks it questions and owns none of it.
+ *
  * **Three things decide who is driving, in this order.** The chord the player
  * holds to walk somewhere wins outright — a person pointing at a place has more
  * information than any planner. Otherwise the planner decides, and its first
@@ -53,6 +60,7 @@ import {
   type Position,
   type SessionView,
 } from '@brownie/plugin-api';
+import { AttackPatterns } from './AttackPatterns.js';
 import { DodgePlanner } from './DodgePlanner.js';
 import { DodgePictureFeed } from './DodgePictureFeed.js';
 import { DodgeScene } from './DodgeScene.js';
@@ -69,10 +77,10 @@ import { registerHitRedirect } from './hitRedirect.js';
  *
  * **What makes fifty plans a second affordable is that most of them stop after
  * the probe.** A plan whose player is not about to be hit costs one walk down
- * the lattice — a handful of index queries — and never opens the search at all;
- * the budgeted search behind it is what the busy ones cost, and its worst case
- * is bounded by `maxExpansions` rather than by how much is on the screen. See
- * `DodgePlanner`, and the benchmark that holds both to a figure.
+ * the horizon — a handful of field queries — and never rolls a single future;
+ * the budgeted optimizer behind it is what the busy ones cost, and its worst
+ * case is bounded by the plan budget rather than by how much is on the screen.
+ * See `DodgePlanner`, and the benchmark that holds both to a figure.
  */
 const PLAN_INTERVAL_MS = 20;
 
@@ -89,16 +97,17 @@ const MIN_PLAN_GAP_MS = 6;
 const RELEASE_HOLD_MS = 1;
 
 /**
- * How long a hop stands before it lapses unspent.
+ * Whether a packet field is the pair of numbers a volley's origin has to be.
  *
- * **A deadline, not a duration.** The record is spent by the first frame that
- * actually steps towards it, so this only bounds how long it may wait for one —
- * and a frame with nothing to measure the player's own walking against issues no
- * step at all, which is the ordinary case immediately after a quiet stretch. A
- * few frames of grace; past that the situation it was chosen for has moved on
- * and the next plan will choose again.
+ * Checked rather than asserted: a field that came through as something else
+ * would otherwise become a pattern centred on `NaN`, and every gap worked out
+ * from it would be a place nothing can walk to.
  */
-const HOP_HOLD_MS = 60;
+function isPoint(value: unknown): value is { readonly x: number; readonly y: number } {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.x === 'number' && typeof record.y === 'number';
+}
 
 export function createDodgePlugin(inputs: DodgeInputs): Plugin {
   return definePlugin({
@@ -134,6 +143,16 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
 
       const planner = new DodgePlanner();
       const scene = new DodgeScene(inputs);
+      /**
+       * What geometry each monster is firing, read off the volleys themselves.
+       *
+       * **Here rather than inside the planner, because it is fed by packets and
+       * a plan is not.** A pattern is the difference between consecutive
+       * `ENEMYSHOOT`s; sampling it on the planning interval would see the same
+       * volley ten times and none of the gaps. The planner is handed the table
+       * and asks it questions — see `AttackPatterns` and `PocketLock`.
+       */
+      const patterns = new AttackPatterns();
       const picture = new DodgePictureFeed(inputs.output, inputs.view);
 
       let lastPlanAtMs = 0;
@@ -199,6 +218,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       context.onDispose(() => {
         planner.reset();
         scene.reset();
+        patterns.clear();
         picture.reset();
         commanding = false;
         dropAnchor();
@@ -212,11 +232,15 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       context.sessions.onConnected(() => {
         planner.reset();
         scene.reset();
+        // An object id from the last map names something else in this one, so a
+        // pattern kept across the join is a spiral attributed to a stranger.
+        patterns.clear();
         dropAnchor();
       });
       // And a map changes underneath a session that never disconnected, which
       // is what a portal is. Coordinates do not survive one.
       context.packets.on('MAPINFO', () => {
+        patterns.clear();
         dropAnchor();
       });
 
@@ -307,6 +331,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           scene.world,
           map.projectiles(),
           scene.blastsIn(map, controls),
+          patterns,
         );
 
         // **Nothing is logged here, and that is deliberate.** The wheel changes
@@ -342,16 +367,27 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // from wherever the character is on the frame it lands, so one left
         // standing would be carried again on every frame of the hold. See
         // `DodgeOutput.hopBy`.
+        //
+        // **The hold comes from the command rather than from the setting**, and
+        // that is what makes a small dodge small: the module keeps walking
+        // towards an offset for as long as the record stands, so how long it
+        // stands *is* how far the character goes. The setting is the ceiling; the
+        // plan's own distance is what is actually asked for. See `dodgeCommand`.
         if (command.hop) {
           inputs.output.hopBy(
             command.offsetX,
             command.offsetY,
             command.speedTilesPerSecond,
-            HOP_HOLD_MS,
+            command.holdMs,
           );
           return;
         }
-        inputs.output.moveBy(command.offsetX, command.offsetY, command.speedTilesPerSecond, hold);
+        inputs.output.moveBy(
+          command.offsetX,
+          command.offsetY,
+          command.speedTilesPerSecond,
+          command.holdMs,
+        );
       };
 
       /**
@@ -374,9 +410,31 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         picture.publish(session, scene, controls, Date.now(), anchor);
       }, PLAN_INTERVAL_MS);
 
-      // The one packet that changes the answer by arriving. Everything else a
-      // plan reads is a function of time, which the interval already covers.
-      context.packets.on('ENEMYSHOOT', (_packet, session) => {
+      // **The one packet that changes the answer by arriving**, and it changes it
+      // twice over. Everything else a plan reads is a function of time, which the
+      // interval already covers — but a shot that has *just* been announced is
+      // outside the window a moment ago and inside it now, and waiting out the
+      // interval for it is up to a fifth of the warning spent idle.
+      //
+      // And it is the whole input to the pattern recogniser: one packet is one
+      // volley, with the origin, the base angle, the arm count and the spacing
+      // all stated. Three of those describe a spiral completely, which is why
+      // nothing here has to cluster a thousand bullets to find one.
+      context.packets.on('ENEMYSHOOT', (packet, session) => {
+        const ownerId = packet.number('ownerId');
+        const angle = packet.number('angle');
+        const position = packet.get('position');
+        if (ownerId !== undefined && angle !== undefined && isPoint(position)) {
+          patterns.observe({
+            ownerId,
+            atMs: session.world.gameTimeMs,
+            x: position.x,
+            y: position.y,
+            angle,
+            count: packet.number('numShots') ?? 1,
+            angleStep: packet.number('angleInc') ?? 0,
+          });
+        }
         planNow(session);
       });
 

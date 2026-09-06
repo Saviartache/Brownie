@@ -399,6 +399,7 @@ describe('StateStage', () => {
         accelerationDelayMs: 0,
         speedClamp: 0,
         turnRate: 0,
+        debuffSeverity: 0,
         ...overrides,
       };
       return {

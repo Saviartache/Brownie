@@ -567,9 +567,9 @@ that owes nothing to the runtime's world model.
 **`once` exists because an offset is resolved afresh on every frame**, which is
 exactly what makes an ordinary walk work: the target stays a fixed distance
 ahead and the character keeps walking towards it for as long as the hold lasts.
-The dodge's emergency step wants the opposite — one frame's worth of movement,
-at once — and leaving the same offset standing carries it again on the next
-frame, and the one after, as many times as fit inside the hold. At a hundred and
+The dodge's hop wants the opposite — one frame's worth of movement, at once —
+and leaving the same offset standing carries it again on the next frame, and the
+one after, as many times as fit inside the hold. At a hundred and
 forty frames a second a hold of twenty milliseconds is three of them, which is
 two tiles rather than the two thirds of one the planner chose, and the server
 takes the difference back. So a one-shot target is cleared by the frame that
@@ -581,12 +581,38 @@ still bounds how long it may wait for one. See
 capped: the module's own per-frame limit is what one of these can carry, and
 asking for more does not move the character further.
 
+**A hop is also how a displacement smaller than a frame is asked for**, which is
+the other half of what `once` buys and the half the dodge now spends most of its
+time on. An ordinary walk is a heading the frame steps along at whatever budget
+it has, so a walk of a twentieth of a tile is not a distance the module can
+deliver — the offset is under one frame's step and the command degenerates into
+"that way, for a while". A one-shot target carries exactly the offset it is
+given, so it is the only way to move a character a hundredth of a tile on
+purpose. The dodge's optimizer ranks the two actions on one scale for exactly
+that reason; see `apps/runtime/src/features/dodge/TrajectoryPlanner.ts`.
+
 `holdMs` is how a target stops mattering. The runtime says *nothing* when it
 decides to stand still or hold fire, so silence has to mean stop on its own —
 otherwise the last dodge would be walked towards forever and the last target
 shot at after it died. It is a few planning intervals rather than a server
 tick: the runtime plans about forty times a second, and everything past the
 next plan is time the player spends acting on a decision already withdrawn.
+
+**For a walk it is also the distance.** Because the offset is resolved afresh
+every frame, an ordinary `move` is a carrot rather than a destination: the
+character never arrives at it, and keeps travelling at the commanded speed for
+as long as the record stands. So how far a dodge actually goes is set by how
+long its record lives, and the runtime sizes the hold to the distance its plan
+chose — capped by the setting, floored at one frame. See
+`apps/runtime/src/features/dodge/dodgeCommand.ts`.
+
+**And it is bounded on the module's side as well.** The runtime is another
+process, so a hold is a number arriving over a pipe: `app::kMaxHoldMs` is the
+longest any target may stand whatever the record asks for, which is well past
+anything the runtime sends and is there for the mistake rather than for the
+message. The module also lets go of the wheel outright when the link drops or
+the game quits — a target that outlived the runtime behind it is a character
+walking on their own, and silence has to mean stop.
 
 **A target at the player's own feet is how a walk is cancelled.** The module
 walks *towards* a target and stops once it is close enough, so one it has

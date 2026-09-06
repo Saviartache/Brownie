@@ -245,6 +245,16 @@ export interface ProjectileView extends Position {
   /** Greatest speed this shot can reach, including its acceleration clamp. */
   readonly maxSpeedTilesPerSecond: number;
   /**
+   * How bad the worst condition this shot applies is, from nought to one.
+   *
+   * **A hit that paralyses is not a bigger hit, it is a different event**, and
+   * anything ranking shots by what they cost has to be able to say so: every
+   * shot that lands during a paralyse lands unopposed. Nought for the great
+   * majority, including every shot whose only declared effects are the ones a
+   * monster applies to itself.
+   */
+  readonly debuffSeverity: number;
+  /**
    * When it was fired and when it stops existing, on the world's clock.
    *
    * The pair rather than either alone: how much of a shot's life is left says

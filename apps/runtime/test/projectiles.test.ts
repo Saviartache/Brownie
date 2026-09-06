@@ -25,6 +25,7 @@ function definition(overrides: Partial<ProjectileDefinition> = {}): ProjectileDe
     accelerationDelayMs: 0,
     speedClamp: 0,
     turnRate: 0,
+    debuffSeverity: 0,
     ...overrides,
   };
 }

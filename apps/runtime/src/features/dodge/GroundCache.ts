@@ -129,7 +129,7 @@ export class GroundCache {
    * missing.** Refusing to *enter* a pool says nothing about hugging its edge,
    * so a dodge would thread a shot with the character's heel on the boundary —
    * and then a server correction, a frame of latency or the player's own input
-   * put them in it. A distance gives the route somewhere to prefer, which is
+   * put them in it. A distance gives a trajectory somewhere to prefer, which is
    * what keeps the margin off the edge instead of merely off the tile.
    *
    * Measured between two squares, because that is what both of them are: the

@@ -1,13 +1,14 @@
 /**
  * The fight, assembled once per plan and handed to the controller.
  *
- * **The controller is arithmetic over positions and knows nothing about
- * sessions.** What it needs of the world is three questions — can a body stand
- * here, is this ground hurting, how much room to dodge in does this place leave
- * — and a list of monsters to answer the third with. Building those from a
- * session is a job of its own: it involves the object catalog, two clearance
- * margins that are dropped when the player is already inside them, and a motion
- * tracker that turns five sightings a second into a velocity.
+ * **The planner is arithmetic over positions and knows nothing about
+ * sessions.** What it needs of the world is the four questions in `DodgeGround`
+ * — can a body stand here, how far is this place from ground that hurts, how
+ * much room to dodge in does it leave, and is something standing *in* it — and a
+ * list of monsters to answer the last two with. Building those from a session is
+ * a job of its own: it involves the object catalog, two clearance margins that
+ * are dropped when the player is already inside them, and a motion tracker that
+ * turns five sightings a second into a velocity.
  *
  * **Everything here is allocated once.** The adapter and the record a body is
  * read back through are rewritten in place: a plan happens fifty times a
@@ -21,7 +22,7 @@ import { bodyTilesFromPercent } from '../../gamedata/GameCatalogs.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
 import type { DodgeSettings } from './DodgePlanner.js';
-import type { DodgeGround } from './DodgeSearch.js';
+import type { DodgeGround } from './DodgeGround.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeCatalog } from './dodgeInputs.js';
 import { GroundCache } from './GroundCache.js';
@@ -119,7 +120,7 @@ export class DodgeScene {
   /**
    * Whether geometry is allowed to refuse a step at all.
    *
-   * Off, the search plans as though the room were empty and the game's own
+   * Off, the planner works as though the room were empty and the game's own
    * collision is the only thing between the character and a wall — which is what
    * somebody wants when the map data is wrong, and nothing else.
    */
@@ -136,11 +137,11 @@ export class DodgeScene {
   #bodyDoubtTiles = 0;
 
   /**
-   * The map, as the search sees it.
+   * The map, as a trajectory sees it.
    *
    * Built once and pointed at the current session, so a plan does not allocate
-   * an adapter and three closures every twentieth of a second — and the search
-   * asks these a few thousand times per plan, not a few hundred.
+   * an adapter and four closures every twentieth of a second — and the rollouts
+   * ask these a few thousand times per plan, not a few hundred.
    */
   readonly world: DodgeGround;
 
@@ -233,7 +234,7 @@ export class DodgeScene {
     // square a player at the edge of a pool could step to is a margin holding
     // them there. But the answer is no longer a refusal — how far off the pool a
     // place is is a *distance* now, priced and preferred rather than demanded
-    // (see `StepCost`), and only the pool itself is refused. A preference cannot
+    // (see `TrajectoryScore`), and only the pool itself is refused. A preference cannot
     // pin anybody, so the margin can say what it means at every distance, which
     // is the whole of what stops a dodge finishing with a heel in the lava.
     //

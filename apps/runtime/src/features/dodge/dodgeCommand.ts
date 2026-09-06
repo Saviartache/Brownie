@@ -14,6 +14,17 @@
  * walked past — see `DodgeOutput.moveBy`. What comes out of here is the step
  * itself, and the module measures it from the position only it can see.
  *
+ * **Which is also why the *hold* decides how far a walk goes, and not the
+ * offset.** The module re-resolves an offset against the character's live
+ * position on every frame, so it is a carrot rather than a destination: the
+ * character never arrives at it, and keeps travelling at the commanded speed for
+ * as long as the record stands. A walk of a third of a tile is therefore a walk
+ * with a hold sized to a third of a tile, plus an offset long enough that the
+ * module does not round the direction away. Sizing the *offset* instead — which
+ * an older generation did, believing the module stopped on arrival — meant every
+ * walk went as far as the hold allowed whatever distance the planner had chosen,
+ * which is the whole of why small dodges were not possible before.
+ *
  * **A hop is the same offset with a different lifetime**, and that is the whole
  * of what makes it instant: the module spends its entire per-frame allowance on
  * it and then the target is gone, where an ordinary walk keeps being carried
@@ -31,16 +42,36 @@ import { HOP_SPEED_TILES_PER_SECOND } from './Hop.js';
 /**
  * How far ahead the module is pointed at, at least.
  *
- * The module walks *towards* an offset and stops when it is close enough, so one
- * nearer than a frame's step is a command to stand still. This is the floor
- * under "walk this way", and it is deliberately larger than one frame of the
- * fastest character in the game.
+ * A frame steps towards the offset by at most its own budget, so an offset
+ * shorter than one frame's step is a command the module rounds away to nothing.
+ * This is the floor under "walk this way", and it is deliberately larger than
+ * one frame of the fastest character in the game.
  *
- * **A floor and not a target.** A plan's step is where to stop, so the command
- * is normally exactly that far; this only stops a step measured in millimetres
- * from being a command the module rounds away to nothing.
+ * **A direction with a length, not a distance to cover.** How far the walk
+ * actually goes is {@link WalkCommand.holdMs} — see the file note.
  */
 const MIN_TARGET_TILES = 0.3;
+
+/**
+ * The shortest hold a walk is given, in milliseconds.
+ *
+ * One frame at any frame rate a person plays at, and then some: a hold shorter
+ * than the gap between two frames can expire before a single frame has acted on
+ * it, which is a command that does nothing at all.
+ */
+const MIN_WALK_HOLD_MS = 25;
+
+/**
+ * How long a hop stands before it lapses unspent.
+ *
+ * **A deadline, not a duration.** The record is spent by the first frame that
+ * actually steps towards it, so this only bounds how long it may wait for one —
+ * and a frame with nothing to measure the player's own walking against issues no
+ * step at all, which is the ordinary case immediately after a quiet stretch. A
+ * few frames of grace; past that the situation it was chosen for has moved on
+ * and the next plan will choose again.
+ */
+export const HOP_HOLD_MS = 60;
 
 /** Below this the command is not a walk, it is jitter. */
 const MIN_COMMAND_SPEED = 0.2;
@@ -54,10 +85,19 @@ export interface WalkCommand {
   /**
    * Whether the module should spend it on one frame and then forget it.
    *
-   * The emergency step. Everything else about the command is the same, and the
-   * module still clamps it to what a single frame may carry.
+   * The exact step. Everything else about the command is the same, and the
+   * module still clamps it to what a single frame may carry — which is why a hop
+   * is the only way to ask for a displacement smaller than a frame of walking.
    */
   readonly hop: boolean;
+  /**
+   * How long the record stands, in milliseconds.
+   *
+   * **For a walk this is the distance**, because the module keeps stepping
+   * towards the offset for as long as the record lives. For a hop it is a
+   * deadline: the first frame that steps spends it. See the file note.
+   */
+  readonly holdMs: number;
 }
 
 export interface WalkRequest {
@@ -70,7 +110,7 @@ export interface WalkRequest {
   readonly fullSpeedTilesPerSecond: number;
   /** Whether their own input is being cancelled rather than added to. */
   readonly cancelIntent: boolean;
-  /** How long the offset stands, which is what decides how far it reaches. */
+  /** The longest a walk may stand, which is the furthest one plan may carry. */
   readonly holdMs: number;
 }
 
@@ -96,6 +136,7 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
       offsetY: plan.dirY * plan.stepTiles,
       speedTilesPerSecond: HOP_SPEED_TILES_PER_SECOND,
       hop: true,
+      holdMs: HOP_HOLD_MS,
     };
   }
 
@@ -125,6 +166,7 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
       offsetY: -intent.y * MIN_TARGET_TILES,
       speedTilesPerSecond: request.speedTilesPerSecond,
       hop: false,
+      holdMs: request.holdMs,
     };
   }
 
@@ -159,20 +201,29 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   // pull them back — so the correction is allowed to be partial and is never
   // allowed to be a snap-back.
   const commanded = Math.min(magnitude, speed);
-  // **The plan's own step, and no further.** The module walks towards an offset
-  // and stops on arrival, so this is what makes "into the gap and stand" carry
-  // itself out if no further plan ever arrives — where a fixed reach past it
-  // would keep walking out the other side. Never longer than the hold can cover
-  // either, because everything past the next plan is a decision already
-  // withdrawn.
-  const distance = Math.max(
-    MIN_TARGET_TILES,
-    Math.min(plan.stepTiles, (commanded * request.holdMs) / 1000),
+  // **The plan's own step, and no further — expressed as a hold.** The module
+  // keeps stepping towards an offset for as long as the record stands, so what
+  // bounds the distance is time rather than the offset's own length. This is
+  // what makes "into the gap and stand" carry itself out if no further plan ever
+  // arrives, and it is what lets a third of a tile actually be a third of a
+  // tile.
+  //
+  // Never longer than the caller allows, because everything past the next plan
+  // is a decision already withdrawn; never shorter than a frame, because a
+  // record that expires before any frame has acted on it is a command that did
+  // nothing at all.
+  const holdMs = Math.min(
+    request.holdMs,
+    Math.max(MIN_WALK_HOLD_MS, (plan.stepTiles / commanded) * 1000),
   );
+  // The offset is a direction with a length, and the length only has to clear
+  // what one frame would round away.
+  const reach = Math.max(MIN_TARGET_TILES, plan.stepTiles);
   return {
-    offsetX: (wantX / magnitude) * distance,
-    offsetY: (wantY / magnitude) * distance,
+    offsetX: (wantX / magnitude) * reach,
+    offsetY: (wantY / magnitude) * reach,
     speedTilesPerSecond: commanded,
     hop: false,
+    holdMs,
   };
 }

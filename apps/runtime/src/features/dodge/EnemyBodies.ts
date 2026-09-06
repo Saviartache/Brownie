@@ -16,7 +16,7 @@
  * wheel.
  *
  * **And it is not a distance to keep from the shots.** Where the fire is going
- * is `ThreatIndex`'s question and is answered by stepping through it; this is
+ * is `DangerField`'s question and is answered by stepping through it; this is
  * about the body in the way. Confusing the two is what makes a planner back off
  * from a pattern it had room to walk through — see `DodgePlanner`.
  *

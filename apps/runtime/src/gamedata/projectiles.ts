@@ -1,4 +1,5 @@
-import { childText, hasChild, parseGameNumber, scanElementsIn } from './xml.js';
+import { debuffSeverityOf } from './conditions.js';
+import { childText, elementText, hasChild, parseGameNumber, scanElementsIn } from './xml.js';
 
 /**
  * How one kind of shot moves and what it does.
@@ -56,6 +57,16 @@ export interface ProjectileDefinition {
    * committing to a place the shot was never going to be.
    */
   readonly turnRate: number;
+  /**
+   * How bad the worst condition this one applies is, from nought to one.
+   *
+   * **Read here rather than by whoever needs it**, because the names are in the
+   * file and the severity is a judgement — see `conditions.ts` — and a second
+   * reader of the same elements is a second table to keep in step. Nought for
+   * the great majority of shots, including every one whose only effects are the
+   * `In Combat` and `Invulnerable` a monster applies to itself.
+   */
+  readonly debuffSeverity: number;
 }
 
 /**
@@ -132,10 +143,27 @@ export function readProjectiles(objectElement: string): ProjectileDefinition[] {
       accelerationDelayMs: parseGameNumber(childText(element, 'AccelerationDelay')) ?? 0,
       speedClamp: parseGameNumber(childText(element, 'SpeedClamp')) ?? 0,
       turnRate: parseGameNumber(childText(element, 'TurnRate')) ?? 0,
+      debuffSeverity: debuffSeverityOf(conditionsIn(element)),
     });
   }
 
   return definitions;
+}
+
+/**
+ * The conditions one projectile declares, by the names the file writes.
+ *
+ * Every `<ConditionEffect>` child rather than the first, because a shot that
+ * paralyses usually also declares the two housekeeping effects its owner applies
+ * to itself, and which of the three comes first is not something to rely on.
+ */
+function conditionsIn(element: string): string[] {
+  const names: string[] = [];
+  for (const effect of scanElementsIn(element, 'ConditionEffect')) {
+    const name = elementText(effect);
+    if (name !== undefined && name !== '') names.push(name);
+  }
+  return names;
 }
 
 function attributeOf(element: string, name: string): string | undefined {

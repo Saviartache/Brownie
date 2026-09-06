@@ -29,8 +29,8 @@ import {
   type DodgeSettings,
   type DodgeSituation,
 } from '../src/features/dodge/DodgePlanner.js';
-import type { DodgeGround } from '../src/features/dodge/DodgeSearch.js';
-import type { DodgeShot } from '../src/features/dodge/ShotTracks.js';
+import type { DodgeGround } from '../src/features/dodge/DodgeGround.js';
+import type { DodgeShot } from '../src/features/dodge/ShotField.js';
 import {
   ENEMY_CONTACT_HALF_TILES,
   EnemyBodies,
@@ -87,12 +87,14 @@ function straightShot(
   tilesPerSecond: number,
   firedAtMs: number,
   lifetimeMs: number,
+  extra: Partial<DodgeShot> = {},
 ): DodgeShot & { firedAtMs: number; expiresAtMs: number } {
   return {
     // Carried so the same fake serves the planner and the drawing, which read
     // different halves of what the store holds about a shot.
     firedAtMs,
     expiresAtMs: firedAtMs + lifetimeMs,
+    ...extra,
     positionAt(gameTimeMs: number): Position | undefined {
       const elapsed = gameTimeMs - firedAtMs;
       if (elapsed < 0 || elapsed > lifetimeMs) return undefined;
@@ -186,8 +188,8 @@ const SETTINGS: DodgeSettings = {
   safeClearanceTiles: 0.25,
   hazardClearTiles: 0.5,
   holdGroundWeight: 1,
-  greed: 1.6,
-  maxExpansions: 500,
+  dpsRadiusTiles: 0.2,
+  budget: 280,
   hopEnabled: true,
   hopTiles: MAX_HOP_TILES,
   hopCooldownMs: 400,
@@ -349,15 +351,36 @@ describe('blasts on their way down', () => {
  */
 const ACROSS_THE_ROOM = straightShot({ x: 2.3, y: 10 }, 0, 20, 0, 3000);
 
+/**
+ * The same shot, six tiles off the line and threatening nobody.
+ *
+ * For the tests about *where the planner walks to* rather than about what it
+ * dodges: a shot along the character's own row makes every question about the
+ * way home a question about the shot as well, and the answer to "walk back
+ * west" is quite properly "not through that".
+ */
+const ELSEWHERE = straightShot({ x: 2.3, y: 4 }, 0, 20, 0, 3000);
+
+/**
+ * A small, fast shot crossing the character between two ticks.
+ *
+ * The one case only a hop answers: every walk out of it is swept along ground
+ * the shot is about to cross, and a hop is one frame and is measured where it
+ * lands. See the planner's own tests for the geometry.
+ */
+const CROSSES_NOW = straightShot({ x: 10, y: 6 }, Math.PI / 2, 40, 0, 3000, {
+  collisionHalfTiles: 0.1,
+});
+
 describe('who is driving', () => {
   it('says nothing at all when nothing could reach us', () => {
     const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, []);
 
     expect(plan.verdict).toBe('clear');
     expect(plan.steer).toBe(false);
-    // And it never opened the search, which is what makes fifty plans a second
-    // affordable: the great majority of them stop at the probe.
-    expect(plan.expansions).toBe(0);
+    // And it never rolled a single future, which is what makes fifty plans a
+    // second affordable: the great majority of them stop at the probe.
+    expect(plan.evaluated).toBe(0);
   });
 
   // The whole of "does not get in your way": a player already walking somewhere
@@ -450,7 +473,13 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        // **A hop is spent whole on the frame it lands**, which is exactly what
+        // makes it different from a walk — see `Hop.ts`. Playing one out as a
+        // walk carries the character slowly through ground the planner crossed
+        // in a single frame.
+        const travel = plan.hop
+          ? plan.stepTiles
+          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -500,7 +529,13 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        // **A hop is spent whole on the frame it lands**, which is exactly what
+        // makes it different from a walk — see `Hop.ts`. Playing one out as a
+        // walk carries the character slowly through ground the planner crossed
+        // in a single frame.
+        const travel = plan.hop
+          ? plan.stepTiles
+          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -594,7 +629,13 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        // **A hop is spent whole on the frame it lands**, which is exactly what
+        // makes it different from a walk — see `Hop.ts`. Playing one out as a
+        // walk carries the character slowly through ground the planner crossed
+        // in a single frame.
+        const travel = plan.hop
+          ? plan.stepTiles
+          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -672,7 +713,13 @@ describe('the ground the player named', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        // **A hop is spent whole on the frame it lands**, which is exactly what
+        // makes it different from a walk — see `Hop.ts`. Playing one out as a
+        // walk carries the character slowly through ground the planner crossed
+        // in a single frame.
+        const travel = plan.hop
+          ? plan.stepTiles
+          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -731,8 +778,8 @@ describe('the ground the player named', () => {
           driftTilesPerSecond: tuning.driftTilesPerSecond,
           safeClearanceTiles: tuning.safeClearanceTiles,
           holdGroundWeight: tuning.holdGroundWeight,
-          greed: tuning.greed,
-          maxExpansions: tuning.maxExpansions,
+          dpsRadiusTiles: tuning.dpsRadiusTiles,
+          budget: tuning.budget,
         },
       });
 
@@ -880,7 +927,10 @@ describe('where it refuses to go', () => {
       [],
     );
 
-    expect(plan.verdict).toBe('hop');
+    // The reason is the pool; that it is left with one frame of movement rather
+    // than a walk is the separate question `plan.hop` answers.
+    expect(plan.verdict).toBe('escape');
+    expect(plan.hop).toBe(true);
     expect(plan.steer).toBe(true);
     expect(plan.dirX).toBeLessThan(0);
   });
@@ -1048,7 +1098,9 @@ describe('room to dodge in', () => {
 
     const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
-    expect(plan.verdict).toBe('hop');
+    // Spacing is the reason and the hop is how: a body already inside the
+    // character has taken the ground every walk out of it would start on.
+    expect(plan.verdict).toBe('spacing');
     expect(plan.hop).toBe(true);
     expect(plan.stepTiles).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
   });
@@ -1080,37 +1132,70 @@ describe('room to dodge in', () => {
   });
 });
 
-describe('the step there is no time to walk', () => {
-  /** A shot already on top of the player, arriving before a step could finish. */
-  const IMMEDIATE = straightShot({ x: 9.6, y: 10 }, 0, 8, 0, 3000);
+describe('the step that is spent on one frame', () => {
+  /**
+   * A small, fast shot that crosses the player between two ticks.
+   *
+   * **The case only a hop answers, and it is a case about *when* rather than
+   * about how far.** A walk is swept along the ground it covers, and every walk
+   * out of here starts from a place the shot is about to be — so every one of
+   * them is caught somewhere along its own path. A hop is one frame, and the
+   * game tests collision at a position once a frame, so it is measured where it
+   * lands and nowhere in between.
+   */
+  const CROSSING = straightShot({ x: 10, y: 6 }, Math.PI / 2, 40, 0, 3000, {
+    collisionHalfTiles: 0.1,
+  });
 
-  it('spends a frame of movement at once when walking is already too late', () => {
-    const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, [IMMEDIATE]);
+  it('spends a frame of movement at once when walking cannot get out of the way', () => {
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, [CROSSING]);
 
-    expect(plan.verdict).toBe('hop');
     expect(plan.hop).toBe(true);
     expect(plan.steer).toBe(true);
+    expect(plan.impactMs).toBe(Infinity);
     expect(plan.stepTiles).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
   });
 
-  it('walks, rather than hopping, when there is time to walk', () => {
-    const shot = straightShot({ x: 7.2, y: 10 }, 0, 8, 0, 3000);
+  // **Both actions are ranked on one scale, and the walk is the cheaper of
+  // them.** A hop costs a frame of the character's allowance and a cooldown, so
+  // it is only worth spending where it buys something a walk cannot — and a
+  // displacement a walk can deliver is not that.
+  it('walks when a walk delivers the same displacement', () => {
+    // Small enough that a tick of walking clears it, and near enough that the
+    // tick has to be this one rather than the next.
+    const shot = straightShot({ x: 8, y: 10 }, 0, 8, 0, 3000, { collisionHalfTiles: 0.1 });
     const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, [shot]);
 
+    expect(plan.steer).toBe(true);
     expect(plan.hop).toBe(false);
   });
 
-  // **What stops it becoming a way of walking.** One frame at the limit is a
-  // step the character could have taken; one every frame is a sprint, and the
-  // server takes those back.
-  it('will not spend another until the cooldown has run', () => {
+  // **What stops it becoming a way of walking, and what it is really about.**
+  // The server takes back ground covered faster than a character can walk, so
+  // the thing to ration is the *distance* — a full leap is a whole frame's
+  // allowance and a twentieth of a tile is a fourteenth of one. A flat cooldown
+  // priced the micro-dodge as though it were the leap, and then had nothing
+  // left when the leap was wanted.
+  it('waits in proportion to what the last one spent', () => {
     const planner = new DodgePlanner();
-    expect(planner.plan(situation(), SETTINGS, OPEN_GROUND, [IMMEDIATE]).hop).toBe(true);
+    const first = planner.plan(situation(), SETTINGS, OPEN_GROUND, [CROSSING]);
+    expect(first.hop).toBe(true);
 
-    const soon = planner.plan(situation({ nowMs: 1_000_100 }), SETTINGS, OPEN_GROUND, [IMMEDIATE]);
+    // A hop of about three quarters of the allowance is most of the cooldown.
+    const waited = (SETTINGS.hopCooldownMs * first.stepTiles) / MAX_HOP_TILES;
+    expect(waited).toBeGreaterThan(SETTINGS.hopCooldownMs / 2);
+
+    const soon = planner.plan(situation({ nowMs: 1_000_000 + waited / 2 }), SETTINGS, OPEN_GROUND, [
+      CROSSING,
+    ]);
     expect(soon.hop).toBe(false);
 
-    const later = planner.plan(situation({ nowMs: 1_000_500 }), SETTINGS, OPEN_GROUND, [IMMEDIATE]);
+    const later = planner.plan(
+      situation({ nowMs: 1_000_000 + waited + 1 }),
+      SETTINGS,
+      OPEN_GROUND,
+      [CROSSING],
+    );
     expect(later.hop).toBe(true);
   });
 
@@ -1119,11 +1204,10 @@ describe('the step there is no time to walk', () => {
       situation(),
       { ...SETTINGS, hopEnabled: false },
       OPEN_GROUND,
-      [IMMEDIATE],
+      [CROSSING],
     );
 
     expect(plan.hop).toBe(false);
-    expect(plan.verdict).toBe('unavoidable');
   });
 
   // Priced rather than forbidden, so a fight with no way out still has a best
@@ -1158,7 +1242,8 @@ describe('what to say to the module', () => {
       crowded: false,
       trackedShots: 1,
       trackedBlasts: 0,
-      expansions: 40,
+      evaluated: 40,
+      ridingPattern: false,
       ...overrides,
     };
   }
@@ -1920,6 +2005,14 @@ describe('when the plugin decides', () => {
     moveBy: ReturnType<typeof vi.fn>;
     /** The same, spent on one frame. See `Hop.ts`. */
     hopBy: ReturnType<typeof vi.fn>;
+    /**
+     * Every step the module was asked to take, whichever record carried it.
+     *
+     * **A walk and a hop are one decision ranked on one scale**, so a test about
+     * whether the planner took the wheel has to accept either; the one test that
+     * is genuinely about the record asks for `hopBy` by name.
+     */
+    commands: () => [number, number][];
     plan: () => void;
     /** Where the module says the chord is pointing, driven by hand. */
     cursor: { target: Position | undefined };
@@ -2039,11 +2132,26 @@ describe('when the plugin decides', () => {
     );
     host.setEnabled('auto-dodge', true);
 
+    /**
+     * Every step the module was asked to take, in the order it was asked.
+     *
+     * **Which record carried it is a separate question from whether it was
+     * asked for.** A walk and a hop are both moves the planner ranks on one
+     * scale, so a test about *taking the wheel* has to accept either — and the
+     * one test that is genuinely about the record asks for `hopBy` by name.
+     */
+    const commands = (): [number, number][] =>
+      [...moveBy.mock.calls, ...hopBy.mock.calls].map((call) => {
+        const [offsetX, offsetY] = call as [number, number];
+        return [offsetX, offsetY];
+      });
+
     return {
       host,
       moveTo,
       moveBy,
       hopBy,
+      commands,
       showPicture,
       cursor,
       steer,
@@ -2094,9 +2202,9 @@ describe('when the plugin decides', () => {
     // 900 ms in, the shot is two and a half tiles out — a third of a second from
     // landing. On the server's tick that would have been noticed up to 200 ms
     // later, which is most of the warning spent waiting.
-    const { moveBy, plan } = underFire(900);
+    const { commands, plan } = underFire(900);
     plan();
-    expect(moveBy).toHaveBeenCalled();
+    expect(commands().length).toBeGreaterThan(0);
   });
 
   it('leaves a shot that is still far off alone', () => {
@@ -2146,18 +2254,19 @@ describe('when the plugin decides', () => {
   // nothing connected, and a place read off a session that does not exist is
   // not a place.
   it('holds the ground the anchor key was pressed on', () => {
-    const h = underFire(0, { shot: ACROSS_THE_ROOM as unknown as ProjectileView });
+    const h = underFire(0, { shot: ELSEWHERE as unknown as ProjectileView });
     expect(anchorKey(h.host, true)).toBe(true);
     h.plan();
 
     // Shoved three tiles east, with nothing in the air worth answering.
     h.self.x = 13;
     h.moveBy.mockClear();
+    h.hopBy.mockClear();
     h.plan();
 
-    expect(h.moveBy).toHaveBeenCalled();
-    const [offsetX] = h.moveBy.mock.lastCall as [number, number];
-    expect(offsetX, 'walked west, back onto it').toBeLessThan(0);
+    const asked = h.commands();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[asked.length - 1]?.[0], 'walked west, back onto it').toBeLessThan(0);
   });
 
   it('leaves them where they are once the key is let go of', () => {
@@ -2241,18 +2350,24 @@ describe('when the plugin decides', () => {
   });
 
   it('takes over when the player is walking into it', () => {
-    const { moveBy, plan, steer } = underFire(900);
+    const { commands, plan, steer } = underFire(900);
     steer.direction = { x: -1, y: 0 };
 
     plan();
 
-    expect(moveBy).toHaveBeenCalled();
+    expect(commands().length).toBeGreaterThan(0);
   });
 
   // Taking the wheel means cancelling their input rather than adding to it: the
   // command has to *oppose* what they are holding, or the two sum to neither.
   it('cancels the input it is overriding', () => {
-    const { moveBy, plan, steer } = underFire(900);
+    // **The emergency step is switched off for this one**, because it is the
+    // only move the cancellation does not apply to: a hop is a single frame, so
+    // the ground the player covers under their own power during it is a
+    // fraction of a tile the module already subtracts. What is being checked
+    // here is the walk's arithmetic. See `dodgeCommand`.
+    const { host, moveBy, plan, steer } = underFire(900);
+    host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
     const intent = { x: -1, y: 0 };
     steer.direction = intent;
 
@@ -2311,9 +2426,9 @@ describe('when the plugin decides', () => {
   // is carried again on every frame of the hold — which is a sprint, not the
   // single step the planner chose.
   it('sends the emergency step as a record the module spends once', () => {
-    // At 1200 ms the shot is at the player's feet: it lands before a step of
-    // walking could finish, which is the only case a hop is for.
-    const { moveBy, hopBy, plan } = underFire(1_200);
+    const { moveBy, hopBy, plan } = underFire(0, {
+      shot: CROSSES_NOW as unknown as ProjectileView,
+    });
 
     plan();
 
@@ -2325,7 +2440,9 @@ describe('when the plugin decides', () => {
   });
 
   it('never hops while the emergency step is switched off', () => {
-    const { host, hopBy, plan } = underFire(1_200);
+    const { host, hopBy, plan } = underFire(0, {
+      shot: CROSSES_NOW as unknown as ProjectileView,
+    });
     host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
 
     plan();
@@ -2466,11 +2583,11 @@ describe('when the plugin decides', () => {
     // player is the room being taken. Standing beside a torch is not a mistake.
     const past = underFire(0, { enemies: [decoration] });
     past.plan();
-    expect(past.moveBy).not.toHaveBeenCalled();
+    expect(past.commands()).toHaveLength(0);
 
     const crowded = underFire(0, { enemies: [monster] });
     crowded.plan();
-    expect(crowded.moveBy).toHaveBeenCalled();
+    expect(crowded.commands().length).toBeGreaterThan(0);
   });
 
   // **The live report: a Shatters lever.** It is `<Enemy/>` and it carries five
@@ -2484,13 +2601,13 @@ describe('when the plugin decides', () => {
 
     const beside = underFire(0, { enemies: [lever], scenery: (type) => type === 600 });
     beside.plan();
-    expect(beside.moveBy).not.toHaveBeenCalled();
+    expect(beside.commands()).toHaveLength(0);
 
     // The same entity with the same health, and the only difference is what the
     // catalog calls it.
     const crowded = underFire(0, { enemies: [lever] });
     crowded.plan();
-    expect(crowded.moveBy).toHaveBeenCalled();
+    expect(crowded.commands().length).toBeGreaterThan(0);
   });
 
   // **The live report: a room full of no-go circles around empty floor.** A
@@ -2510,7 +2627,7 @@ describe('when the plugin decides', () => {
     // Nothing drawn on the ground where there is nothing, and no reason to
     // leave a place that is empty.
     expect(bodiesDrawn(beside.showPicture)).toBe(0);
-    expect(beside.moveBy).not.toHaveBeenCalled();
+    expect(beside.commands()).toHaveLength(0);
 
     // The same entity in the same place, and the only difference is that the
     // catalog says this one shoots.
@@ -2518,7 +2635,7 @@ describe('when the plugin decides', () => {
     crowded.tick();
     crowded.tick();
     crowded.plan();
-    expect(crowded.moveBy).toHaveBeenCalled();
+    expect(crowded.commands().length).toBeGreaterThan(0);
   });
 
   // Either half alone describes an ordinary monster: a melee minion has no
@@ -2588,13 +2705,13 @@ describe('when the plugin decides', () => {
   // The complaint, end to end: a shot forces a sidestep and one of the two
   // sides is a lava pool the planner used to be happy to stop at the edge of.
   it('takes the sidestep that is not into the lava', () => {
-    const { moveBy, plan } = underFire(900, { damagingAt: (_x, y) => y >= 11 });
+    const { commands, plan } = underFire(900, { damagingAt: (_x, y) => y >= 11 });
 
     plan();
 
-    expect(moveBy).toHaveBeenCalled();
-    const [, offsetY] = moveBy.mock.calls[0] as [number, number];
-    expect(offsetY).toBeLessThan(0);
+    const asked = commands();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[0]?.[1]).toBeLessThan(0);
   });
 
   // **Out the fast way once they are actually in it.** Walking out costs a tick
@@ -2697,12 +2814,12 @@ describe('when the plugin decides', () => {
       relaxed.plan();
       // Three hundred milliseconds of window: at 750 ms the shot is four tiles
       // out and half a second from landing, which is nobody's problem yet.
-      expect(relaxed.moveBy).not.toHaveBeenCalled();
+      expect(relaxed.commands()).toHaveLength(0);
 
       const cautious = underFire(750);
       cautious.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Cautious);
       cautious.plan();
-      expect(cautious.moveBy).toHaveBeenCalled();
+      expect(cautious.commands().length).toBeGreaterThan(0);
     });
   });
 });
@@ -2725,8 +2842,8 @@ function readTuning(settings: SettingsRegistry): DodgeTuning {
     driftTilesPerSecond: number('driftTilesPerSecond'),
     safeClearanceTiles: number('safeClearanceTiles'),
     holdGroundWeight: number('holdGroundWeight'),
-    greed: number('greed'),
-    maxExpansions: number('maxExpansions'),
+    dpsRadiusTiles: number('dpsRadiusTiles'),
+    budget: number('planBudget'),
     keepAwayTiles: number('keepAwayTiles'),
   };
 }

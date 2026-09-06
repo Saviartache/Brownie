@@ -4,14 +4,14 @@
  * **A thrown bomb is not a bullet, and modelling it as one gets both wrong.** A
  * shot is a moving point that threatens everywhere along its path; a blast is a
  * disc that threatens one place at one *instant* and nothing at all before or
- * after it. Feeding one through the shot index would make the search either
+ * after it. Feeding one through the shot field would make the optimizer either
  * refuse the ground for the whole two seconds the bomb is in the air — a leash,
  * and the player has complained about enough of those — or miss it entirely,
  * because a blast that has not landed yet has no position to sample.
  *
  * So it answers its own question, and it is a far cheaper one: for each blast,
  * is this step of the walk standing inside it at the moment it goes off. That
- * shape fits the search exactly — every step is a place and a window of time —
+ * shape fits the optimizer exactly — every tick is a place and a window of time —
  * where the previous generation had to sweep a whole straight course past every
  * blast and merge three numbers back out of it.
  *
@@ -20,7 +20,7 @@
  * `hitbox.ts`), but an area effect is a radius — the client's own test is
  * `distance(player, centre) > radius`, which is how `autonexus` already reads
  * one. A square here would inflate a three-and-a-half tile blast into a
- * seven-by-seven box and push the search out of ground that was never dangerous.
+ * seven-by-seven box and push the optimizer out of ground that was never dangerous.
  *
  * **"Blast", not "hazard", deliberately.** The planner already calls damaging
  * ground a hazard, and two meanings of one word in a file that reasons about
@@ -28,10 +28,10 @@
  *
  * Where they come from is somebody else's problem: this holds a list and answers
  * questions about it. What fills it in reads the wire — see `BlastStore`. That
- * split is what lets the search be tested against blasts nobody had to throw.
+ * split is what lets the optimizer be tested against blasts nobody had to throw.
  */
 
-import type { BlastField } from './DodgeSearch.js';
+import type { BlastField } from './DodgeGround.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /** One blast the planner has been told about. */

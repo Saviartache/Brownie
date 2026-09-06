@@ -85,13 +85,13 @@ export function planningSettings(controls: DodgeControls): DodgeSettings {
     leadMs: controls.leadMs.get(),
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
-    // Nought when the whole idea is switched off, so the search stops preferring
+    // Nought when the whole idea is switched off, so the planner stops preferring
     // a distance nobody asked it to keep. Withdrawing the *refusal* to walk in
     // is the scene's, and it does that with the same switch.
     hazardClearTiles: controls.hazards.avoid.get() ? controls.hazards.clearanceTiles.get() : 0,
     holdGroundWeight: tuning.holdGroundWeight.get(),
-    greed: tuning.greed.get(),
-    maxExpansions: tuning.maxExpansions.get(),
+    dpsRadiusTiles: tuning.dpsRadiusTiles.get(),
+    budget: tuning.budget.get(),
     hopEnabled: controls.hop.enabled.get(),
     hopTiles: controls.hop.tiles.get(),
     hopCooldownMs: controls.hop.cooldownMs.get(),
@@ -167,11 +167,11 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 2000,
     step: 50,
   });
-  // **The lattice, and the biggest single lever on what a plan costs.** One tick
-  // is one step of walking, so it is also the smallest movement the planner can
-  // describe — about seven tenths of a tile at an ordinary speed, which is a
-  // bullet's width plus the player's. Halving it doubles both the depth needed
-  // to see the same distance and the work at every level of it.
+  // **The slice, and the biggest single lever on what a plan costs.** Every
+  // candidate future is priced at every tick, so halving this doubles both the
+  // number of ticks and the number of danger-field queries. It is *not* the
+  // smallest movement the planner can describe — the move it commands is sampled
+  // at its own resolution, down to a twentieth of a tile.
   const tickMs = settings.range('tickMs', {
     label: 'Planning step (ms)',
     group: 'Reaction',
@@ -195,9 +195,10 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 1200,
     step: 20,
   });
-  // Each direction is a branch at every level of the search, so this is the
-  // other big lever on cost. Twelve is a thirty-degree ring, which is finer than
-  // the width of a gap at the distance a gap is away.
+  // Every heading is tried at two distances in the coarse pass and at all of
+  // them around the winner, so this is the other big lever on cost. Twelve is a
+  // thirty-degree ring, which is finer than the width of a gap at the distance a
+  // gap is away — and the pattern recogniser aims between the spokes anyway.
   const headings = settings.range('headings', {
     label: 'Directions considered',
     group: 'Reaction',
@@ -260,8 +261,8 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // of comfortable is charged on the ground it left rather than the ground it
   // reached, so the way home is only ever worth anything by way of steps that
   // keep their room — round the fire, in the other direction, or not at all.
-  // See `StepCost`. What this actually decides is how much *walking* is worth
-  // doing to be back where you were.
+  // See `TrajectoryScore`. What this actually decides is how much *movement* is
+  // worth spending to be back where you were.
   const holdGroundWeight = settings.range('holdGroundWeight', {
     label: 'Hold your ground',
     group: 'Control',
@@ -271,30 +272,33 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 2,
     step: 0.05,
   });
-  // **What the search is allowed to settle for.** One searches exactly and
-  // slowest; above it the route is within this factor of the best one and is
-  // found in a fraction of the expansions. A plan is remade fifty times a second
-  // and thrown away before it is walked, so a little slack is nearly free.
-  const greed = settings.range('greed', {
-    label: 'Search slack (×)',
-    group: 'Reaction',
+  // **How near the anchor the character can still fight from.** The anchor is a
+  // damage-dealing position, not merely a place to stand, so leaving this ring
+  // at all is charged a flat price the distance term can never pay back — which
+  // is what makes a twentieth of a tile strictly preferred to half a tile when
+  // both are safe. Widen it to be left alone about small movements; narrow it to
+  // be pinned to the spot.
+  const dpsRadiusTiles = settings.range('dpsRadiusTiles', {
+    label: 'Stay within (tiles) of your ground',
+    group: 'Control',
     advanced: true,
-    default: 1.6,
-    min: 1,
-    max: 3,
-    step: 0.1,
+    default: DODGE_PRESETS[DodgePresetId.Balanced].dpsRadiusTiles,
+    min: 0,
+    max: 1.5,
+    step: 0.01,
   });
   // The backstop rather than a target: an ordinary plan settles in a fraction of
   // this, and what it bounds is the worst case — a screen full of fire with no
   // clean way through, which is exactly when a plan must still arrive on time.
-  const maxExpansions = settings.range('maxExpansions', {
-    label: 'Thinking budget (nodes)',
+  // Each unit is one future rolled the whole way to the horizon.
+  const budget = settings.range('planBudget', {
+    label: 'Thinking budget (futures)',
     group: 'Reaction',
     advanced: true,
-    default: DODGE_PRESETS[DodgePresetId.Balanced].maxExpansions,
-    min: 100,
-    max: 2000,
-    step: 50,
+    default: DODGE_PRESETS[DodgePresetId.Balanced].budget,
+    min: 40,
+    max: 600,
+    step: 20,
   });
   // **Room to dodge in, and the reason it is a distance rather than a hit
   // test.** A monster pressed against the player has already taken the space
@@ -498,8 +502,8 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     driftTilesPerSecond,
     safeClearanceTiles,
     holdGroundWeight,
-    greed,
-    maxExpansions,
+    dpsRadiusTiles,
+    budget,
     keepAwayTiles,
   };
 
@@ -541,8 +545,8 @@ function bindPreset(
     driftTilesPerSecond: tuning.driftTilesPerSecond.get(),
     safeClearanceTiles: tuning.safeClearanceTiles.get(),
     holdGroundWeight: tuning.holdGroundWeight.get(),
-    greed: tuning.greed.get(),
-    maxExpansions: tuning.maxExpansions.get(),
+    dpsRadiusTiles: tuning.dpsRadiusTiles.get(),
+    budget: tuning.budget.get(),
     keepAwayTiles: tuning.keepAwayTiles.get(),
   });
 

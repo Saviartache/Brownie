@@ -45,6 +45,11 @@ class TrackedShot implements ProjectileView {
     return motionModelled(this.definition);
   }
 
+  /** How bad the worst condition it applies is. See `gamedata/conditions.ts`. */
+  get debuffSeverity(): number {
+    return this.definition.debuffSeverity;
+  }
+
   get maxSpeedTilesPerSecond(): number {
     return maxSpeedTilesPerSecond(this.definition);
   }

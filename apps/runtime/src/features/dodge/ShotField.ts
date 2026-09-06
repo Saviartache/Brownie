@@ -1,39 +1,47 @@
 /**
  * Where every shot that could reach us will be, sampled once per plan.
  *
- * **The extrapolation, and nothing else.** A shot announces a start, a heading
- * and a speed, and the game turns those into a curve; what a planner needs is
- * that curve as numbers, at the exact instants it is going to ask about. Doing
- * it once here — rather than inside the search, where the same shot would be
- * asked about by every branch that reaches that slice — is the difference
- * between a few hundred evaluations of `positionAt` per plan and a few hundred
- * thousand.
+ * **The prediction stage, and nothing else.** A shot announces a start, a
+ * heading and a speed, and the game turns those into a curve; what a planner
+ * needs is that curve as numbers, at the exact instants it is going to ask
+ * about. Doing it once here — rather than inside the optimizer, where the same
+ * shot would be asked about by every candidate that reaches that slice — is the
+ * difference between a few thousand evaluations of `positionAt` per plan and a
+ * few million.
  *
- * **Sampled on the search's own clock, deliberately.** The samples land exactly
- * on the moments the lattice steps between, so a step from slice `k` to slice
+ * **Sampled on the planner's own clock, deliberately.** The samples land exactly
+ * on the moments a trajectory steps between, so a step from slice `k` to slice
  * `k+1` is a straight segment against a straight segment, and the closest the
- * two ever come has a closed form (see {@link minChebyshevOnSegment}). Sampling
- * on some other cadence would force an interpolation on every one of those
- * tests, for an answer that is no more accurate.
+ * two ever come has a closed form (see `minChebyshevOnSegment`). Sampling on
+ * some other cadence would force an interpolation on every one of those tests,
+ * for an answer that is no more accurate.
  *
  * **Each sample carries its own hitbox, and it grows.** `positionAt` does not
  * model turn rate or the client's own clock, so a prediction 700 ms out is worth
  * less than one 70 ms out — and the honest shape of that error is a shot that
- * gets wider the further ahead it is asked about. The alternative is a single
- * fat hitbox everywhere, which is cautious where caution is free and reckless
- * where it is not. A shot the model does not claim to describe at all — the
- * spirals that curl — is distrusted several times as fast, which is what makes
- * one dodgeable rather than confidently mistimed.
+ * gets wider the further ahead it is asked about. A shot the model does not
+ * claim to describe at all — the spirals that curl — is distrusted several times
+ * as fast, which is what makes one dodgeable rather than confidently mistimed.
+ *
+ * **What each shot *costs* travels with it**, which is what the scoring ladder
+ * is built on: damage is a number the game states, and a shot carrying a
+ * condition is categorically worse than one that only hurts. Ranking every hit
+ * as one hit is a planner that will take a paralyse to avoid a pellet. See
+ * `TrajectoryScore`.
  *
  * **The player's own half is folded in here**, so every downstream test is a
  * point against a square rather than a square against a square. That is also how
  * the game does it.
+ *
+ * **Nothing here allocates once it is warm.** The rows are typed arrays grown to
+ * the busiest screen the session has seen; a thousand shots in flight is about a
+ * megabyte that is written over fifty times a second and never collected.
  */
 
 import type { Position } from '@brownie/plugin-api';
 import { DEFAULT_PROJECTILE_HALF_TILES, effectiveHalf } from './hitbox.js';
 
-/** What a track needs of a shot: where it will be, and how big it is. */
+/** What the field needs of a shot: where it will be, how big, and what it costs. */
 export interface DodgeShot {
   /** `undefined` once it has expired — gone, not "still at its last place". */
   positionAt(gameTimeMs: number): Position | undefined;
@@ -58,16 +66,37 @@ export interface DodgeShot {
   readonly motionModelled?: boolean;
   /** Greatest possible speed, when known. Enables a cheap early cull. */
   readonly maxSpeedTilesPerSecond?: number;
+  /**
+   * What it takes off, in the game's own damage units.
+   *
+   * **A number, not a flag, because the ladder distinguishes hits.** Among two
+   * routes that are both hit, the one hit for eight hundred is worse than the
+   * one hit for thirty — and a planner that cannot tell them apart will trade a
+   * boss's shotgun for a rat's pellet. Omitted is scored as an ordinary shot
+   * rather than as a harmless one.
+   */
+  readonly damage?: number;
+  /**
+   * How bad the condition this one applies is, from nought to one.
+   *
+   * **Above damage in the ladder, deliberately.** A paralyse is not a large hit,
+   * it is the end of dodging: everything that lands during it lands unopposed,
+   * and the fights that kill people are the ones that begin that way. See
+   * `debuffSeverity` for what earns which figure.
+   */
+  readonly debuffSeverity?: number;
+  /** Who fired it. Only used to attribute a shot to a recognised pattern. */
+  readonly ownerId?: number;
 }
 
-export interface ShotTrackOptions {
+export interface ShotFieldOptions {
   /** The clock `positionAt` is relative to. */
   readonly gameTimeMs: number;
   /** How long before the player can act on this plan. Slice nought sits here. */
   readonly leadMs: number;
-  /** How long one lattice step lasts. */
+  /** How long one slice of the horizon lasts. */
   readonly tickMs: number;
-  /** How many steps the lattice takes. There is one more sample than steps. */
+  /** How many steps the horizon takes. There is one more sample than steps. */
   readonly ticks: number;
   /** Where the player is, for the culls. */
   readonly selfX: number;
@@ -83,7 +112,10 @@ export interface ShotTrackOptions {
 }
 
 /** The most samples kept per shot, which bounds the tables at the busiest. */
-export const MAX_TRACK_SLICES = 33;
+export const MAX_FIELD_SLICES = 33;
+
+/** What a shot whose data states no damage is ranked as. */
+export const UNKNOWN_SHOT_DAMAGE = 60;
 
 /**
  * How much less a shot the model does not fully describe is believed.
@@ -106,7 +138,7 @@ const CULL_MARGIN_TILES = 1;
 /**
  * How many numbers describe where a shot ends up: `x, y, half, fraction`.
  *
- * **The last tick of a flight, which the lattice has no sample for.** A step is
+ * **The last tick of a flight, which the horizon has no sample for.** A step is
  * swept as a segment against a segment, so a shot without a sample at both ends
  * of one has no segment — and dropping that step is dropping the end of every
  * shot's path, which is the tile a monster's range finishes on. The fraction is
@@ -115,7 +147,7 @@ const CULL_MARGIN_TILES = 1;
  */
 const TAIL_STRIDE = 4;
 
-export class ShotTracks {
+export class ShotField {
   #x = new Float64Array(0);
   #y = new Float64Array(0);
   #half = new Float64Array(0);
@@ -123,6 +155,26 @@ export class ShotTracks {
   #liveTo = new Int32Array(0);
   /** Where each shot expires, when that falls inside a step. {@link TAIL_STRIDE}. */
   #tail = new Float64Array(0);
+  /** What each one costs to be hit by. See {@link DodgeShot.damage}. */
+  #damage = new Float32Array(0);
+  #debuff = new Float32Array(0);
+  /** Who fired each, so a recognised pattern can claim its own shots. */
+  #owner = new Int32Array(0);
+  /**
+   * Where each shot is at the moment of planning, before the lead.
+   *
+   * **The one instant the horizon has no sample for, and the one a hop can land
+   * in.** Slice nought sits at `leadMs`, because that is the earliest a decision
+   * can reach the character — but `leadMs` is an upper bound on the round trip
+   * rather than a measurement of it, and a command that arrives sooner than
+   * assumed puts an instant displacement somewhere the shots have not left yet.
+   * A walk is gradual and errs safe under the same mistake; a hop is a whole
+   * frame's travel and does not. See `TrajectoryPlanner`.
+   */
+  #leadX = new Float64Array(0);
+  #leadY = new Float64Array(0);
+  #leadHalf = new Float64Array(0);
+  #hasLead = false;
   #capacity = 0;
 
   #slices = 0;
@@ -141,9 +193,33 @@ export class ShotTracks {
     return this.#considered;
   }
 
-  /** How many samples each shot has, which is one more than the lattice steps. */
+  /** How many samples each shot has, which is one more than the horizon's steps. */
   get slices(): number {
     return this.#slices;
+  }
+
+  /**
+   * Whether the moment of planning is described as well as the horizon.
+   *
+   * False when the plan takes effect immediately, in which case the lead window
+   * is empty and there is nothing there to be caught by.
+   */
+  get hasLead(): boolean {
+    return this.#hasLead;
+  }
+
+  /** Where `shot` is at the moment of planning. See {@link #leadX}. */
+  leadXOf(shot: number): number {
+    return this.#leadX[shot] ?? 0;
+  }
+
+  leadYOf(shot: number): number {
+    return this.#leadY[shot] ?? 0;
+  }
+
+  /** Its half-extent there, the player's own already folded in. */
+  leadHalfOf(shot: number): number {
+    return this.#leadHalf[shot] ?? 0;
   }
 
   /** Plan-relative milliseconds of sample `slice`. */
@@ -167,6 +243,20 @@ export class ShotTracks {
   /** The last slice `shot` still exists at. Slices past it are not swept. */
   liveToOf(shot: number): number {
     return this.#liveTo[shot] ?? -1;
+  }
+
+  /** What being hit by it costs, in the game's damage units. */
+  damageOf(shot: number): number {
+    return this.#damage[shot] ?? UNKNOWN_SHOT_DAMAGE;
+  }
+
+  /** And how bad the condition it carries is, from nought to one. */
+  debuffOf(shot: number): number {
+    return this.#debuff[shot] ?? 0;
+  }
+
+  ownerOf(shot: number): number {
+    return this.#owner[shot] ?? 0;
   }
 
   /**
@@ -194,7 +284,7 @@ export class ShotTracks {
     return this.#tail[shot * TAIL_STRIDE + 2] ?? 0;
   }
 
-  /** Drops everything. A stale track is a shot that expired two maps ago. */
+  /** Drops everything. A stale sample is a shot that expired two maps ago. */
   clear(): void {
     this.#count = 0;
     this.#considered = 0;
@@ -209,15 +299,17 @@ export class ShotTracks {
    * that plus everywhere the player could get cannot matter — and that is one
    * subtraction rather than a dozen calls into the motion model. What survives
    * is sampled, and then dropped again if the whole sampled path stays clear of
-   * the reachable set.
+   * the reachable set. On a screen with a thousand shots on it that first cull
+   * is what decides whether a plan costs a millisecond or thirty.
    */
-  build(shots: Iterable<DodgeShot>, options: ShotTrackOptions): void {
-    const slices = Math.max(2, Math.min(MAX_TRACK_SLICES, options.ticks + 1));
+  build(shots: Iterable<DodgeShot>, options: ShotFieldOptions): void {
+    const slices = Math.max(2, Math.min(MAX_FIELD_SLICES, options.ticks + 1));
     this.#slices = slices;
     this.#tickMs = options.tickMs;
     this.#leadMs = options.leadMs;
     this.#count = 0;
     this.#considered = 0;
+    this.#hasLead = options.leadMs > 0;
 
     const horizonMs = options.leadMs + options.ticks * options.tickMs;
     const keepWithin = options.reachTiles + CULL_MARGIN_TILES;
@@ -260,6 +352,11 @@ export class ShotTracks {
       }
 
       if (this.#count >= this.#capacity) this.#reserve();
+      this.#leadX[this.#count] = now.x;
+      this.#leadY[this.#count] = now.y;
+      // No drift at all, because nothing has been extrapolated yet: this is
+      // where the shot is, not where it is predicted to be.
+      this.#leadHalf[this.#count] = effectiveHalf(own, options.hitScale, options.padTiles);
       if (this.#sample(shot, this.#count, options, slices, keepWithin, own, drift)) {
         this.#count += 1;
       }
@@ -275,7 +372,7 @@ export class ShotTracks {
   #sample(
     shot: DodgeShot,
     index: number,
-    options: ShotTrackOptions,
+    options: ShotFieldOptions,
     slices: number,
     keepWithin: number,
     own: number,
@@ -314,6 +411,10 @@ export class ShotTracks {
       if ((dx > dy ? dx : dy) - this.endHalfOf(index) <= keepWithin) near = true;
     }
 
+    this.#damage[index] = shot.damage === undefined ? UNKNOWN_SHOT_DAMAGE : shot.damage;
+    this.#debuff[index] = shot.debuffSeverity ?? 0;
+    this.#owner[index] = shot.ownerId ?? 0;
+
     // A shot with nothing but a single sample has no segment to sweep — unless
     // its end is known, which gives it the one it dies on — and one that never
     // comes near cannot be walked into by any course this plan could choose.
@@ -324,15 +425,15 @@ export class ShotTracks {
    * Records where a shot expires, when it does so part of the way through a
    * step, and says whether there is anything there to sweep.
    *
-   * The instant it stops existing is a position the lattice has no sample for:
-   * its clock is the search's, and a shot's lifetime is its own. Asking
+   * The instant it stops existing is a position the horizon has no sample for:
+   * its clock is the planner's, and a shot's lifetime is its own. Asking
    * `positionAt` once more at exactly that moment is what turns the last part of
    * a flight from a step nothing looks at into a segment like any other.
    */
   #writeTail(
     shot: DodgeShot,
     index: number,
-    options: ShotTrackOptions,
+    options: ShotFieldOptions,
     liveTo: number,
     own: number,
     drift: number,
@@ -374,9 +475,9 @@ export class ShotTracks {
    * given room for.
    */
   #reserve(): void {
-    const capacity = Math.max(16, this.#capacity * 2);
+    const capacity = Math.max(64, this.#capacity * 2);
     this.#capacity = capacity;
-    const length = capacity * MAX_TRACK_SLICES;
+    const length = capacity * MAX_FIELD_SLICES;
     const x = new Float64Array(length);
     const y = new Float64Array(length);
     const half = new Float64Array(length);
@@ -389,6 +490,24 @@ export class ShotTracks {
     const liveTo = new Int32Array(capacity);
     liveTo.set(this.#liveTo);
     this.#liveTo = liveTo;
+    const owner = new Int32Array(capacity);
+    owner.set(this.#owner);
+    this.#owner = owner;
+    const damage = new Float32Array(capacity);
+    damage.set(this.#damage);
+    this.#damage = damage;
+    const debuff = new Float32Array(capacity);
+    debuff.set(this.#debuff);
+    this.#debuff = debuff;
+    const leadX = new Float64Array(capacity);
+    const leadY = new Float64Array(capacity);
+    const leadHalf = new Float64Array(capacity);
+    leadX.set(this.#leadX);
+    leadY.set(this.#leadY);
+    leadHalf.set(this.#leadHalf);
+    this.#leadX = leadX;
+    this.#leadY = leadY;
+    this.#leadHalf = leadHalf;
     const tail = new Float64Array(capacity * TAIL_STRIDE);
     tail.set(this.#tail);
     this.#tail = tail;
