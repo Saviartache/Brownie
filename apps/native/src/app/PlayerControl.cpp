@@ -33,6 +33,22 @@ AimTarget AimTargetFrom(const overlay::AimCommand& aim, std::uint64_t now_ms) no
     target.object_id = aim.object_id;
     target.target_x = static_cast<float>(aim.target_x_hundredths) / 100.0F;
     target.target_y = static_cast<float>(aim.target_y_hundredths) / 100.0F;
+    target.has_motion = aim.has_motion;
+    if (aim.has_motion) {
+        // **Tiles a second on the wire, tiles a millisecond here.** Every speed
+        // on the link is stated per second, because that is the unit a person
+        // reading the overlay thinks in; every duration in the solver is a
+        // millisecond, because that is what a flight time and a lifetime are
+        // already stated in. This is the one place the two meet.
+        target.shot.velocity_x = static_cast<float>(aim.velocity_x_hundredths) / 100000.0F;
+        target.shot.velocity_y = static_cast<float>(aim.velocity_y_hundredths) / 100000.0F;
+        target.shot.angular_velocity_per_ms =
+            static_cast<float>(aim.angular_velocity_milli) / 1000000.0F;
+        target.shot.bullet_speed_tiles_per_ms =
+            static_cast<float>(aim.bullet_speed_hundredths) / 100000.0F;
+        target.shot.max_flight_ms = static_cast<float>(aim.max_flight_ms);
+        target.shot.lead = static_cast<float>(aim.lead_permille) / 1000.0F;
+    }
     return target;
 }
 
@@ -247,31 +263,62 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     }
 
     if (aiming) {
-        // **Where the client has the enemy, which is what a shot is tested
-        // against.** The point arrived already led; how far ahead of the monster
-        // it sits is the runtime's arithmetic and is kept. What is corrected is
-        // the monster: the runtime rebuilt its position from packets and
-        // smoothed it between server ticks, and the game has the real one. The
-        // difference between the two is applied to the point, so the lead
-        // survives and the thing it is measured from stops being a guess.
-        //
-        // Nothing happens without a name to look up, without the tables having
-        // resolved, or when the enemy is not in them — and each of those leaves
-        // the point exactly as the runtime sent it, which is where this feature
-        // stood before any of it existed.
-        // **Held in locals, never written back.** A frame that has no new
-        // target reuses the one it already has, so a correction folded into it
-        // would be applied again next frame, and again the frame after — an aim
-        // walking away from the monster it is chasing.
+        // **Held in locals, never written back.** A frame with no new target
+        // reuses the one it already has, so anything folded into the published
+        // copy would be applied again next frame, and again the frame after —
+        // an aim walking away from the monster it is chasing.
         float aim_x = frame_aim_.x;
         float aim_y = frame_aim_.y;
-        if (frame_aim_.object_id != 0) {
-            float seen_x = 0.0F;
-            float seen_y = 0.0F;
-            if (game::FindMapObject(*game_, map_objects_, frame_aim_.object_id, seen_x, seen_y)) {
-                aim_x += seen_x - frame_aim_.target_x;
-                aim_y += seen_y - frame_aim_.target_y;
-            }
+
+        // **Where the client has the enemy, which is what a shot is tested
+        // against.** Bullet collision in this game is the client's own: it
+        // moves its bullets, tests them against its own copy of the monsters
+        // and reports the hit it has already made. The runtime only ever had a
+        // reconstruction of that copy, rebuilt from packets and smoothed
+        // between server ticks.
+        //
+        // **Read into locals of its own and believed only whole.** A lookup
+        // that fails partway can have written one coordinate already, and a
+        // position read out of an object the game has since given back can be
+        // anything at all — either would be half the client's monster and half
+        // the runtime's, which is a place neither of them has anything at.
+        float client_x = 0.0F;
+        float client_y = 0.0F;
+        const bool seen =
+            frame_aim_.object_id != 0 &&
+            game::FindMapObject(*game_, map_objects_, frame_aim_.object_id, client_x, client_y) &&
+            std::isfinite(client_x) && std::isfinite(client_y);
+
+        // So: the client's reading where there is one, and the runtime's where
+        // there is not — an aim that named no enemy, tables that have not
+        // resolved, an enemy not in them. Each of those leaves this feature
+        // exactly where it stood before any of it existed.
+        const float seen_x = seen ? client_x : frame_aim_.target_x;
+        const float seen_y = seen ? client_y : frame_aim_.target_y;
+
+        // **The lead is worked out here, from the two positions only this side
+        // has.** The runtime chose the enemy and said how everything moves;
+        // where the player and the monster actually are is the game's own
+        // answer, read this frame. Both go into the flight time and the flight
+        // time is the whole of the lead — so a player charging a monster is led
+        // onto it rather than a stride past it, which is what the runtime's own
+        // arithmetic could not do from a position it hears five times a second.
+        bool solved = false;
+        if (frame_aim_.has_motion) {
+            game::AimShot shot = frame_aim_.shot;
+            shot.shooter_x = player.x;
+            shot.shooter_y = player.y;
+            shot.target_x = seen_x;
+            shot.target_y = seen_y;
+            solved = game::SolveAimPoint(shot, aim_x, aim_y);
+        }
+        if (!solved && seen) {
+            // No solution to work with, so the runtime's point stands and only
+            // the monster under it is corrected. The point is already a lead
+            // and how far ahead of the monster it sits is what has to survive,
+            // so the difference is applied to it rather than replacing it.
+            aim_x = frame_aim_.x + (seen_x - frame_aim_.target_x);
+            aim_y = frame_aim_.y + (seen_y - frame_aim_.target_y);
         }
         // What the overlay draws, so the picture is the shot rather than the
         // record behind it. The same argument {@link WalkTarget} makes.
@@ -284,10 +331,12 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         // player's position has just been read anyway.
         //
         // Standing exactly on the target names no direction, and `atan2(0, 0)`
-        // is a direction the game would take literally.
+        // is a direction the game would take literally — as it would an angle
+        // that is not a number, which is what a position read out of an object
+        // the game gave back mid-frame would make of this.
         const float dx = aim_x - player.x;
         const float dy = aim_y - player.y;
-        if (dx == 0.0F && dy == 0.0F) {
+        if (!std::isfinite(dx) || !std::isfinite(dy) || (dx == 0.0F && dy == 0.0F)) {
             aim_.Clear();
         } else {
             aim_.Aim(player.object, std::atan2(dy, dx), frame_aim_.expires_at_ms);

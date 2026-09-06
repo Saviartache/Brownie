@@ -476,7 +476,7 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
-| `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100 | point the shots the player fires at here, for this long unless replaced. The last three name the enemy the point leads and where the *runtime* had that enemy when it worked the point out — so the module can look the enemy up in the game's own tables and shift the point by however far the client disagrees. All three or none: a shift needs somewhere to be measured from, and two of them describe none. Absent is an aim used exactly as sent |
+| `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100, vx·100, vy·100, turn·1000, shotSpeed·100, maxFlightMs, lead‰ | point the shots the player fires at here, for this long unless replaced. `objectId` and the two positions after it name the enemy the point leads and where the *runtime* had that enemy — so the module can look it up in the game's own tables. The six after those say how the enemy moves (tiles a second, and radians a second for the turn), how fast the shot travels, how long it has to hit something with, and how much of the lead to apply — everything the module needs to solve the meeting again from the game's own positions. Each group is all or none: a shift needs somewhere to be measured from, and five sixths of a solution is not one. Absent is an aim used exactly as sent |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
@@ -511,10 +511,18 @@ through — and keeps the style argument of the last call the game made. So the
 runtime says what to write and in what colour, and the game says the rest.
 
 `move` and `aim` are the only instructions in the protocol, and the division
-they embody is the architecture's: the runtime decides *where*, because it holds
-the world model and the planner, and the module applies that inside the game —
-on the game's own thread, because touching managed code from any other is not a
-mistake a module makes twice.
+they embody is the architecture's: the runtime decides *what to do about the
+world*, because it holds the world model and the planner, and the module applies
+that inside the game — on the game's own thread, because touching managed code
+from any other is not a mistake a module makes twice.
+
+**Where a position enters that decision, it is the module's to supply.** The
+runtime hears where things are five times a second and the game moves them every
+frame, so both instructions leave the last step to the frame: `move` resolves an
+offset from wherever the character is standing, and `aim` solves its meeting
+from where the player and the monster actually are. Neither is the module
+second-guessing the plan; both are the plan being finished with the one figure
+only the game holds.
 
 They apply it differently, and the difference is worth stating. `move` **calls**
 the game's own `MoveTo`; `aim` **intercepts** the game's own shot and changes
@@ -771,6 +779,25 @@ tens of times a second and the player moves every frame, so the module turns the
 point into an angle from wherever the player is at that moment — and it does
 that in the frame rather than in the detour, so the game's own shot path costs
 an atomic load and a store.
+
+**And it names the shot as well as the point, because the point is not enough.**
+How far ahead of a monster to aim is a flight time times a speed, and the flight
+time is a distance measured from where the shot leaves. The runtime learns that
+distance from `MOVE` and `NEWTICK`, five times a second, for a character who
+moves every frame — and the error runs one way: a player charging a monster is
+always further from it in the world model than in the game, so the flight is
+over-estimated and the aim lands past the monster. Shifting the finished point
+cannot undo that, because what is wrong is not where the point is but how far
+ahead of the monster it sits.
+
+So the record carries the *rates* — how the enemy moves, how fast the shot
+travels, how long it has, how much lead to apply — and the module solves the
+meeting on the frame, from its own reading of where the player and the monster
+actually are. See `apps/native/src/game/AimSolver.h`. The division is the same
+one the rest of this file draws: **the runtime says how things move and which
+enemy is worth shooting at, and the client says where everything is.** A rate
+does not care which frame reads it; a position does, and only the game has the
+one a bullet is tested against.
 
 ## Lifecycle
 

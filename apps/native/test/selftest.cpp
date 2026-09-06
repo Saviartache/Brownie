@@ -29,6 +29,7 @@
 #include "core/Result.h"
 #include "core/Snapshot.h"
 #include "game/AimHook.h"
+#include "game/AimSolver.h"
 #include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
 #include "game/GlowFields.h"
@@ -513,6 +514,138 @@ void AimRecordsAreReadStrictly() {
     Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450", partial),
           "a half-written tail still leaves a usable aim");
     Check(partial.object_id == 0, "and is read as naming no enemy at all");
+    Check(!led.has_motion, "and an aim that stops at the enemy carries no motion");
+
+    brownie::overlay::AimCommand solved;
+    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25|300|-150|80|800|500|1000",
+                                           solved),
+          "an aim carrying what the frame needs to solve the lead parses");
+    Check(solved.has_motion, "and says so");
+    Check(solved.velocity_x_hundredths == 300 && solved.velocity_y_hundredths == -150,
+          "with how the enemy moves, in hundredths of a tile a second");
+    Check(solved.angular_velocity_milli == 80, "how fast that heading turns");
+    Check(solved.bullet_speed_hundredths == 800 && solved.max_flight_ms == 500,
+          "how fast the shot goes and how long it has");
+    Check(solved.lead_permille == 1000, "and how much of the lead to apply");
+
+    // Five of the six describe no lead at all, so a half-written motion is read
+    // as none — and the shift the enemy fields describe still stands.
+    brownie::overlay::AimCommand half_written;
+    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25|300|-150|80|800",
+                                           half_written),
+          "a half-written motion still leaves a usable aim");
+    Check(!half_written.has_motion, "which is read as carrying none");
+    Check(half_written.object_id == 8821, "while the enemy it names survives");
+
+    // A shot with no speed or no life is not a slow shot; it is a division by
+    // nought waiting to happen.
+    brownie::overlay::AimCommand speedless;
+    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25|300|-150|80|0|500|1000",
+                                           speedless),
+          "a shot with no speed still leaves a usable aim");
+    Check(!speedless.has_motion, "but nothing to solve with");
+}
+
+/// The lead the frame works out, which is the whole of what auto-aim does.
+///
+/// **Every case here turns on where the shooter is standing.** The runtime
+/// cannot answer them: it learns the player's position once a server tick, and
+/// the distance from the player is what the flight time — and therefore the
+/// lead — is made of.
+void AimPointsAreSolvedFromWhereTheShooterStands() {
+    // Three tiles east, walking north at three tiles a second, with a shot that
+    // covers eight. The flight is 3 / 0.008 = 375 ms, in which the target walks
+    // a little over a tile — so the answer is ahead of it, not on it.
+    brownie::game::AimShot shot;
+    shot.shooter_x = 0.0F;
+    shot.shooter_y = 0.0F;
+    shot.target_x = 3.0F;
+    shot.target_y = 0.0F;
+    shot.velocity_y = 0.003F;
+    shot.bullet_speed_tiles_per_ms = 0.008F;
+    shot.max_flight_ms = 1000.0F;
+
+    float x = 0.0F;
+    float y = 0.0F;
+    Check(brownie::game::SolveAimPoint(shot, x, y), "a walking target has a meeting point");
+    Check(y > 1.0F && y < 1.5F, "and the aim leads it by about the flight it walks through");
+    // The meeting is where the shot actually gets to, which is `speed x flight`
+    // from the shooter and `velocity x flight` along the target's path.
+    const float flight = std::hypot(x, y) / shot.bullet_speed_tiles_per_ms;
+    Check(std::abs(std::hypot(x - shot.target_x, y - shot.target_y) - 0.003F * flight) < 0.01F,
+          "and sits exactly as far along that path as the shot took to arrive");
+
+    // **The complaint this was written for.** The same fight at the same
+    // instant, with one difference: the player has run a tile towards the
+    // monster since the packet that said where they were. The shot has less
+    // ground to cross, so the target has less of the flight to walk through, so
+    // the lead is shorter. Solving this on the runtime's side solves it for the
+    // first shooter while the shots leave from the second — which is an aim in
+    // the empty floor ahead of every monster being charged.
+    brownie::game::AimShot closer = shot;
+    closer.shooter_x = 1.0F;
+    float closer_x = 0.0F;
+    float closer_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(closer, closer_x, closer_y),
+          "a shooter who has moved still has a meeting point");
+    Check(closer_y < y, "and it is a shorter lead, because the shot has less ground to cross");
+
+    // Half the lead is half the offset, not half the speed: scaling the input
+    // asks a different question, and above one it asks a target moving near the
+    // shot's own speed one it has no answer to.
+    brownie::game::AimShot halved = shot;
+    halved.lead = 0.5F;
+    float halved_x = 0.0F;
+    float halved_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(halved, halved_x, halved_y), "half a lead is still a lead");
+    Check(std::abs(halved_y - y / 2.0F) < 0.001F,
+          "and it is half of the offset the solution named");
+
+    // A target standing still is the common case, and the one the quadratic
+    // formula divides by nought on — handled rather than guarded against.
+    brownie::game::AimShot standing = shot;
+    standing.velocity_y = 0.0F;
+    float standing_x = 0.0F;
+    float standing_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(standing, standing_x, standing_y),
+          "a target standing still has a meeting point");
+    Check(std::abs(standing_x - 3.0F) < 0.001F && std::abs(standing_y) < 0.001F,
+          "which is where it stands");
+
+    // Beyond what the shot reaches is not a long shot, it is no shot: the
+    // solution would be a point the projectile expires short of.
+    brownie::game::AimShot beyond = standing;
+    beyond.max_flight_ms = 100.0F;
+    float refused_x = 0.0F;
+    float refused_y = 0.0F;
+    Check(!brownie::game::SolveAimPoint(beyond, refused_x, refused_y),
+          "a meeting the shot stops short of is refused");
+    Check(refused_x == 0.0F && refused_y == 0.0F,
+          "and nothing is written over the caller's fallback");
+
+    // Something running from a shot faster than the shot flies is never caught.
+    brownie::game::AimShot fleeing = shot;
+    fleeing.velocity_y = 0.0F;
+    fleeing.velocity_x = 0.02F;
+    Check(!brownie::game::SolveAimPoint(fleeing, refused_x, refused_y),
+          "and so is a target running away faster than the shot flies");
+
+    // A turning target is followed round its arc rather than along the tangent
+    // it has already left, so the answer is off that tangent.
+    brownie::game::AimShot turning = shot;
+    turning.angular_velocity_per_ms = 0.004F;
+    float turning_x = 0.0F;
+    float turning_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(turning, turning_x, turning_y),
+          "a turning target has a meeting point");
+    Check(std::abs(turning_x - x) > 0.05F, "and it is not the one a straight line would name");
+
+    // A number that is not one is a shot pointed at `NaN`, which the game would
+    // take literally.
+    brownie::game::AimShot broken = shot;
+    broken.shooter_x = std::numeric_limits<float>::quiet_NaN();
+    Check(!brownie::game::SolveAimPoint(broken, refused_x, refused_y),
+          "and a position that is not a number names no meeting at all");
 }
 
 /// A text record carries its message whole, separators and all.
@@ -2735,6 +2868,7 @@ int main() {
     WeaponRecordsCarryTheName();
     MoveRecordsAreReadStrictly();
     AimRecordsAreReadStrictly();
+    AimPointsAreSolvedFromWhereTheShooterStands();
     AimRedirectsOnlyWhatItWasGiven();
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();

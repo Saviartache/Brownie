@@ -203,6 +203,23 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
                             ParseInt(TakeField(rest), target_x) &&
                             ParseInt(TakeField(rest), target_y);
 
+    // And appended after those, read as a second set for the same reason: a
+    // lead worked out here needs how the enemy moves, how fast the shot goes,
+    // how long it has and how much of the answer to apply. Five of the six
+    // describe no lead at all, so a record carrying part of the group is read
+    // as carrying none of it and the shift above stands on its own.
+    int velocity_x = 0;
+    int velocity_y = 0;
+    int angular = 0;
+    int bullet_speed = 0;
+    int max_flight = 0;
+    int lead = 0;
+    const bool has_motion =
+        has_target && ParseInt(TakeField(rest), velocity_x) &&
+        ParseInt(TakeField(rest), velocity_y) && ParseInt(TakeField(rest), angular) &&
+        ParseInt(TakeField(rest), bullet_speed) && ParseInt(TakeField(rest), max_flight) &&
+        ParseInt(TakeField(rest), lead) && bullet_speed > 0 && max_flight > 0;
+
     out.x_hundredths = x;
     out.y_hundredths = y;
     out.hold_ms = hold;
@@ -210,6 +227,15 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
         out.object_id = object_id;
         out.target_x_hundredths = target_x;
         out.target_y_hundredths = target_y;
+    }
+    if (has_motion) {
+        out.has_motion = true;
+        out.velocity_x_hundredths = velocity_x;
+        out.velocity_y_hundredths = velocity_y;
+        out.angular_velocity_milli = angular;
+        out.bullet_speed_hundredths = bullet_speed;
+        out.max_flight_ms = max_flight;
+        out.lead_permille = lead;
     }
     return true;
 }

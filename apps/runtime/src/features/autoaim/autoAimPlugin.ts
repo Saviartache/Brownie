@@ -22,6 +22,17 @@
  * the time it is used, while a point is not — the module turns it into an angle
  * from wherever the player actually is at that moment.
  *
+ * **And the lead travels as a question, not as an answer.** How far ahead of a
+ * monster to aim is a flight time times a speed, and the flight time is a
+ * distance measured from where the shot leaves — which is the one thing this
+ * side does not know. The client states its own position once a server tick and
+ * a shot leaves on a frame, so a lead worked out here is a lead for a character
+ * who has since run up to two tiles, and it errs in one direction: running at
+ * something always puts the aim past it. So this side sends the *rates* — how
+ * the enemy is moving, how fast the shot travels, how long it has — and the
+ * module solves the meeting on the frame, from the game's own reading of where
+ * both of them are. See {@link AimRequest}.
+ *
  * **Sightings arrive on the server's tick; deciding does not wait for one.**
  * The server describes the world five times a second, so a feature that also
  * *decided* five times a second spent up to a whole tick — 200 ms — holding an
@@ -100,11 +111,12 @@ export interface WeaponProjectile {
  * motion between two ticks and no arithmetic on this side can say how far along
  * that it is.
  *
- * Naming the enemy lets the module look it up in the game's own tables and
- * shift the point by however far the two disagree. **The position goes with the
- * name because the point alone cannot be corrected**: it is already a lead, and
- * how far ahead of the monster it sits is exactly what has to survive the
- * shift.
+ * Naming the enemy is what lets the module look it up in the game's own tables
+ * and work the lead out against the position the shot will actually be tested
+ * against. **The position goes with the name** because the module still falls
+ * back to shifting the point when it cannot solve one of its own, and a point
+ * alone cannot be shifted: it is already a lead, and how far ahead of the
+ * monster it sits is exactly what has to survive.
  */
 export interface AimSubject {
   readonly objectId: number;
@@ -113,16 +125,54 @@ export interface AimSubject {
   readonly y: number;
 }
 
+/**
+ * Everything about a shot that does not depend on where anybody is standing.
+ *
+ * **The half of the problem this side is the right one to answer.** A velocity
+ * is a displacement per server tick and a projectile's speed is a line in
+ * `objects.xml`; neither changes because a frame read it a moment later, and
+ * the module has no way to learn either. Sent alongside the point so the frame
+ * can work the lead out again from the game's own positions — see
+ * {@link AimRequest.shot}.
+ */
+export interface AimShot {
+  /** Tiles per millisecond. Nought is a target not known to be moving. */
+  readonly velocityX: number;
+  readonly velocityY: number;
+  /** Radians per millisecond. Nought keeps the target on a straight line. */
+  readonly angularVelocityPerMs: number;
+  readonly bulletSpeedTilesPerMs: number;
+  /** How long the shot has to hit something with. See {@link InterceptRequest.maxFlightMs}. */
+  readonly maxFlightMs: number;
+  /** How much of the solved offset to apply, where 1 is the whole lead. */
+  readonly lead: number;
+}
+
+export interface AimRequest {
+  /**
+   * Where to point, by this side's own reckoning, in tiles.
+   *
+   * **A fallback, and no longer the answer.** The module solves the lead again
+   * from the game's own positions and uses this only when it cannot — an
+   * enemy it cannot find in the client's tables and no meeting it can reach.
+   */
+  readonly x: number;
+  readonly y: number;
+  readonly holdMs: number;
+  readonly subject: AimSubject;
+  readonly shot: AimShot;
+}
+
 export interface AimOutput {
   /**
-   * Asks the module to point the player's shots at a world position.
+   * Asks the module to point the player's shots at an enemy.
    *
-   * A *standing* target, like a move: the module measures the angle from the
-   * player's live position and holds it until `holdMs` runs out. Saying nothing
-   * is how the runtime says stop, so there is no cancel — an aim that is not
-   * renewed expires, and the player's own aim is theirs again.
+   * A *standing* target, like a move: the module holds it until `holdMs` runs
+   * out. Saying nothing is how the runtime says stop, so there is no cancel —
+   * an aim that is not renewed expires, and the player's own aim is theirs
+   * again.
    */
-  aimAt(x: number, y: number, holdMs: number, subject: AimSubject): void;
+  aimAt(request: AimRequest): void;
 }
 
 export interface AutoAimOptions {
@@ -348,19 +398,21 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const world = session.world;
         const now = world.gameTimeMs;
 
-        // **Where the shot leaves from, which is where the player is now.**
-        // The client says where it is once a server tick and this is asked
-        // eight times in one, so the position on the packet is a character
-        // standing where they were up to two tiles ago. Everything below is
-        // measured from this point: which enemies are in reach, how long a shot
-        // takes to cross to one, and therefore how far ahead of it to aim.
+        // **Where the shot leaves from, as well as this side can say.** The
+        // client states its position once a server tick and this is asked eight
+        // times in one, so the packet's figure is a character standing where
+        // they were up to two tiles ago; carrying it forward is what closes
+        // most of that.
         //
-        // **A tick of that error does not average out, it accumulates in one
-        // direction.** A player running at something is always further from it
-        // in the world model than in the game, so the flight is always
-        // over-estimated and the lead is always past the enemy — which is the
-        // aim sitting in the empty floor ahead of a monster being charged.
-        // Running away is the same error mirrored, and under-leads.
+        // **What it decides is which enemies are worth shooting at**, not how
+        // far ahead of one to aim. It bounds the range, and it settles whether
+        // a meeting exists at all — a monster no shot can catch is one to pass
+        // over in favour of the next. Both are questions a tile of error
+        // survives, and it is asked at forty times a second besides. The lead
+        // itself is not: it is worked out again on the frame, from the game's
+        // own reading of where the player stands, because a tile of error there
+        // is a flight time over-estimated by more than a hundred milliseconds
+        // and a lead that far past the monster.
         //
         // Nothing to fall back to on the first tick of a session, which is
         // exactly when the player has not been seen to move yet — and standing
@@ -399,15 +451,25 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const maxFlightMs = Math.min(projectile.lifetimeMs, range / projectile.speedTilesPerMs);
 
         /**
-         * Where to point, and the enemy that answer was measured against.
+         * The whole of one aim: where to point, the enemy the answer was
+         * measured against, and how everything in it moves.
          *
-         * The second half is not decoration: the module corrects the point by
-         * however far the client disagrees about *this* position, so a point
-         * without it is one that cannot be corrected. See {@link AimSubject}.
+         * **Only the first of the three is arithmetic this side can finish.**
+         * The other two are what the module needs to redo it against the
+         * positions a bullet is actually tested against — see
+         * {@link AimSubject} and {@link AimShot}.
          */
-        const aimPointFor = (
-          enemy: EntityView,
-        ): { x: number; y: number; subject: AimSubject } | undefined => {
+        const aimPointFor = (enemy: EntityView): AimRequest | undefined => {
+          // Everything about the shot that does not depend on where anybody is
+          // standing, and therefore everything the frame cannot work out for
+          // itself. It travels with the point so the module can solve the lead
+          // again from the game's own positions — see {@link AimRequest.shot}.
+          const shot = {
+            bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
+            maxFlightMs,
+            lead,
+          };
+
           // Where it is *now*, not where the last tick put it: between two
           // sightings the enemy keeps walking, and aiming at the sample is
           // aiming a tile behind anything that moves.
@@ -422,7 +484,13 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             return {
               x: enemy.x,
               y: enemy.y,
+              holdMs: holdMs.get(),
               subject: { objectId: enemy.objectId, x: enemy.x, y: enemy.y },
+              // Not known to be moving, which is a lead of nought rather than
+              // no shot at all: the frame still solves it, and solving it
+              // against a standing target is how the *client's* position of
+              // that target becomes the one aimed at.
+              shot: { ...shot, velocityX: 0, velocityY: 0, angularVelocityPerMs: 0 },
             };
           }
           const intercept = solveIntercept({
@@ -436,6 +504,12 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
             maxFlightMs,
           });
+          // **Solving it here is how a target is judged, not how it is aimed
+          // at.** An enemy no shot can catch is one to pass over in favour of
+          // the next, and that verdict has to be reached before a target is
+          // picked — see the call to {@link selectTarget}. The point the answer
+          // carries is the module's fallback for when it cannot reach one of
+          // its own.
           if (intercept === undefined) return undefined;
 
           // **A share of the offset the solution names, not of the speed fed
@@ -449,10 +523,17 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
           return {
             x: motion.x + (intercept.x - motion.x) * lead,
             y: motion.y + (intercept.y - motion.y) * lead,
+            holdMs: holdMs.get(),
             // Where the enemy is *now* by this side's reckoning, which is what
             // the lead above was measured from — not the sample the last tick
             // carried, which is a tile behind it.
             subject: { objectId: enemy.objectId, x: motion.x, y: motion.y },
+            shot: {
+              ...shot,
+              velocityX: motion.velocityX,
+              velocityY: motion.velocityY,
+              angularVelocityPerMs: motion.angularVelocityPerMs ?? 0,
+            },
           };
         };
 
@@ -494,7 +575,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
         const point = aimPointFor(target);
         if (point === undefined) return;
-        options.output.aimAt(point.x, point.y, holdMs.get(), point.subject);
+        options.output.aimAt(point);
       };
 
       // **Deciding is not packet work, so it does not wait for a packet.** The

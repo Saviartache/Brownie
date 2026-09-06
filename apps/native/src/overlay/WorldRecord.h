@@ -124,15 +124,47 @@ struct AimCommand {
     /// and it is applied to the point rather than replacing it.
     std::int32_t target_x_hundredths = 0;
     std::int32_t target_y_hundredths = 0;
+
+    /// Whether the six fields below arrived, which is what lets the frame work
+    /// the lead out again instead of shifting the one it was sent.
+    ///
+    /// **Shifting is the weaker answer and always was.** The point the runtime
+    /// sends is a lead measured from where the runtime believed the *player*
+    /// was — a position it learns once a server tick, five times a second, for
+    /// a character who moves every frame. That belief is inside the flight
+    /// time, and the flight time is the whole of the lead, so a player running
+    /// at a monster is led past it however well the monster's own position is
+    /// corrected. No shift can undo that: it moves the point, and what is wrong
+    /// is how far ahead of the monster the point sits.
+    bool has_motion = false;
+    /// How the enemy is moving, in hundredths of a tile a second — the same
+    /// unit the weapon record and the planner's marks already use. A rate is
+    /// the half of this the server's tick answers well: a displacement per tick
+    /// does not care which frame reads it.
+    std::int32_t velocity_x_hundredths = 0;
+    std::int32_t velocity_y_hundredths = 0;
+    /// How fast that heading is turning, in thousandths of a radian a second.
+    /// Nought keeps the enemy on a straight line.
+    std::int32_t angular_velocity_milli = 0;
+    /// How fast the player's own shots travel, in hundredths of a tile a
+    /// second, and how long one has to hit something with. Both come from the
+    /// game's own item data, which the runtime reads and this side does not.
+    std::int32_t bullet_speed_hundredths = 0;
+    std::int32_t max_flight_ms = 0;
+    /// How much of the lead to actually apply, per mille. The player's setting,
+    /// applied where the lead is worked out rather than where it is asked for.
+    std::int32_t lead_permille = 0;
 };
 
-/// Parses `aim|x|y|holdMs` and the optional `|objectId|targetX|targetY` after
-/// it, in hundredths of a tile and milliseconds.
+/// Parses `aim|x|y|holdMs`, the optional `|objectId|targetX|targetY` after it,
+/// and the optional six-field motion after that — in hundredths of a tile,
+/// hundredths of a tile a second, and milliseconds.
 ///
-/// The three are read as one: a correction needs the enemy *and* where the
-/// runtime had it, so a record carrying some of them is read as carrying none
-/// rather than as a shift measured from nowhere. An older runtime stops after
-/// `holdMs`, which is the rule this file already follows for defence.
+/// **Each group is read as one.** A correction needs the enemy *and* where the
+/// runtime had it; a fresh solution needs every one of the six. A record
+/// carrying part of a group is read as carrying none of it rather than as a
+/// lead measured from nowhere. An older runtime stops after `holdMs` or after
+/// the enemy, which is the rule this file already follows for defence.
 [[nodiscard]] bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept;
 
 /// A line for the game to show over the player, and the colour to show it in.

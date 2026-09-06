@@ -17,6 +17,7 @@ import { CURSOR_FRESH_MS, CursorTracker } from '../src/native/CursorTracker.js';
 import { BossRule, TargetPriority, selectTarget } from '../src/features/autoaim/selectTarget.js';
 import {
   createAutoAimPlugin,
+  type AimRequest,
   type WeaponProjectile,
 } from '../src/features/autoaim/autoAimPlugin.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
@@ -601,6 +602,9 @@ describe('the auto-aim plugin', () => {
   /** A bow-like weapon: 0.008 tiles a millisecond for 750 ms, so six tiles. */
   const WEAPON: WeaponProjectile = { speedTilesPerMs: 0.008, lifetimeMs: 750, reachTiles: 6 };
 
+  /** Typed, so an assertion reads the request's own fields rather than `any`. */
+  const aimSpy = () => vi.fn<(request: AimRequest) => void>();
+
   /** The only wall in these tests, so "is scenery" is one object type. */
   const WALL_TYPE = 99;
 
@@ -630,7 +634,7 @@ describe('the auto-aim plugin', () => {
     /** Where the module says the cursor is, or nothing. */
     setCursor: (point: Position | undefined) => void;
     host: PluginHost;
-    aimAt: ReturnType<typeof vi.fn>;
+    aimAt: ReturnType<typeof aimSpy>;
     session: SessionView;
     enemies: EntityView[];
     setTime: (ms: number) => void;
@@ -643,7 +647,7 @@ describe('the auto-aim plugin', () => {
     /** A decision with no packet behind it, which is the usual case now. */
     plan: () => void;
   } {
-    const aimAt = vi.fn();
+    const aimAt = aimSpy();
     const enemies: EntityView[] = [];
     let gameTimeMs = 0;
     let cursorPoint: Position | undefined;
@@ -780,10 +784,10 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(1, 3, 0));
     tick();
     expect(aimAt).toHaveBeenCalledTimes(1);
-    expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(3);
-    expect(aimAt.mock.calls[0]?.[1]).toBeCloseTo(0);
+    expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(3);
+    expect(aimAt.mock.calls[0]?.[0]?.y).toBeCloseTo(0);
     // The aim expires on its own, so silence means "your aim is yours again".
-    expect(aimAt.mock.calls[0]?.[2]).toBeGreaterThan(0);
+    expect(aimAt.mock.calls[0]?.[0]?.holdMs).toBeGreaterThan(0);
   });
 
   it('points at an enemy without waiting for a server tick', () => {
@@ -793,7 +797,7 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(1, 3, 0));
     plan();
     expect(aimAt).toHaveBeenCalledTimes(1);
-    expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(3);
+    expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(3);
   });
 
   // **The point on its own cannot be corrected.** A shot is tested against the
@@ -810,8 +814,7 @@ describe('the auto-aim plugin', () => {
     walker.y = 0.8;
     tick();
 
-    const subject = aimAt.mock.calls.at(-1)?.[3] as
-      { objectId: number; x: number; y: number } | undefined;
+    const subject = aimAt.mock.calls.at(-1)?.[0]?.subject;
     expect(subject?.objectId).toBe(7);
     // Where the enemy is *now* by this side's reckoning — which is what the
     // lead was measured from, not the sample the last tick carried.
@@ -819,7 +822,7 @@ describe('the auto-aim plugin', () => {
     expect(subject?.y).toBeCloseTo(0.8);
     // And the point itself is ahead of it, which is the part that must survive
     // the shift.
-    expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(subject?.y ?? 0);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeGreaterThan(subject?.y ?? 0);
   });
 
   it('names an enemy it has only seen once at the place it saw it', () => {
@@ -827,9 +830,51 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(4, 3, 1));
     tick();
 
-    const subject = aimAt.mock.calls.at(-1)?.[3] as
-      { objectId: number; x: number; y: number } | undefined;
+    const subject = aimAt.mock.calls.at(-1)?.[0]?.subject;
     expect(subject).toEqual({ objectId: 4, x: 3, y: 1 });
+  });
+
+  // **The lead cannot be finished here, and this is what it takes to finish it
+  // elsewhere.** How far ahead of a monster to aim is a flight time times a
+  // speed, and the flight time is measured from where the shot leaves — which
+  // this side learns once a server tick for a character who moves every frame.
+  // So the rates travel with the point and the module solves the meeting on
+  // the frame, from the game's own reading of where both of them are.
+  it('sends how everything moves, so the module can solve the lead again', () => {
+    const { aimAt, enemies, setTime, tick } = harness();
+    const walker = { ...enemy(7, 3, 0) };
+    enemies.push(walker);
+
+    tick();
+    setTime(200);
+    walker.y = 0.8;
+    tick();
+
+    const shot = aimAt.mock.calls.at(-1)?.[0]?.shot;
+    // Eight tenths of a tile over one server tick, which is a rate — and a rate
+    // is the half of this a server tick answers well, because a displacement
+    // per tick does not care which frame reads it.
+    expect(shot?.velocityX).toBeCloseTo(0);
+    expect(shot?.velocityY).toBeCloseTo(0.8 / 200);
+    expect(shot?.angularVelocityPerMs).toBe(0);
+    // And the weapon, which is in `objects.xml` and nowhere the module can see.
+    expect(shot?.bulletSpeedTilesPerMs).toBe(WEAPON.speedTilesPerMs);
+    expect(shot?.maxFlightMs).toBeCloseTo(WEAPON.reachTiles / WEAPON.speedTilesPerMs);
+    expect(shot?.lead).toBe(1);
+  });
+
+  // Not "no shot": a target not known to be moving is one whose lead is nought,
+  // and the module still solves it — which is how the *client's* position of
+  // that target becomes the one aimed at rather than ours.
+  it('sends a standing enemy as a target with no velocity', () => {
+    const { aimAt, enemies, tick } = harness();
+    enemies.push(enemy(4, 3, 1));
+    tick();
+
+    const shot = aimAt.mock.calls.at(-1)?.[0]?.shot;
+    expect(shot?.velocityX).toBe(0);
+    expect(shot?.velocityY).toBe(0);
+    expect(shot?.bulletSpeedTilesPerMs).toBe(WEAPON.speedTilesPerMs);
   });
 
   it('says nothing while no weapon is held', () => {
@@ -857,10 +902,10 @@ describe('the auto-aim plugin', () => {
     moving.y = 0.6;
     tick();
 
-    const last = aimAt.mock.calls.at(-1);
+    const last = aimAt.mock.calls.at(-1)?.[0];
     // Three tiles away at 0.008 tiles/ms is a flight of about 375 ms, in which
     // a target moving 3 tiles a second travels a little over a tile.
-    expect(last?.[1]).toBeGreaterThan(0.6);
+    expect(last?.y).toBeGreaterThan(0.6);
   });
 
   it('carries a moving enemy forward between sightings', () => {
@@ -872,13 +917,13 @@ describe('the auto-aim plugin', () => {
     setTime(200);
     moving.y = 0.6;
     tick();
-    const onTheTick = Number(aimAt.mock.calls.at(-1)?.[1]);
+    const onTheTick = aimAt.mock.calls.at(-1)?.[0]?.y;
 
     // Half a tick later, with nothing new said about it. The enemy has kept
     // walking, and an aim that has not moved is an aim behind it.
     setTime(300);
     plan();
-    expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(onTheTick);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeGreaterThan(onTheTick);
   });
 
   // **The complaint this was rewritten for.** A stalled connection does not
@@ -901,9 +946,9 @@ describe('the auto-aim plugin', () => {
     setTime(1002);
     tick();
 
-    const last = aimAt.mock.calls.at(-1);
-    const x = Number(last?.[0]);
-    const y = Number(last?.[1]);
+    const last = aimAt.mock.calls.at(-1)?.[0];
+    const x = last?.x ?? 0;
+    const y = last?.y ?? 0;
     // Ahead of it, because it is walking — and inside what the weapon reaches,
     // which is the bound a lead cannot argue with.
     expect(y).toBeGreaterThan(1.6);
@@ -939,7 +984,7 @@ describe('the auto-aim plugin', () => {
       // Half a tick on, and nobody has said anything about anybody since.
       scene.setTime(300);
       scene.plan();
-      return Number(scene.aimAt.mock.calls.at(-1)?.[1]);
+      return scene.aimAt.mock.calls.at(-1)?.[0]?.y;
     };
 
     // The runner has closed the best part of a tile the world model does not
@@ -956,8 +1001,8 @@ describe('the auto-aim plugin', () => {
     setSelf(1, 0);
     move();
     tick();
-    expect(aimAt.mock.calls.at(-1)?.[0]).toBeCloseTo(3);
-    expect(aimAt.mock.calls.at(-1)?.[1]).toBeCloseTo(0);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.x).toBeCloseTo(3);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeCloseTo(0);
   });
 
   it('drops a track the server moved rather than leading where it was thrown', () => {
@@ -969,15 +1014,15 @@ describe('the auto-aim plugin', () => {
     setTime(200);
     blinker.y = 0.8;
     tick();
-    expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(0.8);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeGreaterThan(0.8);
 
     // A teleport, a `GOTO`, or the server putting it back where it belongs.
     // None of the three is a heading, and none of them may be led.
     setTime(400);
     blinker.x = -3;
     tick();
-    expect(aimAt.mock.calls.at(-1)?.[0]).toBeCloseTo(-3);
-    expect(aimAt.mock.calls.at(-1)?.[1]).toBeCloseTo(0.8);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.x).toBeCloseTo(-3);
+    expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeCloseTo(0.8);
   });
 
   it('will not name a meeting the shot stops short of', () => {
@@ -1013,11 +1058,11 @@ describe('the auto-aim plugin', () => {
     setTime(200);
     walker.y = 0.8;
     tick();
-    const at100 = Number(aimAt.mock.calls.at(-1)?.[1]);
+    const at100 = aimAt.mock.calls.at(-1)?.[0]?.y;
 
     host.settingsOf('auto-aim')?.apply('leadPercent', 150);
     plan();
-    const at150 = Number(aimAt.mock.calls.at(-1)?.[1]);
+    const at150 = aimAt.mock.calls.at(-1)?.[0]?.y;
 
     expect(at100).toBeGreaterThan(0.8);
     expect(at150).toBeGreaterThan(at100);
@@ -1038,7 +1083,7 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(1, 2, 0, { objectType: SPAWNER_TYPE }), enemy(2, 4, 0));
     tick();
     expect(aimAt).toHaveBeenCalledTimes(1);
-    expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(4);
+    expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(4);
   });
 
   it('keeps ignoring a spawner even when told not to skip untouchable enemies', () => {
@@ -1050,7 +1095,7 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(1, 2, 0, { objectType: SPAWNER_TYPE }), enemy(2, 4, 0));
     tick();
     expect(aimAt).toHaveBeenCalledTimes(1);
-    expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(4);
+    expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(4);
   });
 
   it('says nothing about an enemy the server never gave any health', () => {
@@ -1069,7 +1114,7 @@ describe('the auto-aim plugin', () => {
     enemies.push(enemy(1, 2, 0, { objectType: WALL_TYPE }), enemy(2, 4, 0));
     tick();
     expect(aimAt).toHaveBeenCalledTimes(1);
-    expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(4);
+    expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(4);
   });
 
   it('ignores an enemy beyond what the weapon can reach', () => {
@@ -1112,8 +1157,8 @@ describe('the auto-aim plugin', () => {
       enemies.push(enemy(1, 2, 0), enemy(2, 0, 4));
       tick();
       expect(aimAt).toHaveBeenCalledTimes(1);
-      expect(aimAt.mock.calls[0]?.[0]).toBeCloseTo(0);
-      expect(aimAt.mock.calls[0]?.[1]).toBeCloseTo(4);
+      expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(0);
+      expect(aimAt.mock.calls[0]?.[0]?.y).toBeCloseTo(4);
     });
 
     it('leaves the shot alone while nobody has said where the player points', () => {
@@ -1151,7 +1196,7 @@ describe('the auto-aim plugin', () => {
       setTime(200);
       walker.y = 1;
       tick();
-      expect(Number(aimAt.mock.calls.at(-1)?.[1])).toBeGreaterThan(1);
+      expect(aimAt.mock.calls.at(-1)?.[0]?.y).toBeGreaterThan(1);
     });
   });
 });

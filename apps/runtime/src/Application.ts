@@ -729,20 +729,33 @@ export class Application {
     this.#plugins.load(
       createAutoAimPlugin({
         output: {
-          // The enemy and where we had it ride along with the point, because
-          // only the module can see where the *client* has that enemy — and a
-          // shot is tested against the client's copy, not ours. It shifts the
-          // point by the difference; see `game/MapObjects.h`.
-          aimAt: (x, y, holdMs, subject) => {
+          // The enemy, where we had it, and how everything moves all ride along
+          // with the point — because only the module can see where the *client*
+          // has that enemy and where it has the player, and both of those are
+          // what a lead is measured between. It solves the meeting again on the
+          // frame; see `game/AimSolver.h`.
+          aimAt: (aim) => {
             this.#native.publishRecord(
               [
                 'aim',
-                Math.round(x * 100),
-                Math.round(y * 100),
-                Math.round(holdMs),
-                subject.objectId,
-                Math.round(subject.x * 100),
-                Math.round(subject.y * 100),
+                Math.round(aim.x * 100),
+                Math.round(aim.y * 100),
+                Math.round(aim.holdMs),
+                aim.subject.objectId,
+                Math.round(aim.subject.x * 100),
+                Math.round(aim.subject.y * 100),
+                // Tiles a second in hundredths, which is how every other speed
+                // on this link travels — the plugin thinks in tiles per
+                // millisecond because that is the unit a flight time comes out
+                // in, and the two meet here.
+                Math.round(aim.shot.velocityX * 100_000),
+                Math.round(aim.shot.velocityY * 100_000),
+                // Radians a second in thousandths, for the same reason.
+                Math.round(aim.shot.angularVelocityPerMs * 1_000_000),
+                Math.round(aim.shot.bulletSpeedTilesPerMs * 100_000),
+                Math.round(aim.shot.maxFlightMs),
+                // Per mille, like every other fraction on this link.
+                Math.round(aim.shot.lead * 1000),
               ].join('|'),
             );
           },

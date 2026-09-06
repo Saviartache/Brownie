@@ -18,6 +18,7 @@
 
 #include "core/Snapshot.h"
 #include "game/AimHook.h"
+#include "game/AimSolver.h"
 #include "game/Il2CppRuntime.h"
 #include "game/MapObjects.h"
 #include "game/PlayerMover.h"
@@ -63,6 +64,12 @@ struct MoveTarget {
 /// aim" has to mean "the player's own aim is theirs again" on its own.
 struct AimTarget {
     bool wanted = false;
+    /// Where the runtime worked out that the shots should go.
+    ///
+    /// **The fallback, not the answer.** It is used as sent when there is
+    /// nothing better — no enemy named, no motion to solve with, or a solve
+    /// that found no meeting — and is otherwise replaced by one worked out from
+    /// the game's own positions. See {@link motion}.
     float x = 0.0F;
     float y = 0.0F;
     /// A tick count, stamped where it arrived.
@@ -73,6 +80,21 @@ struct AimTarget {
     std::int32_t object_id = 0;
     float target_x = 0.0F;
     float target_y = 0.0F;
+    /// Whether {@link shot} carries enough to work the lead out again here.
+    ///
+    /// **Which is the difference between correcting the aim and correcting
+    /// half of it.** The runtime measures a lead from where it believes the
+    /// player stands, and it learns that once a server tick for a character who
+    /// moves every frame — so its flight time is wrong by however far the
+    /// player has run since, and the lead is wrong by that flight times the
+    /// enemy's speed. Shifting the finished point cannot fix that; only solving
+    /// it again from where the player actually is can.
+    bool has_motion = false;
+    /// Everything about the shot that does not change between frames — how the
+    /// enemy moves, how fast the shot travels, how long it has, how much lead
+    /// to apply. The two positions in it are filled in by the frame, from the
+    /// game.
+    game::AimShot shot{};
 };
 
 /// The longest a single frame may claim to have taken.
