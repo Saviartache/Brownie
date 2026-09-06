@@ -59,12 +59,20 @@ export class SessionContext implements SessionView {
    * Sent to the client only — it never reaches the server, so it cannot be
    * mistaken for the player saying something. `objectId: -1` is how the game
    * marks a line with no speaker behind it.
+   *
+   * **`numStars: -1` is what makes it appear at all.** Fame is how this game
+   * tells a server-side speaker from a player, and it is the same convention
+   * `features/chatfilter` reads on the way in: a non-negative count says a
+   * character said this, so the client goes looking for the character named by
+   * `objectId` to draw the line against — and there is no object -1, so the
+   * line is dropped without a word. Negative fame is the path that takes the
+   * name as given, which is the one every notification here wants.
    */
   notify(text: string, from = 'Brownie'): void {
     this.sendToClient('TEXT', {
       name: from,
       objectId: -1,
-      numStars: 0,
+      numStars: -1,
       bubbleTime: 0,
       recipient: '',
       text,

@@ -7,6 +7,8 @@ import {
   type ServerConnector,
   type ServerTarget,
 } from '../src/proxy/ProxySession.js';
+import { SessionContext } from '../src/proxy/SessionContext.js';
+import { WorldState } from '../src/state/WorldState.js';
 import { FakeTransport, PeerCiphers, RecordingSink, frameOf, testLogger } from './fakes.js';
 
 const registry: PacketRegistry = createBundledRegistry();
@@ -276,6 +278,27 @@ describe('ProxySession', () => {
 
     expect(h.session.closed).toBe(true);
     expect(h.sink.messages().join(' ')).toMatch(/client link failed/);
+  });
+
+  // A notification the client silently discards is worse than one that never
+  // left: nothing in the log says so, and `/ip` simply looks like a command
+  // that stopped working. See `SessionContext.notify`.
+  it('marks an injected chat line as having no player behind it', () => {
+    const h = harness();
+    h.client.receive(h.gameClient.encipher(teleportFrame(1, 'x')));
+    const view = new SessionContext(h.session, new WorldState(), registry, testLogger(h.sink));
+    const sentBefore = h.client.sent.length;
+
+    view.notify('hello');
+
+    const sent = h.client.sent.slice(sentBefore);
+    expect(sent).toHaveLength(1);
+    // `sent[0]` is the frame the assertion above just counted.
+    const packet = decodeFrame(registry, h.gameClient.decipher(sent[0] as Buffer));
+    expect(packet.name).toBe('TEXT');
+    expect(packet.fields['text']).toBe('hello');
+    expect(packet.fields['objectId']).toBe(-1);
+    expect(packet.fields['numStars']).toBe(-1);
   });
 
   it('ignores packets that arrive after it closed', () => {
