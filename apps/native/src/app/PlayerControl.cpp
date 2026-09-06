@@ -4,13 +4,21 @@
 
 namespace brownie::app {
 
+/// The hold a record asks for, bounded. See {@link kMaxHoldMs}.
+namespace {
+[[nodiscard]] std::uint64_t HeldFor(std::int32_t hold_ms) noexcept {
+    const std::int32_t bounded = hold_ms > kMaxHoldMs ? kMaxHoldMs : hold_ms;
+    return bounded > 0 ? static_cast<std::uint64_t>(bounded) : 0;
+}
+}  // namespace
+
 MoveTarget MoveTargetFrom(const overlay::MoveCommand& move, std::uint64_t now_ms) noexcept {
     MoveTarget target;
     target.wanted = true;
     target.x = static_cast<float>(move.x_hundredths) / 100.0F;
     target.y = static_cast<float>(move.y_hundredths) / 100.0F;
     target.speed = static_cast<float>(move.speed_hundredths) / 100.0F;
-    target.expires_at_ms = now_ms + static_cast<std::uint64_t>(move.hold_ms);
+    target.expires_at_ms = now_ms + HeldFor(move.hold_ms);
     target.from_player = move.from_player;
     target.once = move.once;
     return target;
@@ -21,7 +29,7 @@ AimTarget AimTargetFrom(const overlay::AimCommand& aim, std::uint64_t now_ms) no
     target.wanted = true;
     target.x = static_cast<float>(aim.x_hundredths) / 100.0F;
     target.y = static_cast<float>(aim.y_hundredths) / 100.0F;
-    target.expires_at_ms = now_ms + static_cast<std::uint64_t>(aim.hold_ms);
+    target.expires_at_ms = now_ms + HeldFor(aim.hold_ms);
     target.object_id = aim.object_id;
     target.target_x = static_cast<float>(aim.target_x_hundredths) / 100.0F;
     target.target_y = static_cast<float>(aim.target_y_hundredths) / 100.0F;
@@ -194,12 +202,37 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
                                   toward_x, toward_y)
                      : 0.0F;
         if (mover_.StepTowards(player, frame_walk_x_, frame_walk_y_, room) && distance > 0.0F) {
-            // Remembered so the next frame reads back their walking and not
-            // ours. What the mover was asked for, which is the direction at
-            // whichever of the two lengths is shorter — see `StepTowards`.
-            const float carried = distance < room ? distance : room;
-            last_step_x_ = (toward_x / distance) * carried;
-            last_step_y_ = (toward_y / distance) * carried;
+            // **What the step actually achieved, read back rather than
+            // assumed** — and the difference is a bug that drove the character
+            // into walls.
+            //
+            // The next frame works out what the player spent of the limit
+            // themselves by subtracting our step from the ground that appeared
+            // under them. Subtract a step the game *refused* — a wall, a
+            // closed door, the client's own clamp — and their own movement
+            // comes back short by exactly the amount that did not happen; the
+            // frame after that reads that as room to spare and pushes harder,
+            // which is a loop that ends with a character grinding along
+            // geometry for as long as the record stands.
+            //
+            // The position is one read off an object already in hand, and the
+            // game's method has already returned, so this is what happened
+            // rather than what was asked for. It also folds in everything else
+            // the call did on the way — the game's own speed clamp, a knockback
+            // applied inside it — none of which the arithmetic here could know.
+            float after_x = 0.0F;
+            float after_y = 0.0F;
+            if (game::ReadPosition(player.object, route_, after_x, after_y)) {
+                last_step_x_ = after_x - player.x;
+                last_step_y_ = after_y - player.y;
+            } else {
+                // The object went away inside the call, which is a realm change
+                // arriving at an awkward moment. What was asked for is the best
+                // guess left, and the next frame measures nothing anyway.
+                const float carried = distance < room ? distance : room;
+                last_step_x_ = (toward_x / distance) * carried;
+                last_step_y_ = (toward_y / distance) * carried;
+            }
             // **Spent by the frame that stepped, not by the frame that saw
             // it.** An offset is resolved from wherever the player is now, so a
             // one-shot target left standing would be carried again on the next

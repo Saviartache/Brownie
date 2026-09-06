@@ -82,6 +82,19 @@ struct AimTarget {
 /// teleport that stepping exists to avoid.
 inline constexpr std::uint64_t kMaxFrameMs = 100;
 
+/// The longest any target may stand, whatever the record asks for.
+///
+/// **The module drives the character and the runtime is another process.** A
+/// hold is how a target stops mattering — the runtime says nothing at all when
+/// it decides to stand still, so silence has to mean stop on its own — and a
+/// record carrying an absurd one would leave the character walking for as long
+/// as it said. That is not a hypothetical about a hostile runtime; it is what a
+/// units mistake in a future version looks like from this side.
+///
+/// Well past anything the runtime asks for: its own longest is half a second,
+/// and the dodge's hop is sixty milliseconds. What this bounds is the mistake.
+inline constexpr std::int32_t kMaxHoldMs = 2000;
+
 /// The furthest one frame may be told to carry, whatever the speed says.
 ///
 /// The second guard, and independent of the first on purpose: if the measured
@@ -187,6 +200,23 @@ class PlayerControl {
     /// Publishes a target for the frame to act on. IPC thread.
     void MoveTo(const MoveTarget& target) { move_target_.Publish(target); }
     void AimAt(const AimTarget& target);
+
+    /// Lets go of the wheel. **IPC thread.**
+    ///
+    /// **Because the runtime being gone is not the same as it having nothing to
+    /// say.** A target stands until its hold runs out, which is exactly right
+    /// while there is somebody on the other end to replace it — and is a
+    /// character walking on their own for the rest of that hold when there is
+    /// not. The overlay's picture is already dropped when the link goes down for
+    /// the same reason; this is the half that moves.
+    ///
+    /// Published rather than written, so the frame picks it up through the one
+    /// path everything else arrives by, and the aim's own detour is cleared by
+    /// the frame that sees it — which is the only thread that may.
+    void Release() {
+        move_target_.Publish(MoveTarget{});
+        aim_target_.Publish(AimTarget{});
+    }
 
     /// Where this frame walked to, if it walked anywhere.
     ///

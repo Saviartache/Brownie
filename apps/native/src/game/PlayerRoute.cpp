@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include <cmath>
+
 namespace brownie::game {
 
 bool ReadRaw(const void* address, void* out, std::size_t size) noexcept {
@@ -45,6 +47,8 @@ void* FindPlayer(const Il2CppRuntime& game, const PlayerRoute& route) noexcept {
 }
 
 bool ReadPosition(const void* player, const PlayerRoute& route, float& x, float& y) noexcept {
+    float read_x = 0.0F;
+    float read_y = 0.0F;
     // Both at once when they are neighbours, which in every build seen so far
     // they are: `x` at 0x3C and `y` at 0x40. One system call rather than two,
     // on a path that runs every frame for as long as a feature is acting.
@@ -53,13 +57,29 @@ bool ReadPosition(const void* player, const PlayerRoute& route, float& x, float&
         if (!ReadField(player, route.x_at, both)) {
             return false;
         }
-        x = both[0];
-        y = both[1];
-        return true;
+        read_x = both[0];
+        read_y = both[1];
+    } else if (!ReadField(player, route.x_at, read_x) ||
+               // Not neighbours in this build. Two reads, rather than an
+               // assumption about a layout the game is free to change.
+               !ReadField(player, route.y_at, read_y)) {
+        return false;
     }
-    // Not neighbours in this build. Two reads, rather than an assumption about
-    // a layout the game is free to change.
-    return ReadField(player, route.x_at, x) && ReadField(player, route.y_at, y);
+
+    // **A read that succeeded is not the same as a position.** An offset that
+    // has moved, an object the collector has given back, a player half-built
+    // during a realm change: every one of those reads *something*, and the
+    // something is as likely to be a pattern of bytes that is not a number as
+    // anything else. Everything downstream acts on this — one caller hands it
+    // to the game as the place to walk to, another takes an angle from it — and
+    // a coordinate that is not a number is not a smaller mistake there than a
+    // wrong one, it is a shot fired at nowhere and a step commanded to it.
+    if (!std::isfinite(read_x) || !std::isfinite(read_y)) {
+        return false;
+    }
+    x = read_x;
+    y = read_y;
+    return true;
 }
 
 bool LocatePlayer(const Il2CppRuntime& game, const PlayerRoute& route,

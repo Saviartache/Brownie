@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "core/KeyChord.h"
 #include "core/ModuleImage.h"
 #include "core/Result.h"
+#include "core/Snapshot.h"
 #include "game/AimHook.h"
 #include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
@@ -939,6 +941,51 @@ void ReadCostIsMeasured() {
     const double split = time(apart);
     Check(paired > 0.0 && split > 0.0, "both position reads succeed");
     std::printf("  note  position read %.0f ns paired, %.0f ns split\n", paired, split);
+}
+
+/// A read that succeeded is not the same as a position.
+///
+/// An offset that has moved, an object the collector has given back, a player
+/// half-built during a realm change: every one of those reads *something*, and
+/// what it reads is as likely to be a pattern of bytes that is not a number as
+/// anything else. One caller hands this to the game as the place to walk to and
+/// another takes an angle from it, so a coordinate that is not a number is a
+/// step commanded to nowhere and a shot fired at it.
+void APositionThatIsNotANumberIsRefused() {
+    struct FakeObject {
+        float x;
+        float y;
+    };
+
+    brownie::game::PlayerRoute route{};
+    route.x_at = 0;
+    route.y_at = sizeof(float);
+
+    float x = 1.0F;
+    float y = 2.0F;
+
+    FakeObject good{12.5F, -3.25F};
+    Check(brownie::game::ReadPosition(&good, route, x, y), "an ordinary position is read");
+
+    FakeObject nan_x{std::nanf(""), -3.25F};
+    Check(!brownie::game::ReadPosition(&nan_x, route, x, y), "one that is not a number is refused");
+    FakeObject nan_y{12.5F, std::nanf("")};
+    Check(!brownie::game::ReadPosition(&nan_y, route, x, y), "either coordinate is enough");
+    FakeObject infinite{std::numeric_limits<float>::infinity(), 0.0F};
+    Check(!brownie::game::ReadPosition(&infinite, route, x, y), "and so is an infinity");
+
+    // **Left as it was, not half-written.** The caller's own last-known position
+    // is a better answer than one coordinate of a new one, and every one of
+    // these callers has one.
+    Check(x == 12.5F && y == -3.25F, "a refused read leaves the caller's numbers alone");
+
+    // The same rule on the path that does not read them together, which is a
+    // different branch and would otherwise be a different answer.
+    brownie::game::PlayerRoute apart{};
+    apart.x_at = 0;
+    apart.y_at = sizeof(float) + 1;
+    Check(!brownie::game::ReadPosition(&nan_x, apart, x, y),
+          "and on the build where the two are not neighbours");
 }
 
 void UnbindableCallersStayQuiet() {
@@ -2349,6 +2396,102 @@ void AStepIsBoundedByTheFrameAndByTheCap() {
     Check(brownie::app::StepBudget(0, 7.0F) == 0.0F, "no time is no travel");
 }
 
+/// What a reader gets is either the whole of a publish or the whole of the one
+/// before it, and never a wait.
+///
+/// **The property that matters is convergence, not any single call.** A reader
+/// that loses the race keeps what it had and asks again, so what has to be true
+/// is that it ends up on the last thing published — under a publisher hammering
+/// the value as hard as it can, which is the only way to make the losing path
+/// happen at all.
+void ASnapshotIsNeverWaitedOn() {
+    brownie::Snapshot<std::string> snapshot;
+
+    std::string local;
+    std::uint64_t seen = 0;
+    Check(!snapshot.published(), "nothing is published to begin with");
+    Check(!snapshot.Refresh(local, seen), "and there is nothing to refresh to");
+
+    snapshot.Publish("first");
+    Check(snapshot.Refresh(local, seen) && local == "first", "a publish is picked up");
+    Check(!snapshot.Refresh(local, seen), "and asking again costs one atomic load");
+
+    // A publisher going as fast as it can, against a reader that never waits.
+    // The reader spins for as long as the publisher runs, so the losing path is
+    // actually taken rather than merely reachable.
+    constexpr int kPublishes = 20000;
+    std::atomic<bool> publishing{true};
+    std::thread publisher{[&snapshot, &publishing] {
+        for (int i = 0; i < kPublishes; ++i) {
+            snapshot.Publish(std::to_string(i));
+        }
+        publishing.store(false, std::memory_order_release);
+    }};
+
+    bool whole = true;
+    bool ordered = true;
+    bool held = true;
+    while (publishing.load(std::memory_order_acquire)) {
+        const std::string before = local;
+        const std::uint64_t was = seen;
+        if (snapshot.Refresh(local, seen)) {
+            // **The whole of a publish or none of it.** A value half copied out
+            // from under a publisher would be a string this run never wrote.
+            const bool published =
+                local == "first" ||
+                (!local.empty() && local.find_first_not_of("0123456789") == std::string::npos &&
+                 std::stoi(local) < kPublishes);
+            whole = whole && published;
+            ordered = ordered && seen > was;
+        } else {
+            // **And a refusal claims nothing.** The position may only move for a
+            // copy that was actually made, or the reader would skip a value it
+            // never saw and never ask for it again.
+            held = held && local == before && seen == was;
+        }
+    }
+    publisher.join();
+
+    Check(whole, "a refresh hands over a value that was published, whole");
+    Check(ordered, "and only ever moves the caller forwards");
+    Check(held, "a refresh that gave way leaves the caller exactly as it was");
+
+    // Whatever happened during the run, the end state is the end state: the
+    // reader is never left behind for good.
+    (void)snapshot.Refresh(local, seen);
+    Check(local == std::to_string(kPublishes - 1), "and it converges on the last publish");
+}
+
+/// A hold is how a target stops mattering, so an absurd one is a character
+/// walking on their own for as long as it says. The runtime is another process:
+/// what this bounds is not a hostile one, it is what a units mistake in a
+/// future version looks like from this side.
+void AHoldIsBounded() {
+    brownie::overlay::MoveCommand move{};
+    move.x_hundredths = 50;
+    move.speed_hundredths = 500;
+    move.hold_ms = 120;
+    Check(brownie::app::MoveTargetFrom(move, 1000).expires_at_ms == 1120,
+          "an ordinary hold stands for exactly as long as it asks");
+
+    move.hold_ms = 1000 * 1000;
+    Check(brownie::app::MoveTargetFrom(move, 1000).expires_at_ms ==
+              1000 + static_cast<std::uint64_t>(brownie::app::kMaxHoldMs),
+          "and an absurd one stands for the longest a target may");
+
+    brownie::overlay::AimCommand aim{};
+    aim.hold_ms = 1000 * 1000;
+    Check(brownie::app::AimTargetFrom(aim, 1000).expires_at_ms ==
+              1000 + static_cast<std::uint64_t>(brownie::app::kMaxHoldMs),
+          "the same for where the shots go");
+
+    // A record that asked for nothing at all expires the moment it arrives,
+    // rather than reading as an enormous unsigned number.
+    move.hold_ms = -5;
+    Check(brownie::app::MoveTargetFrom(move, 1000).expires_at_ms == 1000,
+          "a hold of less than nothing stands for no time at all");
+}
+
 void AStepGivesWayToTheirOwnWalking() {
     constexpr float kBudget = 0.12F;
 
@@ -2580,6 +2723,8 @@ int main() {
     RecordsBecomeTargetsThatExpire();
     AProjectionInvertsItself();
     AStepIsBoundedByTheFrameAndByTheCap();
+    ASnapshotIsNeverWaitedOn();
+    AHoldIsBounded();
     AStepGivesWayToTheirOwnWalking();
     HooksDivertAndRestore();
     RemovingAHookIsScopeExit();
@@ -2598,6 +2743,7 @@ int main() {
     PlayerTileSpeedInstallsBothOrNeither();
     UnbindableCallersStayQuiet();
     ReadCostIsMeasured();
+    APositionThatIsNotANumberIsRefused();
     ControlFieldsRoundTrip();
     AControlSyncIsAllOrNothing();
     AControlSyncReplacesRatherThanMerges();

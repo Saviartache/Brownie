@@ -560,7 +560,10 @@ void Engine::Turn() {
     PublishModel();
 
     if (session_.state() == ipc::SessionState::kDisconnected) {
-        connected_.store(false, std::memory_order_release);
+        // Exchanged rather than stored, so the transition is a moment rather
+        // than a state: this block runs on every turn of the reconnect loop,
+        // and what has to happen exactly once is letting go of the wheel.
+        const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
 
         // Whatever the overlay is showing belongs to a runtime that is no
         // longer there. Kept until now rather than cleared the instant the link
@@ -574,6 +577,12 @@ void Engine::Turn() {
         // next one has not been told the box is ticked.
         picture_.Reset();
         dodge_view_stated_ = false;
+        // And the wheel goes back. A target stands until its hold runs out,
+        // which is right while there is somebody to replace it and is a
+        // character walking on their own once there is not.
+        if (was_connected) {
+            control_.Release();
+        }
 
         // Read on every attempt, never cached. The runtime mints a fresh secret
         // each run, so a key held from a previous connection would authenticate
@@ -755,6 +764,13 @@ void Engine::LetGo() noexcept {
         return;
     }
     released_ = true;
+
+    // **The wheel goes back before anything else is taken apart.** Frames go on
+    // running until the overlay's detour is out, and a frame that still has a
+    // target still steps: the last thing a quitting game should do is walk the
+    // character somewhere nobody asked for. Publishing costs nothing and cannot
+    // fail, so it is safe to do first.
+    control_.Release();
 
     // The scene pass first: it calls into managed code, and the frame that
     // would run it is about to be taken away.
