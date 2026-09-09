@@ -42,6 +42,11 @@ export interface ObjectDefinition {
   readonly isPortal: boolean;
   /** Whether one of these is a key-opened dungeon portal — `<DungeonPortal/>`. */
   readonly isDungeonPortal: boolean;
+  /**
+   * What the dungeon behind it is called. Absent for everything that is not a
+   * dungeon portal, which is all but 143 of the file's 35 000 entries.
+   */
+  readonly dungeonName: string | undefined;
   /** How wide one of these is, in tiles. See {@link ObjectCatalog.bodyTiles}. */
   readonly bodyTiles: number;
   /** Indexed by `bulletType`, which is the index the game shoots them by. */
@@ -98,7 +103,11 @@ export class GameObjectCatalog implements ObjectCatalog {
     this.#byType = byType;
     this.#dungeonPortals = [...byType.values()]
       .filter((definition) => definition.isDungeonPortal)
-      .map((definition) => ({ type: definition.type, name: definition.id }));
+      .map((definition) => ({
+        type: definition.type,
+        name: definition.id,
+        dungeonName: definition.dungeonName ?? definition.id,
+      }));
     const skinsByClass = new Map<number, PlayerSkin[]>();
     for (const definition of byType.values()) {
       const skin = definition.skin;
@@ -315,6 +324,23 @@ function readBodyTiles(element: string): number {
   return bodyTilesFromPercent(stated) ?? 1;
 }
 
+/**
+ * What the dungeon behind a portal is called.
+ *
+ * `<DungeonName>` is the game's own word for the destination, and 142 of the
+ * file's 143 dungeon portals carry one. `<DisplayId>` is the same string on
+ * nearly all of them and answers for the one that does not. The object's own id
+ * is the last resort, and it names the *portal* rather than the dungeon — "Snake
+ * Pit Portal" — so the trailing word comes off, because nothing that names a
+ * dungeon to a player says it.
+ */
+function readDungeonName(element: string, id: string): string {
+  const stated = childText(element, 'DungeonName') ?? childText(element, 'DisplayId');
+  const named = stated?.trim();
+  if (named !== undefined && named !== '') return named;
+  return id.replace(/\s+Portal$/i, '');
+}
+
 /** What the file's kill counter is called for the things that are not monsters. */
 const STRUCTURE_KILL_STAT = 'StructureKills';
 
@@ -358,6 +384,10 @@ export async function readObjectDefinitions(
     // Read once for the same reason, and read *before* the record because
     // whether this thing has an attack of its own is half of `isScenery`.
     const projectiles = readProjectiles(element);
+    // `<DungeonPortal/>` is what a key opens — narrower than `<Class>Portal`,
+    // which also covers realm, guild and event portals. Read before the record
+    // because the dungeon's name is only worth reading for one of these.
+    const isDungeonPortal = hasChild(element, 'DungeonPortal');
 
     definitions.push({
       type,
@@ -401,10 +431,9 @@ export async function readObjectDefinitions(
       // `<Class>Portal</Class>` is every portal there is, the realm, guild and
       // vault ones included. It is what answers "what am I standing on".
       isPortal: objectClass === 'Portal',
-      // `<DungeonPortal/>` is what a key opens — narrower than `<Class>Portal`,
-      // which also covers realm, guild and event portals. Auto-portal wants only
-      // the ones somebody pops a key for.
-      isDungeonPortal: hasChild(element, 'DungeonPortal'),
+      // Auto-portal wants only the ones somebody pops a key for.
+      isDungeonPortal,
+      dungeonName: isDungeonPortal ? readDungeonName(element, id) : undefined,
       bodyTiles: readBodyTiles(element),
       projectiles: new Map(projectiles.map((p) => [p.bulletType, p])),
       item: readItemFacts(element),

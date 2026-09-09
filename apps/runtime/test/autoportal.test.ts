@@ -135,8 +135,8 @@ describe('the auto-portal plugin', () => {
       isDungeonPortal: (type) => type === UNDEAD || type === ABYSS,
       displayName: (type) => (type === UNDEAD ? 'Undead Lair Portal' : undefined),
       dungeonPortals: () => [
-        { type: UNDEAD, name: 'Undead Lair Portal' },
-        { type: ABYSS, name: 'Abyss of Demons Portal' },
+        { type: UNDEAD, name: 'Undead Lair Portal', dungeonName: 'Undead Lair' },
+        { type: ABYSS, name: 'Abyss of Demons Portal', dungeonName: 'Abyss of Demons' },
       ],
       steer: { direction: () => state.steer },
     };

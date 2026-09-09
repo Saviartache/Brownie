@@ -16,6 +16,7 @@ import { FollowTarget } from './features/autofollow/FollowTarget.js';
 import { EngagedTarget } from './features/dodge/EngagedTarget.js';
 import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
+import { createAutoCalloutPlugin } from './features/autocallout/autoCalloutPlugin.js';
 import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.js';
 import { createAutoTeleportPlugin } from './features/autoteleport/autoTeleportPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
@@ -1048,6 +1049,16 @@ export class Application {
       createPortalEntryPlugin({
         isPortal: (objectType) => this.#objects.isPortal(objectType),
         displayName: (objectType) => this.#objects.displayName(objectType),
+      }),
+    );
+
+    // Built here for auto-portal's reason: it has to tell a dungeon portal from
+    // a realm one and name the dungeon behind it, and both answers are in the
+    // game's own object data rather than anywhere on the wire.
+    this.#plugins.load(
+      createAutoCalloutPlugin({
+        isDungeonPortal: (objectType) => this.#objects.isDungeonPortal(objectType),
+        dungeonPortals: () => this.#objects.dungeonPortals(),
       }),
     );
 

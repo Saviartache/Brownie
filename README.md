@@ -182,15 +182,9 @@ while it is on so the server never pulls you back — which is what makes it wor
 at all instead of rubber-banding. That hold is on a budget: a countdown appears
 over your character, and the plugin switches itself off when it runs out.
 
-The same hold is what lets you run fast. The slider multiplies the frame times
-Unity hands the client, so the whole client speeds up — movement, animation and
-its own tick together — and the server has nothing to say about it because it is
-not being told. It applies only while noclip is on.
-
 - **Noclip** — the switch a key moves, so it can be armed and disarmed
   mid-fight.
 - **Hold the socket for (s)** — 20 at most.
-- **Client speed (x)** — 1 to 5 times real time, moved while you walk.
 
 Bindable to a key.
 
@@ -380,6 +374,30 @@ The identity is stated twice on entering a world — once as the character is
 created and once on the tick after — because the client seeds its own player
 from more than the packet that creates it, and the first claim alone did not
 survive the map change.
+
+### Auto Callout
+
+Calls out every dungeon portal that drops, the moment it drops — the same
+announcement the game makes when you Ctrl + left-click a portal. The *server*
+composes `{dungeon} ({grade}) just dropped!`, so the wording and the grade are
+the game's own rather than something typed. Switch it on and there is nothing
+else to set.
+
+Three keys popped at once are three announcements, each naming its own dungeon,
+spaced so the server's chat limit is not tripped. A portal already called out is
+remembered and never called out again, however long it stands there.
+
+**Portals that were already standing when you arrived are not announced.** The
+Nexus is full of them and they did not just drop, so the first few seconds of a
+map record what is there rather than shouting about it. Only what pops
+afterwards is news.
+
+**Only a portal standing on this map can be announced.** The callout carries an
+object id, not a dungeon name: the server looks the object up in the world you
+are in and announces what it finds. A dungeon nobody opened has no object to
+name, so there is nothing to send — a live capture of a real Ctrl+click settled
+this (`calloutType=1 value=274676`, the id of a Puppet Master's Theatre portal
+in the Nexus).
 
 <!-- SCREENSHOT: Chat Filter and Streamer Mode expanded -->
 

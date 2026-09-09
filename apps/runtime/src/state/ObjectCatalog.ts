@@ -7,6 +7,15 @@ export interface DungeonPortal {
   readonly type: number;
   /** The `objects.xml` id, e.g. "Undead Lair Portal". */
   readonly name: string;
+  /**
+   * What the dungeon behind it is called, e.g. "Undead Lair".
+   *
+   * `<DungeonName>` in `objects.xml`, which is the string the game itself uses
+   * when it has to *name the dungeon* rather than the object standing in the
+   * Nexus. Anything the player reads as a dungeon wants this one; the object id
+   * is the portal, and it carries a trailing "Portal" that no announcement says.
+   */
+  readonly dungeonName: string;
 }
 
 /**
