@@ -230,6 +230,8 @@ against:
 | `map.walkable.<name>`    | every `bool(float, float)` on the world manager       | player noclip, through `PlayerNoclip` |
 | `self.tileSpeedHere`     | `float GCFKGLKAPND()`                                | player noclip, through `PlayerTileSpeed` |
 | `self.applyTileSpeed`    | `void CNPNFDNDIJC()`                                 | player noclip, through `PlayerTileSpeed` |
+| `unity.Time.deltaTime` / `.fixedDeltaTime` / `.unscaledDeltaTime` | `float UnityEngine.Time::get_*()` | the speed slider, through `ClientClock` |
+| `unity.Time.realtimeSinceStartup` / `.realtimeSinceStartupAsDouble` | `float` / `double UnityEngine.Time::get_*()` | the same, so absolute time keeps up with the frames |
 | `world.objects` / `world.objects.alt` | the world manager's two `Dictionary<int, MapObject>` fields | auto-aim, through `MapObjects` — where the *client* has a monster, which is what a shot is tested against |
 | `ui.MapObjectUIManager.ShowFloatingText` | `void ShowFloatingText(kind, string, …)` | floating text, through `FloatingText` |
 | `ui.MapObjectUIManager.ShowFloatingText.number` | `void ShowFloatingText(kind, int, …)` | the same, read for the style the game draws with |
@@ -266,10 +268,41 @@ The two speed methods are the other half of player noclip, and they are **both
 or neither** for a reason the game's own movement states outright: it keeps
 `min(the multiplier it stored, the multiplier the ground answers)`. Detouring
 the answer alone leaves the low number the previous tick stored; correcting the
-stored number alone is taken back by the next `min`. Together they agree on one,
-and the player crosses water at the speed the character was built with. They
-need the field key `self.moveMultiplier` with them — where the client keeps that
-number — and refuse to install until all three have answered.
+stored number alone is taken back by the next `min`. Together they agree on one
+number, and the player crosses water at the speed the character was built with.
+They need the field key `self.moveMultiplier` with them — where the client keeps
+that number — and refuse to install until all three have answered.
+
+**Holding that number above one is not a speed hack**, and it was tried: the
+client derives the multiplier again from the game's own numbers on the next
+tick, so a larger one written after the fact buys a frame at most. The pair is
+for denying the ground its say and nothing else.
+
+The five **`unity.Time` readings** are what actually runs a client fast, and
+they are Unity's rather than the game's — so they resolve out of
+`UnityEngine.CoreModule` and fail apart from everything above. Three of them
+answer "how long was that frame" and are handed back multiplied, which is the
+whole trick: the client measures movement, animation and its own tick against
+that number and cannot tell it has been moved. The other two answer "what time
+is it", which cannot be multiplied — the product of a scale and a number that
+has been climbing since the process started is a jump of hours — so `ClientClock`
+keeps a clock of its own that advances by the scaled step and hands that out
+instead. It only ever moves forward, so letting go of the slider leaves the
+client's time where it is rather than rewinding it into timers it has passed.
+
+The three deltas are **required and the two absolute readings are not**: a build
+that will not give up `realtimeSinceStartup` still runs fast, while one that
+will not give up a delta leaves the client's parts disagreeing about how long a
+frame was. `ClientClock` refuses in the second case and installs in the first,
+and the runtime's log says how many of the five went on.
+
+The reference implementation had **two detours more than this**, both against
+CodeStage's Anti-Cheat Toolkit: it rescaled that library's own "reliable" time
+after each update and skipped its speed-hack detector while the scale was up.
+Neither is here. Nothing has shown that this build ships that library — the
+reference's own resolver gave up looking for it after five seconds — and a
+detour written against a class nobody has seen is a guess with a hook on it. If
+the client's time turns out to be corrected under us, that is where to look.
 
 They were **counted separately for one live run**, which is the half of the
 reference implementation's design that earned its keep: of the nine this build

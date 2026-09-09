@@ -146,7 +146,12 @@ describe('the noclip plugin', () => {
     settings.apply('active', true);
 
     expect(holds).toEqual([true]);
-    expect(features).toEqual([['player.noclip', true]]);
+    // The number before the claim, always: a claim the module heard first would
+    // be a claim on whatever speed it happened to be holding.
+    expect(features).toEqual([
+      ['player.speedMultiplier', 2],
+      ['player.noclip', true],
+    ]);
     expect(shown).toEqual(['Noclip: 20s left']);
 
     const packet = move();
@@ -167,6 +172,49 @@ describe('the noclip plugin', () => {
     // still saying yes to the walkability it walked through.
     expect(holds).toEqual([false]);
     expect(features).toEqual([['player.noclip', false]]);
+  });
+
+  it('sends the speed once, ahead of the claim, and again only when it moves', () => {
+    const { settings } = load();
+    settings.apply('speedMultiplier', 4);
+    // Nothing yet: a number sent to the module with no claim behind it has
+    // nothing reading it.
+    expect(features).toEqual([]);
+
+    settings.apply('active', true);
+    vi.advanceTimersByTime(2000);
+
+    // Once, not once a second — the claim expires and is restated, the number
+    // does not.
+    expect(features.filter(([key]) => key === 'player.speedMultiplier')).toEqual([
+      ['player.speedMultiplier', 4],
+    ]);
+  });
+
+  it('answers a slider dragged mid-hold without waiting for the next tick', () => {
+    const { settings } = load();
+    settings.apply('active', true);
+    features.length = 0;
+
+    settings.apply('speedMultiplier', 5);
+
+    expect(features).toEqual([
+      ['player.speedMultiplier', 5],
+      ['player.noclip', true],
+    ]);
+  });
+
+  it('keeps the speed across a hold that ended, and restates it on the next one', () => {
+    const { settings } = load();
+    settings.apply('speedMultiplier', 3);
+    settings.apply('active', true);
+    settings.apply('active', false);
+    features.length = 0;
+
+    // Not resent: the module keeps the last number it was told, the claim is
+    // what expired, and switching back on is the speed the slider still shows.
+    settings.apply('active', true);
+    expect(features).toEqual([['player.noclip', true]]);
   });
 
   it('counts down from the moment it was switched on, not on a clock of its own', () => {

@@ -272,6 +272,12 @@ struct OverlayModel {
     /// above because the two resolve from different classes and fail apart.
     bool walk_speed_held = false;
     std::uint32_t walk_speeds_denied = 0;
+    /// The client's clock: whether its detours are in, and what the game's own
+    /// frame times are being multiplied by. The number rather than a flag, for
+    /// the reason `collision_scale` carries one — "on" says nothing about where
+    /// the slider was left. One means the clock is running at real time.
+    bool clock_installed = false;
+    float clock_scale = 1.0F;
     /// The game's own floating text: whether the detours are in, and how many
     /// lines of ours have gone out through them.
     bool text_installed = false;

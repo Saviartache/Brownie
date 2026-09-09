@@ -11,6 +11,25 @@
  * one for as long as the claim below stands. Nothing here says so separately —
  * it is the same claim.
  *
+ * **Running fast is a separate mechanism on the same switch.** The module
+ * multiplies the frame times Unity hands the client, so the whole client — its
+ * movement, its animation, its own tick — runs faster than the wall. That is
+ * what a speed hack is, and it is not the tile multiplier above: holding *that*
+ * higher changes nothing, because the client derives it again from the game's
+ * own numbers on the next tick. See `ClientClock.h`.
+ *
+ * **It rides on this switch because it needs the hold.** A client running fast
+ * reports itself walking further per tick than the server would ever grant, and
+ * the only reason nothing argues is that the socket below is held for as long
+ * as noclip is on. The two start and stop together.
+ *
+ * **The number is sent ahead of the claim and only when it moves.** The claim
+ * expires and is restated every second; the number does not expire, the module
+ * keeps the last one it was told, and the runtime replays every key it holds
+ * when the link comes back — so restating it on the tick would be a message a
+ * second with no reader. What the module does with a value it will not accept
+ * is the module's business; the bounds here are what an operator can reach.
+ *
  * **Two halves, and neither works alone.** The module silences the client's own
  * walkability check, so the player walks where the client would have stopped
  * them; the server keeps its own idea of where they are and pulls them back,
@@ -59,6 +78,12 @@ import { holdState, SPENT_COLOUR } from './holdBudget.js';
  * note above and `Engine::AcceptFeature`.
  */
 const FEATURE_KEY = 'player.noclip';
+
+/**
+ * The number that claim applies: how much faster than the wall the client runs.
+ * Not a lease — see the note above and `Engine::AcceptFeature`.
+ */
+const SPEED_KEY = 'player.speedMultiplier';
 
 /**
  * How often the claim is restated, the countdown redrawn and the budget
@@ -117,12 +142,38 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
         step: 1,
       });
 
+      // Five is the clock's own ceiling, restated rather than exceeded: a
+      // slider that goes past what the far end will accept is one whose top
+      // half does nothing. One is the bottom because it is real time, and a
+      // client asked to run slower than the wall is not something anyone wants
+      // from the plugin that walks through trees.
+      const clientSpeed = context.settings.range('speedMultiplier', {
+        label: 'Client speed (x)',
+        default: 2,
+        min: 1,
+        max: 5,
+        step: 0.1,
+      });
+
       /** When the hold started, or nothing when there is no hold. */
       let heldSince: number | undefined;
       /** How the countdown is stopped, and nothing while it is not running. */
       let stopTicking: Unsubscribe | undefined;
+      /** What the module was last told to run the client's clock at. */
+      let sentSpeed: number | undefined;
 
       const claim = (on: boolean): void => {
+        // Before the claim, always: a claim the module heard first would be a
+        // claim on the last number it happened to hold. Nothing is sent while
+        // switching off — the number outlives the claim on purpose, so that
+        // switching back on is the speed the slider still shows.
+        if (on) {
+          const wanted = clientSpeed.get();
+          if (wanted !== sentSpeed) {
+            context.native.setFeature(SPEED_KEY, wanted);
+            sentSpeed = wanted;
+          }
+        }
         context.native.setFeature(FEATURE_KEY, on);
       };
 
@@ -188,6 +239,16 @@ export function createNoclipPlugin(output: NoclipOutput): Plugin {
         if (on) start();
         else stop();
       });
+
+      // Answered now rather than on the next tick: a slider whose result
+      // arrives a second after it is dragged is one nobody can aim. Only while
+      // something is held, because a number sent to a module with no claim
+      // behind it is a number nothing reads.
+      context.onDispose(
+        clientSpeed.onChange(() => {
+          if (heldSince !== undefined) claim(true);
+        }),
+      );
 
       // A hold that outlived the session it was holding is a hold on nothing,
       // and the next session would start with the budget already spent.

@@ -32,6 +32,7 @@
 #include "game/AimSolver.h"
 #include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
+#include "game/ClientClock.h"
 #include "game/GlowFields.h"
 #include "game/HealthBarTint.h"
 #include "game/OffsetTable.h"
@@ -899,6 +900,71 @@ void PlayerTileSpeedInstallsBothOrNeither() {
     // has no offset to write at, and a player that is not there has no memory.
     gate.KeepFullSpeed(nullptr);
     Check(gate.denied() == 1, "and a store with nothing to store into counts nothing");
+}
+
+/// The client clock scales nothing until it is switched on, clamps what it is
+/// asked for, and keeps its own time moving forwards.
+///
+/// **The monotonic check is the one worth having.** A clock that goes backwards
+/// when the operator lets go of the slider hands the client a time it has
+/// already passed, and every timer waiting on a later one fires at once.
+void ClientClockScalesOnlyWhatItIsAsked() {
+    brownie::game::ClientClock clock;
+    Check(!clock.installed(), "a fresh clock is not installed");
+    Check(!clock.enabled(), "and is switched off");
+    Check(clock.scale() == brownie::game::kRealTime, "and runs at real time");
+
+    // Never dereferenced: the case below is refused before MinHook is asked for
+    // anything, because a frame-length reading is missing.
+    int method = 0;
+    std::array<void*, brownie::game::ClientClock::kReadings> partial{};
+    partial[0] = &method;
+    Check(!clock.Install(partial).ok(), "a clock missing a frame length installs nothing");
+    Check(!clock.installed(), "so it stays uninstalled");
+
+    std::array<void*, 2> wrong_size{};
+    Check(!clock.Install(wrong_size).ok(), "and so does one handed the wrong number of readings");
+
+    // The number is kept whether or not the switch is on — it arrives ahead of
+    // the claim — but `scale` reports what the detours would actually do.
+    clock.SetSpeed(3.0F);
+    Check(clock.scale() == brownie::game::kRealTime, "a switched-off clock still runs at one");
+    Check(clock.ScaleDelta(0.02F) == 0.02F, "and hands a frame back untouched");
+
+    clock.SetEnabled(true);
+    Check(clock.scale() == 3.0F, "a switched-on one runs at what it was asked for");
+    Check(std::abs(clock.ScaleDelta(0.02F) - 0.06F) < 1e-6F, "and multiplies the frame by it");
+
+    clock.SetSpeed(brownie::game::kMaxClientSpeed + 10.0F);
+    Check(clock.scale() == brownie::game::kMaxClientSpeed, "past the ceiling is the ceiling");
+    clock.SetSpeed(0.25F);
+    Check(clock.scale() == brownie::game::kRealTime,
+          "and below real time is real time, because nobody asked to be slowed");
+
+    // Kept rather than replaced: the last number an operator chose is a better
+    // answer than one nobody did.
+    clock.SetSpeed(2.0F);
+    clock.SetSpeed(std::numeric_limits<float>::quiet_NaN());
+    Check(clock.scale() == 2.0F, "a value that is not a number changes nothing");
+    clock.SetSpeed(std::numeric_limits<float>::infinity());
+    Check(clock.scale() == 2.0F, "and neither does one with no end");
+
+    // The first reading is where our clock starts, not a step from zero.
+    Check(clock.Advance(100.0) == 100.0, "the clock starts wherever the game's own is");
+    Check(std::abs(clock.Advance(101.0) - 102.0) < 1e-9, "and then runs at the scale");
+
+    // A step nobody can have taken — a suspended process — stands still rather
+    // than leaping, and time never goes back.
+    const double after_gap = clock.Advance(1000.0);
+    Check(std::abs(after_gap - 102.0) < 1e-9, "an impossible step moves the clock not at all");
+    const double backwards = clock.Advance(999.0);
+    Check(backwards >= after_gap, "and a real clock that went back does not take ours with it");
+
+    // Switching off leaves it where it is: real time from here, never a jump
+    // back to what the game says.
+    clock.SetEnabled(false);
+    const double at_real_time = clock.Advance(1001.0);
+    Check(at_real_time >= backwards, "and letting go of the slider does not rewind it");
 }
 
 /// The aim hook redirects nothing until it is told to, and nothing that is not
@@ -2875,6 +2941,7 @@ int main() {
     ProjectileNoclipInstallsBothOrNeither();
     PlayerNoclipRefusesWhatItCannotDetour();
     PlayerTileSpeedInstallsBothOrNeither();
+    ClientClockScalesOnlyWhatItIsAsked();
     UnbindableCallersStayQuiet();
     ReadCostIsMeasured();
     APositionThatIsNotANumberIsRefused();

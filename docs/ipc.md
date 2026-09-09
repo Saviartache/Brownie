@@ -248,6 +248,7 @@ The resolved keys include:
 | key                         | value                | meaning                                                      |
 | --------------------------- | -------------------- | ------------------------------------------------------------ |
 | `player.noclip`             | `true` / `false`     | silence the client's own walkability check                   |
+| `player.speedMultiplier`    | `1` … `5`            | how much faster than the wall the client runs while that claim is live |
 | `cursor.track`              | `true` / `false`     | measure where the cursor points, and send it                 |
 | `player.collider`           | `true` / `false`     | scale the player's collision circle, and put it back after   |
 | `player.colliderMultiplier` | `0` … `1`            | what to scale it by, clamped on arrival                      |
@@ -312,15 +313,30 @@ and a priority the player moved off, a plugin that was disabled and a runtime
 that died all end it the same way three seconds later. What that costs while it
 lapses is the camera being read for a feature that has stopped looking.
 
-`player.colliderMultiplier` is the exception on this table: not a claim but the
-number one of the claims applies. It goes out **ahead of the claim and only when
-it has moved** — the module applies whatever it was last told, so a claim heard
+`player.colliderMultiplier` and `player.speedMultiplier` are the exceptions on
+this table: not claims but the numbers claims apply. Each goes out **ahead of
+its claim and only when it has moved** — the module applies whatever it was last told, so a claim heard
 before its number would act on the previous one, while a number that has not
 changed is one the module already has and the runtime would be repeating for
 nobody. It is stored whether or not the claim is live, because a value refused
 for arriving first would leave the claim acting on whatever came before it. The
-module clamps it to `0` … `1` on arrival rather than trusting the slider it came
-from: above one is a *larger* collision circle than the game built.
+module clamps the collider's to `0` … `1` on arrival rather than trusting the
+slider it came from: above one is a *larger* collision circle than the game
+built.
+
+`player.speedMultiplier` is clamped the same way and in the same spirit, but by
+`ClientClock` rather than on arrival — the bound belongs where the number is
+multiplied in, and two copies of it are two places for it to drift. One is the
+floor because it is real time; five is the ceiling because it is as fast as a
+client can be driven and still draw the frames it claims to have drawn.
+
+**It scales the client's clock, not the player.** The module multiplies the
+frame lengths Unity hands the game, so movement, animation and the client's own
+tick all run fast together. Writing a speed onto the player was tried first and
+does nothing, for the reason `docs/offsets.md` gives. The key has no lease of
+its own and applies only while `player.noclip` does: the reason the server does
+not argue with a client running at five times the wall is that the runtime is
+holding the socket for as long as noclip is on.
 
 ### `hotkeyEvent`
 

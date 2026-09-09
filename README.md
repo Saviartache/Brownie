@@ -66,8 +66,6 @@ are led, so the shot goes where the enemy will be.
 
 - **Aim at** — the closest enemy, the weakest, the toughest, or the enemy
   nearest your cursor.
-- **Cursor radius (tiles)** — how far from the cursor an enemy may be and still
-  count, when aiming by cursor.
 - **Skip enemies that cannot be hurt** — invulnerable and untargetable things.
 - **Skip walls and scenery.**
 - **Lead the target by (%)** — 0 aims where it is, 100 aims where it will be.
@@ -89,7 +87,7 @@ data, so a new class or a new item is understood without an update.
 - **Use support abilities** and **aim the attack abilities you use** — the two
   halves, switched separately.
 - **Aim at** and **cursor radius (tiles)** — the same four choices auto-aim
-  offers.
+  offers, with a radius around the cursor auto-aim itself does without.
 - **Bosses** — treat like any other enemy, prefer them, or only them.
 - **Look for enemies within (tiles).**
 - **Cast healing abilities at or below (% health)** and **mana abilities at or
@@ -172,9 +170,15 @@ while it is on so the server never pulls you back — which is what makes it wor
 at all instead of rubber-banding. That hold is on a budget: a countdown appears
 over your character, and the plugin switches itself off when it runs out.
 
+The same hold is what lets you run fast. The slider multiplies the frame times
+Unity hands the client, so the whole client speeds up — movement, animation and
+its own tick together — and the server has nothing to say about it because it is
+not being told. It applies only while noclip is on.
+
 - **Noclip** — the switch a key moves, so it can be armed and disarmed
   mid-fight.
 - **Hold the socket for (s)** — 20 at most.
+- **Client speed (x)** — 1 to 5 times real time, moved while you walk.
 
 Bindable to a key.
 
