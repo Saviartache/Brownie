@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DodgePlanner,
+  type DodgeOrbit,
   type DodgePlan,
   type DodgeSettings,
   type DodgeSituation,
@@ -45,6 +46,7 @@ import {
   dodgeMarks,
   MAX_DRAWN_MARKS,
   type DodgeMark,
+  type HeldGround,
 } from '../src/features/dodge/DodgeMarks.js';
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
@@ -52,6 +54,7 @@ import { GroundCache, type GroundSource } from '../src/features/dodge/GroundCach
 import { HOP_SPEED_TILES_PER_SECOND, MAX_HOP_TILES } from '../src/features/dodge/Hop.js';
 import { walkCommand } from '../src/features/dodge/dodgeCommand.js';
 import { createDodgePlugin } from '../src/features/dodge/dodgePlugin.js';
+import { PICK_MARGIN_TILES, enemyUnderCursor } from '../src/features/dodge/engageRing.js';
 import {
   DODGE_PRESETS,
   DodgePresetId,
@@ -687,6 +690,7 @@ describe('the ground the player named', () => {
    */
   function hold(options: {
     readonly anchor?: Position;
+    readonly orbit?: DodgeOrbit;
     readonly start?: Partial<DodgeSituation>;
     readonly frames?: number;
     readonly shots?: readonly (DodgeShot & { firedAtMs: number; expiresAtMs: number })[];
@@ -694,7 +698,11 @@ describe('the ground the player named', () => {
     readonly settings?: DodgeSettings;
   }): { x: number; y: number; closest: number } {
     const planner = new DodgePlanner();
-    const base = situation({ ...options.start, anchor: options.anchor });
+    const base = situation({
+      ...options.start,
+      anchor: options.anchor,
+      orbit: options.orbit,
+    });
     const world = options.world ?? OPEN_GROUND;
     const settings = options.settings ?? SETTINGS;
     let x = base.x;
@@ -884,6 +892,74 @@ describe('the ground the player named', () => {
     const cleared = planner.plan(situation({ x: 13, y: 10 }), SETTINGS, OPEN_GROUND, []);
     expect(cleared.verdict).toBe('clear');
     expect(cleared.steer).toBe(false);
+  });
+
+  // ── And the same statement about something that moves ────────────────────
+  //
+  // A ring rather than a place: the player has said how far off the monster to
+  // stand, not which side of it to stand on. Everything above still applies —
+  // it is a pull, it goes round the fire, it is dropped when they steer — and
+  // the one thing that changes is that travelling *round* costs nothing.
+
+  /** How far off the ring, in tiles. Nought is standing exactly on it. */
+  const offRing = (at: { x: number; y: number }, orbit: DodgeOrbit): number =>
+    Math.abs(Math.hypot(at.x - orbit.x, at.y - orbit.y) - orbit.radiusTiles);
+
+  const RING: DodgeOrbit = { x: 10, y: 10, radiusTiles: 6 };
+
+  it('walks in to the ring when it is standing too far out', () => {
+    const at = hold({ orbit: RING, start: { x: 24, y: 10 } });
+
+    expect(offRing(at, RING)).toBeLessThan(HOME_TILES);
+  });
+
+  // The half a distance does that a place cannot: six tiles is as wrong from
+  // two as it is from twenty, so the pull works outwards as well.
+  it('backs out to the ring when it is standing inside it', () => {
+    const at = hold({ orbit: RING, start: { x: 12, y: 10 } });
+
+    expect(offRing(at, RING)).toBeLessThan(HOME_TILES);
+    expect(at.x, 'and outwards, not through the middle').toBeGreaterThan(12);
+  });
+
+  // **The whole reason it is a ring.** Anywhere on it is the ground being held,
+  // so a character standing on it with nothing in the air has arrived — there
+  // is no bearing it should also be walking round to.
+  it('says nothing at all while it is already on the ring', () => {
+    const at = hold({ orbit: RING, start: { x: 10, y: 4 }, frames: 40 });
+
+    expect(Math.hypot(at.x - 10, at.y - 4)).toBeLessThan(0.05);
+  });
+
+  // **The complaint this exists to answer.** A shot down the line between the
+  // player and the monster has two ways out: sideways, which keeps the fight,
+  // and backwards, which gives it up. Against a place they cost the same;
+  // against a ring only the second one is charged.
+  it('steps around the monster rather than away from it', () => {
+    // Standing due east of the ring's centre, with a shot coming straight down
+    // the line from it — so "away" is east and "round" is north or south.
+    const along = straightShot({ x: 12, y: 10 }, 0, 12, 0, 3000);
+    const at = hold({ orbit: RING, start: { x: 16, y: 10 }, shots: [along], frames: 24 });
+
+    expect(Math.abs(at.y - 10), 'went round').toBeGreaterThan(0.3);
+    expect(offRing(at, RING), 'and stayed at the distance it was asked for').toBeLessThan(1);
+  });
+
+  // Every rule the place is held on: walking is the more recent statement of
+  // where they want to be, so it wins over both kinds of held ground.
+  it('is dropped while the player is steering', () => {
+    const at = hold({ orbit: RING, start: { x: 24, y: 10, intentX: 1, intentY: 0 }, frames: 20 });
+
+    expect(at.x, 'carried on east, away from it').toBeGreaterThanOrEqual(24);
+  });
+
+  // A place they named outright is the more specific of the two, and the caller
+  // never sets both — but if one ever did, the place is what the planner holds.
+  it('holds a named place ahead of a ring, when handed both', () => {
+    const anchor = { x: 20, y: 10 };
+    const at = hold({ anchor, orbit: RING, start: { x: 24, y: 10 } });
+
+    expect(offBy(at, anchor)).toBeLessThan(HOME_TILES);
   });
 
   // Ground that hurts is not crossed for it either, by the same rule and for
@@ -1723,7 +1799,7 @@ describe('the picture of what it is thinking', () => {
       gameTimeMs: 0,
       engageTiles: 2.5,
       keepAwayTiles: 2.5 as number | undefined,
-      anchor: undefined as Position | undefined,
+      hold: undefined as HeldGround | undefined,
       bodies: new EnemyBodies(),
       blasts: [] as BlastView[],
       ...overrides,
@@ -2014,8 +2090,22 @@ describe('when the plugin decides', () => {
      */
     commands: () => [number, number][];
     plan: () => void;
-    /** Where the module says the chord is pointing, driven by hand. */
-    cursor: { target: Position | undefined };
+    /**
+     * Where the module says the chord is pointing and where the cursor is.
+     *
+     * Two readings rather than one, because they are two claims: the chord
+     * names a place only while it is held, and the point is measured whenever
+     * anything asks for it.
+     */
+    cursor: { target: Position | undefined; point: Position | undefined };
+    /** A Shift+left-click happening. The plugin only compares stamps. */
+    press: () => void;
+    /** What the plugin told the rest of the runtime it is fighting. */
+    engaged: { id: number | undefined };
+    /** What the world says is standing about, added to mid-test. */
+    enemies: EntityView[];
+    /** Everything the plugin said to the player, in order. */
+    notices: string[];
     /** Which way the module says the player is walking, driven by hand. */
     steer: { direction: Position | undefined };
     /** Whether the module says it is drawing the shot paths. */
@@ -2051,6 +2141,8 @@ describe('when the plugin decides', () => {
       damagingAt?: (x: number, y: number) => boolean;
       /** What the world says is standing about, for the spacing band. */
       enemies?: readonly EntityView[];
+      /** How far the weapon in hand reaches, for the engage ring. */
+      weaponReachTiles?: number;
       /** Which types the catalog calls scenery — a lever, a pot, a monument. */
       scenery?: (objectType: number) => boolean;
       /**
@@ -2077,7 +2169,14 @@ describe('when the plugin decides', () => {
     const moveBy = vi.fn();
     const hopBy = vi.fn();
     const showPicture = vi.fn();
-    const cursor: { target: Position | undefined } = { target: undefined };
+    const cursor: { target: Position | undefined; point: Position | undefined } = {
+      target: undefined,
+      point: undefined,
+    };
+    const pick = { atMs: 0 };
+    const engaged: { id: number | undefined } = { id: undefined };
+    const notices: string[] = [];
+    const enemies: EntityView[] = [...(map.enemies ?? [])];
     const steer: { direction: Position | undefined } = { direction: undefined };
     const view = { on: false };
     // Fired ten tiles west of the player and travelling east at eight tiles a
@@ -2087,14 +2186,25 @@ describe('when the plugin decides', () => {
     const clock = { ms: gameTimeMs };
     const session = {
       id: 's1',
-      self: { objectId: 1, x: 10, y: 10, alive: true, walkSpeedTilesPerSecond: 6 },
+      self: {
+        objectId: 1,
+        x: 10,
+        y: 10,
+        alive: true,
+        walkSpeedTilesPerSecond: 6,
+        weaponType: 100,
+      },
+      notify: (message: string) => {
+        notices.push(message);
+      },
       world: {
         get gameTimeMs(): number {
           return clock.ms;
         },
         projectiles: () => [shot],
         blasts: () => [],
-        enemies: () => map.enemies ?? [],
+        enemies: () => enemies,
+        entity: (objectId: number) => enemies.find((one) => one.objectId === objectId),
         canStandAt: map.canStandAt ?? ((): boolean => true),
         tileAt: (x: number, y: number) => ({
           type: 0,
@@ -2128,6 +2238,14 @@ describe('when the plugin decides', () => {
         isScenery: map.scenery ?? ((): boolean => false),
         hasShots: map.shots ?? ((): boolean => true),
         bodyTiles: () => undefined,
+        weaponReachTiles: () => map.weaponReachTiles,
+        cursorPoint: () => cursor.point,
+        pick: { at: () => pick.atMs },
+        engaged: {
+          set: (objectId) => {
+            engaged.id = objectId;
+          },
+        },
       }),
     );
     host.setEnabled('auto-dodge', true);
@@ -2154,6 +2272,12 @@ describe('when the plugin decides', () => {
       commands,
       showPicture,
       cursor,
+      press: () => {
+        pick.atMs += 1;
+      },
+      engaged,
+      enemies,
+      notices,
       steer,
       view,
       clock,
@@ -2329,6 +2453,213 @@ describe('when the plugin decides', () => {
     const anchor = marks.find((mark) => mark.kind === DodgeMarkKind.Anchor);
     expect(anchor?.x).toBe(10);
     expect(anchor?.y).toBe(10);
+  });
+
+  // ── Shift+left-click on a monster ──────────────────────────────────────────
+  //
+  // The same press auto-follow answers for allies. What it means here is a
+  // distance from something that moves: the ring is worked out afresh every plan
+  // from wherever the enemy has walked to, and handed to the planner as the
+  // ground to hold — so the dodge keeps every heading it had and loses only its
+  // licence to drift out of the fight.
+
+  /**
+   * A player, a harmless shot, a monster to fight and an eight-tile weapon.
+   *
+   * The weapon is an object rather than a number so that an empty one can say
+   * *the catalog has nothing to tell you about this item*, which is a different
+   * answer from any reach at all and is the one the ring cannot be built on.
+   */
+  function engaging(
+    enemies: readonly EntityView[],
+    weapon: { reachTiles?: number } = { reachTiles: 8 },
+  ): Harness {
+    return underFire(0, {
+      shot: ELSEWHERE as unknown as ProjectileView,
+      enemies,
+      ...(weapon.reachTiles === undefined ? {} : { weaponReachTiles: weapon.reachTiles }),
+    });
+  }
+
+  /** Says the player Shift+left-clicked at a place, and lets one plan run. */
+  function clickAt(h: Harness, point: Position | undefined): void {
+    h.cursor.point = point;
+    h.press();
+    h.plan();
+  }
+
+  /** Whether the last plans asked the character to go anywhere at all. */
+  function wentNowhere(h: Harness): boolean {
+    return h.commands().every(([offsetX, offsetY]) => Math.hypot(offsetX, offsetY) === 0);
+  }
+
+  it('closes on the enemy the click landed on', () => {
+    const monster = monsterAt(30, 10);
+    const h = engaging([monster]);
+
+    clickAt(h, { x: 30, y: 10 });
+
+    expect(h.notices).toContain('Closing on monster.');
+    const asked = h.commands();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[asked.length - 1]?.[0], 'walked east, towards it').toBeGreaterThan(0);
+  });
+
+  // **One statement, not one per feature.** Holding a distance from a monster
+  // and shooting at it are two halves of the same decision, so the pick is said
+  // out loud where auto-aim can read it. See `EngagedTarget`.
+  it('names the enemy to the rest of the runtime, and unnames it on a let-go', () => {
+    const h = engaging([monsterAt(30, 10)]);
+
+    clickAt(h, { x: 30, y: 10 });
+    expect(h.engaged.id).toBe(9);
+
+    clickAt(h, { x: 12, y: 20 });
+    expect(h.engaged.id).toBeUndefined();
+  });
+
+  it('unnames it when the map changes', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    clickAt(h, { x: 30, y: 10 });
+
+    h.mapChanged();
+
+    expect(h.engaged.id).toBeUndefined();
+  });
+
+  // **The ring holds from both sides**, which is what makes it a distance rather
+  // than a destination: six tiles is as wrong from four as it is from twenty.
+  it('backs out to the ring when it is standing inside it', () => {
+    const monster = monsterAt(10, 4);
+    const h = engaging([monster]);
+    h.host.settingsOf('auto-dodge')?.apply('engageRangePercent', 100);
+
+    clickAt(h, { x: 10, y: 4 });
+
+    const asked = h.commands();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[asked.length - 1]?.[1], 'walked south, off it').toBeGreaterThan(0);
+  });
+
+  it('says nothing about an enemy nobody picked', () => {
+    const h = engaging([monsterAt(30, 10)]);
+
+    h.plan();
+
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  // The one click that has to mean *stop*: it is the only let-go the player has
+  // under their own hand, and the same press hands the ally half its cancel.
+  it('lets go when the next click lands on bare ground', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    clickAt(h, { x: 30, y: 10 });
+
+    clickAt(h, { x: 12, y: 20 });
+    h.moveBy.mockClear();
+    h.hopBy.mockClear();
+    h.plan();
+
+    expect(h.notices).toContain('Target let go.');
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  it('lets go of an enemy that has died', () => {
+    const monster = monsterAt(30, 10);
+    const h = engaging([monster]);
+    clickAt(h, { x: 30, y: 10 });
+
+    monster.hp = 0;
+    h.moveBy.mockClear();
+    h.hopBy.mockClear();
+    h.plan();
+
+    expect(h.notices).toContain('Target gone.');
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  // An object id names something else in the next map, so a target carried
+  // across a portal is a ring held around a stranger.
+  it('lets go of the enemy when the map changes', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    clickAt(h, { x: 30, y: 10 });
+
+    h.mapChanged();
+    h.moveBy.mockClear();
+    h.hopBy.mockClear();
+    h.plan();
+
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  // **No weapon, no ring**, which is the same answer auto-aim gives to the same
+  // question: how far away a fight is fought is a property of the item in hand,
+  // and there is nothing to guess it with.
+  it('holds no ring while the catalog cannot say how far the weapon reaches', () => {
+    const h = engaging([monsterAt(30, 10)], {});
+
+    clickAt(h, { x: 30, y: 10 });
+
+    expect(h.notices).toContain('Closing on monster.');
+    expect(wentNowhere(h), 'picked, and nowhere to be put').toBe(true);
+  });
+
+  // The chord belongs to auto-follow as much as to this, so somebody who only
+  // wants the ally half has to be able to say so.
+  it('leaves the press alone while the chord is switched off', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    h.host.settingsOf('auto-dodge')?.apply('engageTargets', false);
+
+    clickAt(h, { x: 30, y: 10 });
+
+    expect(h.notices).toEqual([]);
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  it('lets go of the enemy when the chord is switched off mid-fight', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    clickAt(h, { x: 30, y: 10 });
+
+    h.host.settingsOf('auto-dodge')?.apply('engageTargets', false);
+    h.moveBy.mockClear();
+    h.hopBy.mockClear();
+    h.plan();
+
+    expect(wentNowhere(h)).toBe(true);
+  });
+
+  // **Drawn as the ring, around the monster.** What the planner is holding is
+  // the distance, so a dot on one bearing would be a picture of a rule that does
+  // not exist — and the circle is the shape somebody can actually read "stand
+  // anywhere on this" off.
+  it('draws the ring it is holding, around the enemy it is holding it from', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    h.view.on = true;
+
+    clickAt(h, { x: 30, y: 10 });
+
+    const marks = (h.showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    const ring = marks.find((mark) => mark.kind === DodgeMarkKind.Anchor);
+    expect(ring?.x).toBeCloseTo(30);
+    expect(ring?.y).toBeCloseTo(10);
+    // Three quarters of an eight-tile weapon.
+    expect(ring?.radiusTiles).toBeCloseTo(6);
+  });
+
+  // Both are the player saying where they want to be, and the place is the more
+  // specific of the two: somebody holding a doorway has already answered it.
+  it('holds the place the anchor key named ahead of the ring', () => {
+    const h = engaging([monsterAt(30, 10)]);
+    clickAt(h, { x: 30, y: 10 });
+    h.view.on = true;
+
+    anchorKey(h.host, true);
+    h.plan();
+
+    const marks = (h.showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    const held = marks.find((mark) => mark.kind === DodgeMarkKind.Anchor);
+    expect(held?.x).toBeCloseTo(10);
+    expect(held?.y).toBeCloseTo(10);
   });
 
   // The whole of "does not get in your way": a player already walking somewhere
@@ -2753,12 +3084,21 @@ describe('when the plugin decides', () => {
 
     // The anchor is on the panel because it is not a number at all: it is the
     // one thing here a person *does* mid-fight, and the same switch a key moves.
-    it('puts everything behind Advanced except the question, the anchor and the emergency', () => {
+    // The engage pair is there for the same reason and one more: a chord that
+    // quietly repurposes a press somebody already uses has to be visible, and a
+    // switch nobody can find is a switch nobody can turn off.
+    it('puts everything behind Advanced except the question, the two places and the emergency', () => {
       const everyday = settingsOf()
         .descriptors()
         .filter((setting) => setting.advanced !== true);
 
-      expect(everyday.map((setting) => setting.key)).toEqual(['preset', 'anchor', 'hopEnabled']);
+      expect(everyday.map((setting) => setting.key)).toEqual([
+        'preset',
+        'anchor',
+        'engageTargets',
+        'engageRangePercent',
+        'hopEnabled',
+      ]);
     });
 
     it('starts on a preset rather than on a mix nobody chose', () => {
@@ -2848,6 +3188,94 @@ function readTuning(settings: SettingsRegistry): DodgeTuning {
   };
 }
 
+/**
+ * The enemy a Shift+left-click names, and how far off it the fight is fought.
+ *
+ * Pure geometry: no session, no packets, and no planner. What the plugin does
+ * with the answers is `when the plugin decides`.
+ */
+describe('the enemy the player picked', () => {
+  const enemy = (over: Partial<EntityView>): EntityView => ({
+    objectId: 1,
+    objectType: 500,
+    name: 'monster',
+    x: 0,
+    y: 0,
+    hp: 100,
+    maxHp: 100,
+    isEnemy: true,
+    isPlayer: false,
+    conditions: 0,
+    guildName: '',
+    stat: () => undefined,
+    text: () => undefined,
+    ...over,
+  });
+
+  const ORDINARY = { halfTiles: (): number => 0.5, worthFighting: (): boolean => true };
+
+  it('takes the one the cursor is on', () => {
+    const near = enemy({ objectId: 7, x: 10, y: 10 });
+    const far = enemy({ objectId: 8, x: 20, y: 10 });
+
+    expect(enemyUnderCursor([near, far], { x: 10.2, y: 10 }, ORDINARY)).toBe(near);
+  });
+
+  // A pick is a click *on* something. Clicking the floor beside a monster has to
+  // mean nobody, or an empty click could never read as letting go.
+  it('takes nobody when the cursor is on bare ground', () => {
+    const one = enemy({ x: 10, y: 10 });
+
+    expect(enemyUnderCursor([one], { x: 14, y: 10 }, ORDINARY)).toBeUndefined();
+  });
+
+  // **The live case a fixed radius gets wrong.** Clicking the near edge of
+  // something four tiles across puts the cursor two tiles from its centre, which
+  // is further off than the minion standing beside it.
+  it('takes the boss the cursor is inside over the minion beside it', () => {
+    const boss = enemy({ objectId: 7, x: 10, y: 10 });
+    const minion = enemy({ objectId: 8, x: 13, y: 10 });
+    const halfTiles = (one: EntityView): number => (one.objectId === 7 ? 2 : 0.5);
+
+    const picked = enemyUnderCursor(
+      [boss, minion],
+      { x: 11.8, y: 10 },
+      {
+        halfTiles,
+        worthFighting: () => true,
+      },
+    );
+
+    expect(picked).toBe(boss);
+  });
+
+  it('passes over anything not worth fighting, however near the cursor', () => {
+    const lever = enemy({ objectId: 7, x: 10, y: 10 });
+    const monster = enemy({ objectId: 8, x: 10.4, y: 10 });
+
+    const picked = enemyUnderCursor(
+      [lever, monster],
+      { x: 10, y: 10 },
+      {
+        halfTiles: () => 0.5,
+        worthFighting: (one) => one.objectId !== 7,
+      },
+    );
+
+    expect(picked).toBe(monster);
+  });
+
+  it('reaches exactly as far past a body as the margin says', () => {
+    const one = enemy({ x: 10, y: 10 });
+    const rules = { halfTiles: (): number => 1, worthFighting: (): boolean => true };
+    const justInside = { x: 10 + 1 + PICK_MARGIN_TILES - 0.01, y: 10 };
+    const justOutside = { x: 10 + 1 + PICK_MARGIN_TILES + 0.01, y: 10 };
+
+    expect(enemyUnderCursor([one], justInside, rules)).toBe(one);
+    expect(enemyUnderCursor([one], justOutside, rules)).toBeUndefined();
+  });
+});
+
 describe('who takes the hit instead', () => {
   const player = (objectId: number, x: number, y: number): EntityView =>
     ({ objectId, x, y }) as EntityView;
@@ -2899,7 +3327,15 @@ describe('the hit redirect', () => {
     const session = {
       id: 's1',
       self: { objectId: 1, x: 10, y: 10 },
-      world: { gameTimeMs: 4321, players: () => [{ objectId: 1, x: 10, y: 10 }, ...others] },
+      world: {
+        gameTimeMs: 4321,
+        // What the answer is stamped with: the client's own clock, which is
+        // the one the server checks a `time` field against. `gameTimeMs` is
+        // milliseconds since our connect, and it is here to prove the two are
+        // not the same reading.
+        clientTimeMs: 98_765,
+        players: () => [{ objectId: 1, x: 10, y: 10 }, ...others],
+      },
       sendToServer,
     } as unknown as SessionView;
     return { session, sendToServer };
@@ -2928,6 +3364,10 @@ describe('the hit redirect', () => {
         isScenery: () => false,
         hasShots: () => true,
         bodyTiles: () => undefined,
+        weaponReachTiles: () => undefined,
+        cursorPoint: () => undefined,
+        pick: { at: () => 0 },
+        engaged: { set: () => undefined },
       }),
     );
     host.setEnabled('auto-dodge', true);
@@ -2957,7 +3397,7 @@ describe('the hit redirect', () => {
 
     expect(hit.verdict).toBe('drop');
     expect(sendToServer).toHaveBeenCalledWith('OTHERHIT', {
-      time: 4321,
+      time: 98_765,
       bulletId: 100,
       objectId: 5,
       targetId: 7,

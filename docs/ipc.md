@@ -653,7 +653,7 @@ carry integers only, for the same reason:
 | `cursor-at` | x·100, y·100                 | where the cursor is, in tiles               |
 | `unstick`   | `1` or `0`                   | the walk-to-cursor chord, down or up        |
 | `steer`     | `1`, x·1000, y·1000 — or `0` | which way the player is walking, as a world direction |
-| `pick`      | `1`                          | a Shift+left-click, to pick an ally to follow — down edge only |
+| `pick`      | `1`                          | a Shift+left-click, to pick an ally to follow or an enemy to close on — down edge only |
 
 **`pick` is a down edge and nothing else**, because the reader wants a single
 event: auto-follow resolves the ally against the last `cursor-at` — the player
@@ -661,6 +661,16 @@ within a tile of it, or a cancel when there is none — and needs nothing on the
 way up. Left-click is the game's own shoot button, so the press is read by
 polling and never swallowed — the shot still fires, and the Shift is what tells
 a deliberate pick from ordinary shooting.
+
+**Two features answer one press, and the runtime does not arbitrate between
+them.** Auto-follow takes the ally under the cursor; the dodge takes the *enemy*
+and holds a share of the weapon's own reach from it, so the same click names
+whichever kind of thing it landed on. The runtime therefore stamps the press
+rather than latching it — a flag consumed on read would let whichever feature
+ticked first swallow the click — and each compares the stamp against the last
+one it acted on. A press older than half a second is dropped by the runtime:
+that is roughly how long the `cursor-at` behind it stands, so an older one would
+be resolved against a point the player has since moved off.
 
 **`cursor-at` is a place, not a direction, and the module is the only thing that
 can work one out.** The cursor is a point on a window and the map is somewhere

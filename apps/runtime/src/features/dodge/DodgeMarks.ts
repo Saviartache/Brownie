@@ -40,7 +40,13 @@ export const DodgeMarkKind = {
   KeepAway: 3,
   /** An area effect on its way down, drawn where and as wide as it will land. */
   Blast: 4,
-  /** The place the player named, which the planner is holding them to. */
+  /**
+   * The place the planner is holding them to.
+   *
+   * Either the ground a key froze or the ring worked out from the enemy a click
+   * named — one circle, because they are one thing to the planner and one thing
+   * to look at: *this is where it is trying to put you*.
+   */
   Anchor: 5,
 } as const;
 
@@ -136,6 +142,18 @@ const NOT_WAITING = 1000;
  */
 export const MAX_DRAWN_MARKS = 64;
 
+/**
+ * Ground the planner is holding the character to.
+ *
+ * One shape for the two kinds, because they are one thing to look at: *this is
+ * where it is trying to put you*. A place a key named is a radius of nought and
+ * is drawn as the body standing on it; a distance from an enemy is the ring
+ * itself, drawn around the enemy.
+ */
+export interface HeldGround extends Position {
+  readonly radiusTiles: number;
+}
+
 /** What the picture is of. Every field is what the planner used this plan. */
 export interface PictureScene {
   readonly selfX: number;
@@ -146,8 +164,8 @@ export interface PictureScene {
   readonly engageTiles: number;
   /** The room kept around a monster, or `undefined` while they are unminded. */
   readonly keepAwayTiles: number | undefined;
-  /** The place the player is holding, or nothing while they hold none. */
-  readonly anchor: Position | undefined;
+  /** The ground the planner is holding them to, or nothing while it holds none. */
+  readonly hold: HeldGround | undefined;
   /** The bodies the planner collected, in the order it collected them. */
   readonly bodies: EnemyBodies;
   /** The area effects still on their way down. */
@@ -175,9 +193,19 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   // **Second, because a held place is the one mark that answers "why is it
   // walking me there".** Drawn as the character's own square would be at it:
   // what the planner is holding is a body standing on that ground, not a point.
-  const anchor = scene.anchor;
-  if (anchor !== undefined) {
-    marks.push(atPlace(DodgeMarkKind.Anchor, anchor.x, anchor.y, PLAYER_HALF_TILES));
+  const hold = scene.hold;
+  if (hold !== undefined) {
+    // **A ring is drawn as the ring**, centred on the thing being fought rather
+    // than on a point of it: what the planner is holding is the distance, and a
+    // dot on one bearing would be a picture of a rule that does not exist.
+    marks.push(
+      atPlace(
+        DodgeMarkKind.Anchor,
+        hold.x,
+        hold.y,
+        hold.radiusTiles > 0 ? hold.radiusTiles : PLAYER_HALF_TILES,
+      ),
+    );
   }
   const keepAwayTiles = scene.keepAwayTiles;
 

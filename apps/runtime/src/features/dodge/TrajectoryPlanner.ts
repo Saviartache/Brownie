@@ -154,6 +154,25 @@ export interface TrajectoryRequest {
   readonly anchorY: number;
   readonly anchorStepX: number;
   readonly anchorStepY: number;
+  /**
+   * A thing to keep a distance from, when the ground being held is a distance
+   * rather than a place. Read only while {@link orbitTiles} is above nought.
+   */
+  readonly orbitX: number;
+  readonly orbitY: number;
+  /**
+   * How far off it to be, in tiles. **Nought means the anchor is a place**, and
+   * everything below then works exactly as it did before there was a ring.
+   *
+   * **What it buys is sideways for free.** Against a fixed point, walking a
+   * tenth of a tile around a monster costs the same as walking a tenth of a tile
+   * away from it — so the planner had no reason to prefer the step that keeps
+   * the player in the fight. Against a ring, only the *radius* is charged: an
+   * arc costs nothing but the travel, and backing off costs the distance for
+   * every tick it lasts. That is the whole of "strafe rather than retreat", and
+   * it is one term rather than a rule.
+   */
+  readonly orbitTiles: number;
   /** How far one tick of walking covers, in tiles. */
   readonly stepTiles: number;
   /** How far one hop carries. Nought when the hop is not available at all. */
@@ -659,6 +678,10 @@ export class TrajectoryPlanner {
   ): void {
     const weights = request.weights;
     const step = this.#step;
+    // Hoisted: whether the ground being held is a ring is settled once per
+    // rollout rather than three times per tick of it.
+    const orbitTiles = request.orbitTiles;
+    const orbiting = orbitTiles > 0;
     let x = request.startX;
     let y = request.startY;
     let total = 0;
@@ -688,18 +711,42 @@ export class TrajectoryPlanner {
           wantX = x + carryX * reach;
           wantY = y + carryY * reach;
         } else {
-          const towardX =
+          // The gaps, when this candidate is riding them and they reach this
+          // far. Taken as the object rather than as a flag, so what follows asks
+          // it for a point instead of re-establishing that it exists.
+          const pocket =
             mode === Continuation.Ride &&
             request.pockets !== undefined &&
             next < request.pockets.slices
-              ? request.pockets.xOf(next)
-              : request.anchorX + request.anchorStepX * next;
-          const towardY =
-            mode === Continuation.Ride &&
-            request.pockets !== undefined &&
-            next < request.pockets.slices
-              ? request.pockets.yOf(next)
-              : request.anchorY + request.anchorStepY * next;
+              ? request.pockets
+              : undefined;
+          let towardX: number;
+          let towardY: number;
+          if (pocket !== undefined) {
+            towardX = pocket.xOf(next);
+            towardY = pocket.yOf(next);
+          } else if (orbiting) {
+            // **Home is straight in or straight out, never round.** The nearest
+            // point of the ring is the one on the bearing already held, so the
+            // way back never spends a tick travelling sideways to reach a place
+            // that is no better than where the arc already is.
+            const outX = x - request.orbitX;
+            const outY = y - request.orbitY;
+            const out = Math.hypot(outX, outY);
+            if (out > 1e-6) {
+              const onto = orbitTiles / out;
+              towardX = request.orbitX + outX * onto;
+              towardY = request.orbitY + outY * onto;
+            } else {
+              // Standing in the middle of it: every bearing is equally the way
+              // out, so naming one would be a made-up heading.
+              towardX = x;
+              towardY = y;
+            }
+          } else {
+            towardX = request.anchorX + request.anchorStepX * next;
+            towardY = request.anchorY + request.anchorStepY * next;
+          }
           const gapX = towardX - x;
           const gapY = towardY - y;
           const away = Math.hypot(gapX, gapY);
@@ -796,13 +843,24 @@ export class TrajectoryPlanner {
         }
       }
 
-      const anchorAtX = request.anchorX + request.anchorStepX * next;
-      const anchorAtY = request.anchorY + request.anchorStepY * next;
-      step.anchorTiles = Math.hypot(toX - anchorAtX, toY - anchorAtY);
-      step.fromAnchorTiles = Math.hypot(
-        x - (request.anchorX + request.anchorStepX * tick),
-        y - (request.anchorY + request.anchorStepY * tick),
-      );
+      if (orbiting) {
+        // How far off the *ring*, which is what leaves the arc free: two places
+        // the same distance from the monster are the same ground to this.
+        step.anchorTiles = Math.abs(
+          Math.hypot(toX - request.orbitX, toY - request.orbitY) - orbitTiles,
+        );
+        step.fromAnchorTiles = Math.abs(
+          Math.hypot(x - request.orbitX, y - request.orbitY) - orbitTiles,
+        );
+      } else {
+        const anchorAtX = request.anchorX + request.anchorStepX * next;
+        const anchorAtY = request.anchorY + request.anchorStepY * next;
+        step.anchorTiles = Math.hypot(toX - anchorAtX, toY - anchorAtY);
+        step.fromAnchorTiles = Math.hypot(
+          x - (request.anchorX + request.anchorStepX * tick),
+          y - (request.anchorY + request.anchorStepY * tick),
+        );
+      }
       step.travelTiles = travelTiles;
       step.clearanceTiles = room;
       step.hitDamage = hitDamage;
@@ -830,10 +888,12 @@ export class TrajectoryPlanner {
     }
 
     this.#rollCost = total;
-    this.#rollDriftTiles = Math.hypot(
-      x - (request.anchorX + request.anchorStepX * request.ticks),
-      y - (request.anchorY + request.anchorStepY * request.ticks),
-    );
+    this.#rollDriftTiles = orbiting
+      ? Math.abs(Math.hypot(x - request.orbitX, y - request.orbitY) - orbitTiles)
+      : Math.hypot(
+          x - (request.anchorX + request.anchorStepX * request.ticks),
+          y - (request.anchorY + request.anchorStepY * request.ticks),
+        );
   }
 
   /** The evenly spaced ring of directions, rebuilt only when the count changes. */

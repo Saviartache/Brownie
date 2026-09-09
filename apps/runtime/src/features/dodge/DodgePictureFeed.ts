@@ -14,11 +14,29 @@
  */
 
 import type { Position, SessionView } from '@brownie/plugin-api';
-import { dodgeMarks } from './DodgeMarks.js';
+import { dodgeMarks, type HeldGround } from './DodgeMarks.js';
+import type { DodgeOrbit } from './DodgePlanner.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeOutput, DodgeView } from './dodgeInputs.js';
 import type { DodgeScene } from './DodgeScene.js';
 import { shotPaths } from './ShotPaths.js';
+
+/**
+ * The two ways of saying where the player wants to be, as the one thing drawn.
+ *
+ * A place is a radius of nought — the body standing on that ground — and a ring
+ * is drawn around whatever it is a distance from. Which of the two is in force
+ * is settled by the plugin before either reaches here; both being set at once is
+ * not a state this has to render.
+ */
+function heldGround(
+  anchor: Position | undefined,
+  orbit: DodgeOrbit | undefined,
+): HeldGround | undefined {
+  if (anchor !== undefined) return { x: anchor.x, y: anchor.y, radiusTiles: 0 };
+  if (orbit !== undefined) return { x: orbit.x, y: orbit.y, radiusTiles: orbit.radiusTiles };
+  return undefined;
+}
 
 /**
  * How often the drawn picture is refreshed.
@@ -64,6 +82,7 @@ export class DodgePictureFeed {
     controls: DodgeControls,
     nowMs: number,
     anchor: Position | undefined,
+    orbit: DodgeOrbit | undefined,
   ): void {
     if (!this.#view.wanted()) {
       if (!this.#showing) return;
@@ -91,9 +110,12 @@ export class DodgePictureFeed {
         // "why did it move" gets answered without a log line.
         engageTiles: (walkSpeedOf(session, controls) * controls.tuning.reactWithinMs.get()) / 1000,
         keepAwayTiles: scene.keepAwayTiles,
-        // Where the player said to stand, which is the one thing on this
-        // picture they put there themselves.
-        anchor,
+        // Where the player said to be, which is the one thing on this picture
+        // they put there themselves — a place they named, or the distance they
+        // named from something. Built here rather than carried, because it is
+        // one small object twenty times a second and only while somebody is
+        // looking, against one per plan fifty times a second if it travelled.
+        hold: heldGround(anchor, orbit),
         bodies: scene.bodies,
         blasts: scene.blastsIn(world, controls),
       }),

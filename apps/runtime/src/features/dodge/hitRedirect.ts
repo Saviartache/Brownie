@@ -116,7 +116,14 @@ export function registerHitRedirect(context: PluginContext): void {
     // 0x7fff arrives negative here and would be refused by the encoder on the
     // way out — a shot the server would never see answered for.
     session.sendToServer('OTHERHIT', {
-      time: session.world.gameTimeMs,
+      // **The client's own clock, not the connection's.** This is the same
+      // field auto-ability and auto-drink stamp, and the server checks it the
+      // same way: a hit reported on a timeline the client has never been
+      // stamping is dropped without a word, and a dropped `OTHERHIT` is a shot
+      // that goes on to hit the player after all. `gameTimeMs` is milliseconds
+      // since *our* connect, which is a different quantity that happened to
+      // look plausible.
+      time: Math.trunc(session.world.clientTimeMs),
       bulletId: bulletId & BULLET_ID_MASK,
       objectId,
       targetId,

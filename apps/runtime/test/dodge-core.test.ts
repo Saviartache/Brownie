@@ -130,6 +130,11 @@ function planFor(overrides: Partial<TrajectoryRequest> = {}): TrajectoryRequest 
     anchorY: 10,
     anchorStepX: 0,
     anchorStepY: 0,
+    // A place rather than a ring, which is what nought here means and what
+    // every test below but the orbiting ones is about.
+    orbitX: 0,
+    orbitY: 0,
+    orbitTiles: 0,
     stepTiles: 0.6,
     hopTiles: 0.7,
     ticks: 8,

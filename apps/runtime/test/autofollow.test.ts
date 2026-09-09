@@ -92,7 +92,8 @@ describe('the auto-follow plugin', () => {
     stop: ReturnType<typeof vi.fn>;
     follow: { id: number | undefined };
     cursor: { point: Position | undefined };
-    pickPending: { value: boolean };
+    /** Says a Shift+left-click just happened. The plugin only compares stamps. */
+    press: () => void;
     steer: { direction: Position | undefined };
   }
 
@@ -102,7 +103,7 @@ describe('the auto-follow plugin', () => {
     const self = { objectId: 99, x: 0, y: 0, walkSpeedTilesPerSecond: 5, alive: true };
     const follow = { id: undefined as number | undefined };
     const cursor = { point: undefined as Position | undefined };
-    const pickPending = { value: false };
+    const pick = { atMs: 0 };
     const steer = { direction: undefined as Position | undefined };
 
     const session = {
@@ -130,13 +131,7 @@ describe('the auto-follow plugin', () => {
       },
       isBoss: (type) => type === BOSS_TYPE,
       cursorPoint: () => cursor.point,
-      pick: {
-        pending: () => {
-          const pressed = pickPending.value;
-          pickPending.value = false;
-          return pressed;
-        },
-      },
+      pick: { at: () => pick.atMs },
       steer: { direction: () => steer.direction },
     };
 
@@ -159,7 +154,9 @@ describe('the auto-follow plugin', () => {
       stop,
       follow,
       cursor,
-      pickPending,
+      press: () => {
+        pick.atMs += 1;
+      },
       steer,
     };
   }
@@ -211,7 +208,7 @@ describe('the auto-follow plugin', () => {
     h.players.push(player(22, { x: 0, y: 3 }, 'Picked'));
     h.follow.id = 11; // auto target
     h.cursor.point = { x: 0, y: 3 };
-    h.pickPending.value = true;
+    h.press();
     tick(h);
 
     expect(h.moveTo).toHaveBeenCalledWith(0, 1.5, 5, expect.any(Number));
@@ -226,7 +223,7 @@ describe('the auto-follow plugin', () => {
     h.moveTo.mockClear();
 
     h.cursor.point = { x: 0, y: 5 }; // empty ground, and the ally is far from it
-    h.pickPending.value = true;
+    h.press();
     tick(h);
 
     expect(h.follow.id).toBeUndefined();
@@ -239,13 +236,13 @@ describe('the auto-follow plugin', () => {
     setting(h, 'stopNearBoss', false);
     h.players.push(player(11, { x: 3, y: 0 }));
     h.cursor.point = { x: 3, y: 0 };
-    h.pickPending.value = true;
+    h.press();
     tick(h);
     expect(h.moveTo).toHaveBeenCalledWith(1.5, 0, 5, expect.any(Number));
     h.moveTo.mockClear();
 
     h.cursor.point = { x: 3, y: 4 };
-    h.pickPending.value = true;
+    h.press();
     tick(h);
 
     expect(h.moveTo).not.toHaveBeenCalled();

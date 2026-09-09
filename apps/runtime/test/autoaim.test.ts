@@ -611,6 +611,9 @@ describe('the auto-aim plugin', () => {
   /** A spawn anchor: `<Enemy />` and `<Invincible />`, like a quarter of them. */
   const SPAWNER_TYPE = 98;
 
+  /** `<Quest />`: the monster the game draws an arrow over. */
+  const BOSS_TYPE = 97;
+
   /**
    * Longer than the plugin's planning interval, so one call to
    * {@link vi.advanceTimersByTime} is exactly one decision.
@@ -633,6 +636,8 @@ describe('the auto-aim plugin', () => {
   ): {
     /** Where the module says the cursor is, or nothing. */
     setCursor: (point: Position | undefined) => void;
+    /** The enemy the dodge says the player picked, or nothing. */
+    setEngaged: (objectId: number | undefined) => void;
     host: PluginHost;
     aimAt: ReturnType<typeof aimSpy>;
     session: SessionView;
@@ -651,6 +656,7 @@ describe('the auto-aim plugin', () => {
     const enemies: EntityView[] = [];
     let gameTimeMs = 0;
     let cursorPoint: Position | undefined;
+    let engagedId: number | undefined;
     let selfX = 0;
     let selfY = 0;
 
@@ -675,6 +681,7 @@ describe('the auto-aim plugin', () => {
         },
         mapName: 'Dungeon',
         enemies: () => enemies,
+        entity: (objectId: number) => enemies.find((one) => one.objectId === objectId),
       },
       sendToServer: () => undefined,
       notify: () => undefined,
@@ -698,6 +705,8 @@ describe('the auto-aim plugin', () => {
         isObstacle: (objectType) => objectType === WALL_TYPE,
         isInvincible: (objectType) => objectType === SPAWNER_TYPE,
         cursorPoint: () => cursorPoint,
+        isBoss: (objectType) => objectType === BOSS_TYPE,
+        engagedTarget: () => engagedId,
       }),
     );
     host.setEnabled('auto-aim', true);
@@ -720,6 +729,9 @@ describe('the auto-aim plugin', () => {
       },
       setCursor: (point: Position | undefined) => {
         cursorPoint = point;
+      },
+      setEngaged: (objectId: number | undefined) => {
+        engagedId = objectId;
       },
       plan,
       tick: () => {
@@ -1145,6 +1157,119 @@ describe('the auto-aim plugin', () => {
     expect(aimAt).not.toHaveBeenCalled();
   });
 
+  // ── The enemy the player picked by hand ───────────────────────────────────
+  //
+  // A Shift+left-click on a monster is the dodge holding a distance from it; it
+  // is also the plainest answer there is to "which one should I be shooting at".
+  // Both halves of that come from one statement — see `dodge/EngagedTarget`.
+
+  describe('the enemy the player picked', () => {
+    it('stays on it even while something closer is standing on the player', () => {
+      const { aimAt, enemies, setEngaged, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 4, 0));
+      setEngaged(2);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(2);
+    });
+
+    // **The lock is not a commitment.** A boss in an invulnerable phase absorbs
+    // every shot aimed at it and takes none of the damage, so pouring the fight
+    // into one is exactly what the setting above exists to avoid.
+    it('falls back to the room while the picked one cannot be hurt', () => {
+      const { aimAt, enemies, setEngaged, plan } = harness();
+      enemies.push(
+        enemy(1, 1, 0),
+        enemy(2, 4, 0, { conditions: conditionBitLow(ConditionEffect.Invulnerable) }),
+      );
+      setEngaged(2);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+
+    it('falls back to the room while the picked one is out of weapon range', () => {
+      // Six tiles is the whole of this bow; nothing past it is a target at all.
+      const { aimAt, enemies, setEngaged, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 20, 0));
+      setEngaged(2);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+
+    it('falls back to the room once the picked one is dead', () => {
+      const { aimAt, enemies, setEngaged, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 4, 0, { hp: 0 }));
+      setEngaged(2);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+
+    it('ranks the room as usual once the lock is switched off', () => {
+      const { host, aimAt, enemies, setEngaged, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 4, 0));
+      setEngaged(2);
+      host.settingsOf('auto-aim')?.apply('lockEngaged', false);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+  });
+
+  // ── And the tier underneath it ────────────────────────────────────────────
+
+  describe('with a boss in the room', () => {
+    // **Preferred out of the box**, because a boss is what the room is about:
+    // shooting whatever minion wandered nearest while one is on the screen is
+    // the complaint this answers.
+    it('shoots the boss over the minion standing closer, with nothing set', () => {
+      const { aimAt, enemies, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 4, 0, { objectType: BOSS_TYPE }));
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(2);
+    });
+
+    it('goes back to ranking everything alike when told to', () => {
+      const { host, aimAt, enemies, plan } = harness();
+      enemies.push(enemy(1, 1, 0), enemy(2, 4, 0, { objectType: BOSS_TYPE }));
+      host.settingsOf('auto-aim')?.apply('bosses', BossRule.Any);
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+
+    // The tier is not a filter: a realm with nothing marked in it still gets an
+    // answer, which is what makes the default safe to ship.
+    it('still shoots the room when no boss is in range', () => {
+      const { aimAt, enemies, plan } = harness();
+      enemies.push(enemy(1, 1, 0));
+
+      plan();
+
+      expect(aimAt.mock.lastCall?.[0]?.subject.objectId).toBe(1);
+    });
+
+    it('shoots nothing but bosses when asked for nothing but bosses', () => {
+      const { host, aimAt, enemies, plan } = harness();
+      enemies.push(enemy(1, 1, 0));
+      host.settingsOf('auto-aim')?.apply('bosses', BossRule.Only);
+
+      plan();
+
+      expect(aimAt).not.toHaveBeenCalled();
+    });
+  });
+
   describe('following the cursor', () => {
     const pointing = (host: PluginHost): void => {
       host.settingsOf('auto-aim')?.apply('priority', TargetPriority.ClosestToCursor);
@@ -1172,15 +1297,18 @@ describe('the auto-aim plugin', () => {
       expect(aimAt).not.toHaveBeenCalled();
     });
 
-    it('says nothing about an enemy outside the radius', () => {
+    it('takes the nearest enemy to the cursor however far off it is pointing', () => {
       const { host, aimAt, enemies, setCursor, tick } = harness();
       pointing(host);
-      // The cursor three tiles north, the monster three tiles east: over four
-      // tiles apart, and the radius is four.
+      // The cursor three tiles north, the monsters east: nothing is anywhere
+      // near where the player is pointing, and one of them is still the
+      // nearest to it. There is no radius left to fall outside of.
       setCursor({ x: 0, y: 3 });
-      enemies.push(enemy(1, 3, 0));
+      enemies.push(enemy(1, 6, 0), enemy(2, 3, 0));
       tick();
-      expect(aimAt).not.toHaveBeenCalled();
+      expect(aimAt).toHaveBeenCalledTimes(1);
+      expect(aimAt.mock.calls[0]?.[0]?.x).toBeCloseTo(3);
+      expect(aimAt.mock.calls[0]?.[0]?.y).toBeCloseTo(0);
     });
 
     it('still leads a moving target it was pointed at', () => {
@@ -1231,6 +1359,8 @@ describe('the auto-aim plugin: letting shots through walls', () => {
         isObstacle: () => false,
         isInvincible: () => false,
         cursorPoint: () => undefined,
+        isBoss: () => false,
+        engagedTarget: () => undefined,
       }),
     );
     host.setEnabled('auto-aim', true);

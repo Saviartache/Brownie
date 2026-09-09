@@ -43,7 +43,11 @@
  *
  * **What is deliberately not here.** No goal-seeking, no orbit, no enemy lock,
  * no path drawing, nothing about weapon range, and no A* — global navigation is
- * somebody else's problem and always was. This decides one thing.
+ * somebody else's problem and always was. This decides one thing. Somewhere the
+ * player wants to be arrives as a place and is treated as a place, whether the
+ * caller worked it out from a key press or from a weapon's reach to a monster;
+ * that it may be somewhere different on the next call is not a fact this file
+ * has to hold, because nothing here remembers where it was told last.
  */
 
 import type { Position } from '@brownie/plugin-api';
@@ -211,12 +215,38 @@ export interface DodgeSituation {
    * stale, and no distance drops it — and it is held harder, because the whole
    * point of naming a place is that leaving it costs something.
    *
+   * **It may be somewhere else on the next call, and nothing here minds.** The
+   * caller restates it every plan, and nothing is remembered between calls.
+   *
    * **It is a pull and not a destination**, which is what makes it safe: every
    * other term of the cost model still applies, so the way home goes round the
    * fire rather than through it, stops short of a monster standing on the place,
    * and never crosses a pool to reach it.
    */
   readonly anchor?: Position | undefined;
+  /**
+   * A thing to keep a distance from, instead of a place to stand on.
+   *
+   * **The same statement as {@link anchor} about something that moves**, and it
+   * is held on exactly the same terms: restated every plan, dropped the moment
+   * the player steers, and never set at the same time as a place they named
+   * outright — the caller settles that, so nothing here has to.
+   *
+   * **What makes it a ring rather than the nearest point of one.** Handed over
+   * as a point, a step around the monster is charged exactly as much as a step
+   * away from it, so the planner had no reason to prefer the one that keeps the
+   * player in the fight. Handed over as a ring, only the distance is charged:
+   * the arc costs nothing but the walking, and giving ground costs every tick it
+   * lasts. That is "strafe rather than back off", as one term rather than a
+   * rule. See {@link TrajectoryRequest.orbitTiles}.
+   */
+  readonly orbit?: DodgeOrbit | undefined;
+}
+
+/** Something to keep a distance from, and how far off it to be. */
+export interface DodgeOrbit extends Position {
+  /** In tiles, from its centre. Nought or less is no ring at all. */
+  readonly radiusTiles: number;
 }
 
 export interface DodgePlan {
@@ -452,6 +482,13 @@ export class DodgePlanner {
   #anchorHeld = false;
   #anchorAtMs = 0;
   /**
+   * How far off {@link #anchorX} to stand, when the held ground is a ring.
+   *
+   * Nought for every other kind of anchor, which is what the whole of the cost
+   * model reads it as: a place. See {@link DodgeSituation.orbit}.
+   */
+  #orbitTiles = 0;
+  /**
    * Whether the last plan was holding a place the player named rather than one
    * a dodge remembered.
    *
@@ -483,6 +520,9 @@ export class DodgePlanner {
     anchorY: 0,
     anchorStepX: 0,
     anchorStepY: 0,
+    orbitX: 0,
+    orbitY: 0,
+    orbitTiles: 0,
     stepTiles: 0,
     hopTiles: 0,
     ticks: 1,
@@ -528,6 +568,7 @@ export class DodgePlanner {
     this.#hopReadyAtMs = 0;
     this.#anchorHeld = false;
     this.#anchorAtMs = 0;
+    this.#orbitTiles = 0;
     this.#pinned = false;
   }
 
@@ -741,6 +782,11 @@ export class DodgePlanner {
     request.anchorY = this.#anchorY;
     request.anchorStepX = situation.intentX * stepTiles;
     request.anchorStepY = situation.intentY * stepTiles;
+    // The same two numbers again when the ground is a ring, because then they
+    // are its centre rather than a place — see {@link TrajectoryRequest.orbitTiles}.
+    request.orbitX = this.#anchorX;
+    request.orbitY = this.#anchorY;
+    request.orbitTiles = this.#orbitTiles;
     request.stepTiles = stepTiles;
     // **The cooldown is expressed by withdrawing the action, not by a special
     // case.** A hop that is not available is simply not a candidate, so nothing
@@ -794,19 +840,37 @@ export class DodgePlanner {
     headings: number,
     ticks: number,
   ): number {
+    // Both are the player saying where they want to be, and both are dropped by
+    // the same thing: walking is a more recent statement than either was. Which
+    // of the two is in force is settled by the caller, so a plan is never handed
+    // a place and a ring at once.
     const pin = steering ? undefined : situation.anchor;
-    if ((pin !== undefined) !== this.#pinned) {
+    const ring = steering || pin !== undefined ? undefined : situation.orbit;
+    const named = pin !== undefined || (ring !== undefined && ring.radiusTiles > 0);
+    if (named !== this.#pinned) {
       // Changing hands. What the other kind of anchor was holding is not this
       // one's to hold — most of all when a pin is dropped, where the ground it
       // named must not become ground a dodge goes on returning to.
-      this.#pinned = pin !== undefined;
+      this.#pinned = named;
       this.#anchorHeld = false;
     }
     if (pin !== undefined) {
       this.#anchorX = pin.x;
       this.#anchorY = pin.y;
+      this.#orbitTiles = 0;
       this.#anchorAtMs = situation.nowMs;
       return Math.hypot(situation.x - pin.x, situation.y - pin.y);
+    }
+    if (ring !== undefined && ring.radiusTiles > 0) {
+      this.#anchorX = ring.x;
+      this.#anchorY = ring.y;
+      this.#orbitTiles = ring.radiusTiles;
+      this.#anchorAtMs = situation.nowMs;
+      // **How far off the ring, not how far from the thing.** Standing anywhere
+      // on it is standing on the held ground, which is what the whole of the
+      // cost model below then reads — and what keeps the probe quiet while the
+      // player is already at the right distance, wherever round it they are.
+      return Math.abs(Math.hypot(situation.x - ring.x, situation.y - ring.y) - ring.radiusTiles);
     }
 
     if (this.#anchorHeld) {
@@ -822,6 +886,7 @@ export class DodgePlanner {
 
     this.#anchorX = situation.x;
     this.#anchorY = situation.y;
+    this.#orbitTiles = 0;
     this.#anchorAtMs = situation.nowMs;
     return 0;
   }

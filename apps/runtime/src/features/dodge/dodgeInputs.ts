@@ -125,6 +125,25 @@ export interface SteerInput {
 }
 
 /**
+ * The Shift+left-click that names something under the cursor.
+ *
+ * **A stamp rather than an edge, because two features answer the same press.**
+ * Auto-follow takes the ally under the cursor and this takes the enemy, and a
+ * flag consumed on read would have whichever of them ticked first swallow the
+ * press. A moment each of them can compare against the last one it acted on
+ * lets both see it, and neither has to know the other exists.
+ *
+ * The composition root is what decides a press is still worth acting on: a
+ * feature that has not planned for half a second has missed it, and a click
+ * resolved against a cursor that has moved on since is not the click the player
+ * made.
+ */
+export interface PickInput {
+  /** When the last press worth acting on was, in wall-clock ms, or nought. */
+  at(): number;
+}
+
+/**
  * What the planner needs to know that is nowhere on the wire.
  *
  * Every one of these is a question about `objects.xml` or about another
@@ -190,6 +209,18 @@ export interface DodgeCatalog {
    * stands in and the distance behaves as it did before it could tell.
    */
   readonly bodyTiles: (objectType: number) => number | undefined;
+  /**
+   * How far this weapon's shots get before they expire, in tiles.
+   *
+   * **The one number the engage ring is built on, and there is no setting for
+   * it.** How far away a fight is fought is a property of the item in the
+   * player's hand: eight tiles for one wand is four for another, and a slider
+   * would be wrong for every weapon it was not set for. `undefined` for no
+   * weapon and for one `objects.xml` does not describe, in which case there is
+   * no ring to hold and the dodge behaves as it does with no target at all —
+   * the same answer auto-aim gives to the same question.
+   */
+  readonly weaponReachTiles: (objectType: number) => number | undefined;
 }
 
 export interface DodgeInputs extends DodgeCatalog {
@@ -203,4 +234,22 @@ export interface DodgeInputs extends DodgeCatalog {
   readonly cursorWalk: CursorWalkInput;
   readonly steer: SteerInput;
   readonly view: DodgeView;
+  /**
+   * Where the player is pointing, for resolving a pick.
+   *
+   * The same reading auto-aim ranks by and the same one auto-follow picks an
+   * ally with — asking for it is what keeps the module measuring it, so a
+   * feature that stops asking stops the cost. See `Application.#cursorPoint`.
+   */
+  readonly cursorPoint: () => Position | undefined;
+  readonly pick: PickInput;
+  /**
+   * Where the enemy the player picked is announced.
+   *
+   * **A write and never a read**, because this plugin is the one that decides:
+   * what auto-aim does with the answer is auto-aim's business, and a feature
+   * that had to ask what it itself said last would be two owners of one fact.
+   * See `EngagedTarget` for why the holder is the composition root's.
+   */
+  readonly engaged: { set(objectId: number | undefined): void };
 }

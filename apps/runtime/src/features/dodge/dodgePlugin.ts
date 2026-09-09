@@ -39,6 +39,21 @@
  * here, because it is a point on a map and belongs to neither the panel nor the
  * file the panel persists to. See {@link DodgeSituation.anchor}.
  *
+ * **And a click can name an enemy instead, which is the same thing about
+ * something that moves.** Shift+left-click an enemy and the ground being held
+ * stops being a place at all: it becomes a *distance* — a share of the weapon's
+ * own reach — handed to the planner as a ring around whatever was clicked. What
+ * that buys is the whole point. Against a place, a step around the monster costs
+ * exactly as much as a step away from it; against a ring, only the distance is
+ * charged, so the dodge goes sideways for free and pays for every tick it spends
+ * backing off. Sidestep rather than retreat, as one term rather than a rule.
+ *
+ * **And the pick is said out loud**, because holding a distance from a monster
+ * and shooting at it are two halves of one decision: auto-aim reads the same id
+ * and stays on it while it can be hurt. See `EngagedTarget`. Clicking an ally
+ * instead is auto-follow's business, and clicking bare ground lets go of both.
+ * See `engageRing` for which enemy a click lands on.
+ *
  * **It plans on its own clock, and again the moment a shot is announced.** What
  * makes a shot worth dodging is time passing, not a packet arriving: a bullet
  * 500 ms away is outside the window and the same bullet 300 ms later is inside
@@ -60,6 +75,7 @@ import {
   type Position,
   type SessionView,
 } from '@brownie/plugin-api';
+import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { AttackPatterns } from './AttackPatterns.js';
 import { DodgePlanner } from './DodgePlanner.js';
 import { DodgePictureFeed } from './DodgePictureFeed.js';
@@ -67,6 +83,8 @@ import { DodgeScene } from './DodgeScene.js';
 import { declareDodgeControls, planningSettings, walkSpeedOf } from './dodgeControls.js';
 import { walkCommand } from './dodgeCommand.js';
 import type { DodgeInputs } from './dodgeInputs.js';
+import { ENEMY_CONTACT_HALF_TILES } from './EnemyBodies.js';
+import { enemyUnderCursor, type EnemyPickRules } from './engageRing.js';
 import { registerHitRedirect } from './hitRedirect.js';
 
 /**
@@ -115,7 +133,9 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       id: 'auto-dodge',
       name: 'Auto Dodge',
       category: PluginCategory.Movement,
-      description: 'Keeps your own walking, and takes the wheel when it would cost you.',
+      description:
+        'Keeps your own walking, and takes the wheel when it would cost you. ' +
+        'Shift+left-click an enemy to dodge at your weapon range of it.',
       // **Two keys, because switching it on and telling it something are two
       // different presses.** The switch is set once for a run; the anchor is a
       // thing a person says a dozen times inside one fight — stand here, hold
@@ -173,6 +193,61 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
        */
       let anchor: Position | undefined;
 
+      /**
+       * The enemy the player picked to fight, or nothing while they have not.
+       *
+       * **An id rather than a place, unlike the anchor**, because the whole
+       * point of naming a monster is that it moves: where it *is* is a question
+       * for the world on the plan that acts, and the id is what stays meaningful
+       * while it walks. It dies with the map for the same reason a place does —
+       * the same number names something else in the next one.
+       */
+      let engagedId: number | undefined;
+
+      /**
+       * The press this feature has already answered.
+       *
+       * **Because the press is not this feature's to consume.** Auto-follow
+       * answers the same Shift+left-click by taking the ally under the cursor,
+       * and a flag cleared on read would have whichever of the two ticked first
+       * swallow it. Held in the plugin rather than per session: a press is a
+       * thing that happened to the window, and a session changing underneath it
+       * does not make it a new one.
+       */
+      let answeredPickAtMs = 0;
+
+      /**
+       * The enemy being fought and how far off it to stand, this plan.
+       *
+       * **Rewritten in place rather than built**, because a plan happens fifty
+       * times a second and this is one object per plan for two numbers and a
+       * radius that mostly have not moved. Read only while {@link orbiting}.
+       */
+      const orbit = { x: 0, y: 0, radiusTiles: 0 };
+      /**
+       * Whether that ring is in force this plan.
+       *
+       * Settled once, where the precedence between a place and a ring lives —
+       * so the planner and the picture never have to agree about it separately.
+       */
+      let orbiting = false;
+
+      /** What separates an enemy worth picking from the rest of the room. */
+      const shootable: ShootableRules = {
+        // A boss between phases is still the thing the player means to fight,
+        // and the ring is about where to stand rather than about damage.
+        skipUntouchable: false,
+        skipObstacles: true,
+        isObstacle: inputs.isObstacle,
+        isInvincible: inputs.isInvincible,
+      };
+      const pickRules: EnemyPickRules = {
+        halfTiles: (enemy) =>
+          (inputs.bodyTiles(enemy.objectType) ?? ENEMY_CONTACT_HALF_TILES * 2) / 2,
+        worthFighting: (enemy) =>
+          enemy.hp > 0 && !inputs.isScenery(enemy.objectType) && isShootable(enemy, shootable),
+      };
+
       // **A switch that outlived its place, which is what every restart leaves
       // behind.** The setting persists as every setting does and the place
       // cannot, so a run that starts armed is a panel claiming the character is
@@ -193,6 +268,19 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         controls.anchor.set(false);
       };
 
+      /**
+       * Lets go of the enemy, and of the station worked out from it.
+       *
+       * Called wherever an object id stops naming what it named — a new map, a
+       * new session — and when the feature stops. Nothing is announced: every
+       * caller is a moment where the fight itself has ended.
+       */
+      const dropEngage = (): void => {
+        engagedId = undefined;
+        orbiting = false;
+        inputs.engaged.set(undefined);
+      };
+
       // Cleared on both edges: switched off there is nothing to hold, and
       // switched on the place is wherever the character turns out to be on the
       // next plan. Pressing the key twice is therefore how a held place is
@@ -202,6 +290,10 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           anchor = undefined;
         }),
       );
+
+      // Switching the chord off has to let go of what it took, or the ring goes
+      // on being held by a feature the panel says is not running.
+      context.onDispose(controls.engage.enabled.onChange(dropEngage));
 
       /**
        * Whether the module is currently being told where to walk.
@@ -222,6 +314,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         picture.reset();
         commanding = false;
         dropAnchor();
+        dropEngage();
       });
       // A new connection is a new character in a new place; what the last one
       // had committed to says nothing about this one — and an object id from the
@@ -236,12 +329,14 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // pattern kept across the join is a spiral attributed to a stranger.
         patterns.clear();
         dropAnchor();
+        dropEngage();
       });
       // And a map changes underneath a session that never disconnected, which
       // is what a portal is. Coordinates do not survive one.
       context.packets.on('MAPINFO', () => {
         patterns.clear();
         dropAnchor();
+        dropEngage();
       });
 
       /**
@@ -293,6 +388,71 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         inputs.output.moveBy(0, 0, walkSpeedOf(session, controls), RELEASE_HOLD_MS);
       };
 
+      /**
+       * A Shift+left-click: take the enemy under the cursor, or let go.
+       *
+       * **A click on no enemy is the let-go**, and it is the same press that
+       * hands an ally to auto-follow — so clicking a teammate stops the chase
+       * here as well, which is what somebody switching from one to the other
+       * means. There is nothing to arbitrate: each feature answers the press for
+       * the kind of thing it knows about, and a press that names neither means
+       * both stand down.
+       */
+      const applyPick = (session: SessionView): void => {
+        const cursor = inputs.cursorPoint();
+        const picked =
+          cursor === undefined
+            ? undefined
+            : enemyUnderCursor(session.world.enemies(), cursor, pickRules);
+        if (picked !== undefined) {
+          engagedId = picked.objectId;
+          // **Said out loud to the rest of the runtime**, because holding a
+          // distance from something and shooting at it are the same decision
+          // made once: auto-aim reads this and stays on it while it can be hurt.
+          // See `EngagedTarget`.
+          inputs.engaged.set(picked.objectId);
+          session.notify(`Closing on ${picked.name || 'enemy'}.`, 'Auto Dodge');
+          return;
+        }
+        if (engagedId !== undefined) session.notify('Target let go.', 'Auto Dodge');
+        dropEngage();
+      };
+
+      /**
+       * Settles the ring this plan, and lets go of an enemy that is no longer
+       * one.
+       *
+       * **A place the hand named outranks an enemy it named.** Both are the
+       * player saying where they want to be, and the place is the more specific
+       * of the two: somebody holding a doorway while a boss walks about has
+       * already answered the question the ring would ask. Settled here rather
+       * than in the planner, so that the panel, the picture and the plan all
+       * read one answer.
+       *
+       * **A target that cannot be turned into a distance is not a lost target.**
+       * No weapon in hand, or one `objects.xml` has not been read for yet, means
+       * there is no ring to hold *this plan* — the enemy stays picked, because a
+       * weapon swap and a data file that finishes loading both end that.
+       */
+      const aimRing = (session: SessionView): void => {
+        orbiting = false;
+        if (anchor !== undefined || engagedId === undefined) return;
+
+        const target = session.world.entity(engagedId);
+        if (target === undefined || !target.isEnemy || target.hp <= 0) {
+          dropEngage();
+          session.notify('Target gone.', 'Auto Dodge');
+          return;
+        }
+
+        const reachTiles = inputs.weaponReachTiles(session.self.weaponType);
+        if (reachTiles === undefined || !(reachTiles > 0)) return;
+        orbit.x = target.x;
+        orbit.y = target.y;
+        orbit.radiusTiles = (reachTiles * controls.engage.rangePercent.get()) / 100;
+        orbiting = orbit.radiusTiles > 0;
+      };
+
       const dodge = (session: SessionView, nowMs: number): void => {
         // **Before the chord, so that a key pressed during one still names the
         // place it was pressed at.** The switch is armed and there is nowhere
@@ -301,6 +461,23 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         if (anchor === undefined && controls.anchor.get()) {
           anchor = { x: session.self.x, y: session.self.y };
         }
+
+        // **A stamp compared, not a flag consumed**, because auto-follow answers
+        // the same press for allies. Anything older than the last one answered
+        // has been dealt with, and the composition root has already dropped one
+        // too old to be about the cursor's current reading.
+        if (controls.engage.enabled.get()) {
+          const pressedAtMs = inputs.pick.at();
+          if (pressedAtMs !== 0 && pressedAtMs !== answeredPickAtMs) {
+            answeredPickAtMs = pressedAtMs;
+            applyPick(session);
+          }
+        }
+
+        // Worked out once a plan, because working it out is what lets go of an
+        // enemy that has died — and the picture below draws the same answer the
+        // planner was given rather than a second opinion.
+        aimRing(session);
 
         // Before anything else, including the check for shots: being stuck is
         // not a thing that happens only under fire, and a player asking to be
@@ -326,6 +503,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
             nowMs,
             onDamagingGround: scene.onDamagingGround,
             anchor,
+            orbit: orbiting ? orbit : undefined,
           },
           planning,
           scene.world,
@@ -407,7 +585,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const session = context.sessions.current();
         if (session === undefined) return;
         planNow(session);
-        picture.publish(session, scene, controls, Date.now(), anchor);
+        picture.publish(session, scene, controls, Date.now(), anchor, orbiting ? orbit : undefined);
       }, PLAN_INTERVAL_MS);
 
       // **The one packet that changes the answer by arriving**, and it changes it

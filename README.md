@@ -66,6 +66,12 @@ are led, so the shot goes where the enemy will be.
 
 - **Aim at** — the closest enemy, the weakest, the toughest, or the enemy
   nearest your cursor.
+- **Bosses** — always shoot the boss first (the default), treat them like any
+  other enemy, or shoot nothing else. A tier rather than an ordering: the choice
+  above still decides among equals.
+- **Stay on the enemy you `Shift` + left-clicked** — the pick auto-dodge holds a
+  distance from is the one the shots go to, for as long as it can be hurt and
+  reached. It falls back to the room the moment it cannot.
 - **Skip enemies that cannot be hurt** — invulnerable and untargetable things.
 - **Skip walls and scenery.**
 - **Lead the target by (%)** — 0 aims where it is, 100 aims where it will be.
@@ -151,6 +157,12 @@ information than any planner.
 - **Hold the ground you are standing on** — an anchor it keeps you near while
   it dodges, for holding a spot in a fight. Bindable to its own key, so it can
   be re-anchored mid-fight without opening the overlay.
+- **`Shift` + left-click an enemy to close on it**, and **hold it at (% of your
+  weapon range)** — the ground it holds you to becomes a *distance* from that
+  monster instead of a place, worked out from the reach of the weapon in your
+  hand. Going round it is then free and backing off is not, so the dodge
+  sidesteps and keeps the fight rather than giving ground. Auto-aim stays on the
+  same monster. Clicking bare ground lets go.
 - **Sidestep instantly when there is no time to walk** — a short emergency hop
   for shots that arrive faster than walking can answer.
 - *Advanced, grouped:* **Reaction** (how far ahead to look, planning step,
@@ -186,7 +198,7 @@ Bindable to a key.
 
 Walks after an ally, keeping the distance you asked for rather than piling onto
 them. `Shift` + left-click on an ally names them; clicking where nobody stands
-cancels. Auto-teleport can name one for you. It lets go on its own when the
+cancels. The same click on an *enemy* is auto-dodge's, not this one's. Auto-teleport can name one for you. It lets go on its own when the
 ally is gone from the map.
 
 - **Keep behind the ally by (tiles).**
@@ -399,7 +411,7 @@ Three chords are the module's own and are not bindable:
 |---|---|
 | `F1` | Open and close the overlay. |
 | `Ctrl` + middle mouse | Walk to the cursor — the one thing that outranks the dodge planner. |
-| `Shift` + left click | Name the ally auto-follow should follow. Clicking empty ground cancels. |
+| `Shift` + left click | Name what you are dealing with: an ally for auto-follow to walk after, an enemy for auto-dodge to hold its distance from and auto-aim to stay on. Clicking empty ground cancels both. |
 
 # Getting started
 

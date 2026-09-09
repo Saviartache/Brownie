@@ -43,6 +43,17 @@ export interface DodgeControls {
    * character, and it dies with the map. See `dodgePlugin`.
    */
   readonly anchor: SettingHandle<boolean>;
+  /**
+   * Closing on the enemy under the cursor, and how near to close.
+   *
+   * *Which* enemy is not here, for the reason the anchor's place is not: an
+   * object id names something else in the next map and nothing at all after a
+   * restart. See `dodgePlugin`.
+   */
+  readonly engage: {
+    readonly enabled: SettingHandle<boolean>;
+    readonly rangePercent: SettingHandle<number>;
+  };
   readonly tuning: DodgeTuningHandles;
   /** How long before a plan takes effect. A property of the link, not a style. */
   readonly leadMs: SettingHandle<number>;
@@ -143,6 +154,33 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     group: 'Anchor',
     label: 'Hold the ground you are standing on',
     default: false,
+  });
+
+  // **The same idea as the anchor, aimed at something that moves.** A place the
+  // player names is ground; an enemy they name is a *distance* from a thing that
+  // walks, and the planner is handed one exactly as it is handed the other — as
+  // somewhere to be, which every other term of the cost model then argues with.
+  // Its own switch because it repurposes a chord auto-follow already answers,
+  // and somebody who only wants the ally half must be able to say so.
+  const engageEnabled = settings.boolean('engageTargets', {
+    group: 'Engage',
+    label: 'Shift+left-click an enemy to close on it',
+    default: true,
+  });
+  // **A share of the weapon's own reach, which is why it is a percentage.** How
+  // far a fight is fought is a property of the item in hand — see
+  // `DodgeCatalog.weaponReachTiles` — and what a person actually wants to say is
+  // how much of it to give away for safety. Short of the full reach on purpose:
+  // standing at the exact edge is a shot that expires on arrival the moment
+  // either side moves.
+  const engageRangePercent = settings.range('engageRangePercent', {
+    group: 'Engage',
+    label: 'And hold it at (% of your weapon range)',
+    default: 75,
+    min: 20,
+    max: 100,
+    step: 5,
+    visibleWhen: { key: 'engageTargets', equals: [true] },
   });
 
   // ── What the preset writes ──────────────────────────────────────────────
@@ -512,6 +550,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   return {
     preset,
     anchor,
+    engage: { enabled: engageEnabled, rangePercent: engageRangePercent },
     tuning,
     leadMs,
     walls: { avoid: avoidWalls, clearanceTiles: wallClearanceTiles },

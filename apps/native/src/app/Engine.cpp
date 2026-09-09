@@ -57,7 +57,8 @@ constexpr std::string_view kCursorPointAction = "cursor-at";
 /// `Engine::ObserveCursorWalk`.
 constexpr std::string_view kCursorWalkAction = "unstick";
 
-/// The Shift+left-click that picks an ally to follow. See `Engine::ObservePick`.
+/// The Shift+left-click that names something under the cursor — an ally for
+/// auto-follow, an enemy for the dodge to close on. See `Engine::ObservePick`.
 constexpr std::string_view kPickAction = "pick";
 
 /// Which way the player is walking under their own power. See

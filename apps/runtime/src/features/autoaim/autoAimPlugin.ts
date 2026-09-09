@@ -52,7 +52,7 @@ import {
 } from '@brownie/plugin-api';
 import { solveIntercept } from './intercept.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
-import { TargetPriority, selectTarget } from './selectTarget.js';
+import { BossRule, TargetPriority, selectTarget } from './selectTarget.js';
 import { isShootable } from './shootable.js';
 
 /**
@@ -217,6 +217,24 @@ export interface AutoAimOptions {
    * expires.
    */
   readonly cursorPoint: () => Position | undefined;
+  /**
+   * Whether an object type is a quest boss.
+   *
+   * `<Quest />` in `objects.xml` — the monster the game draws an arrow over —
+   * and nothing on the wire carries it, which is why it is asked of the caller
+   * for the same reason {@link isObstacle} is. The same lookup auto-teleport and
+   * auto-follow are handed.
+   */
+  readonly isBoss: (objectType: number) => boolean;
+  /**
+   * The enemy the player picked to fight, or nothing while they have not.
+   *
+   * **Written by the dodge and read here**, which is the whole of the seam: a
+   * Shift+left-click on a monster says "this is the thing I am fighting", and
+   * that is one statement rather than one per feature. See `dodge/EngagedTarget`
+   * for why the holder belongs to neither of them.
+   */
+  readonly engagedTarget: () => number | undefined;
 }
 
 export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
@@ -240,17 +258,31 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
           [TargetPriority.ClosestToCursor, 'The enemy nearest your cursor'],
         ],
       });
-      // How far from the cursor an enemy may be and still count. Wide enough by
-      // default that pointing roughly at a monster picks it, narrow enough that
-      // a monster on the far side of the screen is not "at the cursor" for
-      // being the least bad thing in range.
-      const cursorRadius = context.settings.range('cursorRadiusTiles', {
-        label: 'Cursor radius (tiles)',
-        default: 4,
-        min: 0.5,
-        max: 15,
-        step: 0.5,
-        visibleWhen: { key: 'priority', equals: [TargetPriority.ClosestToCursor] },
+      // **A tier rather than an ordering, which is why it is not one more entry
+      // above.** "The closest" and "the toughest" are ways of ranking every
+      // enemy; "a boss first" says that a whole class of them outranks the rest
+      // and the ranking only decides among equals. Preferred by default: a boss
+      // is what the room is about, and shooting the minion that wandered nearest
+      // while one is on the screen is the complaint this answers.
+      const bosses = context.settings.select<BossRule>('bosses', {
+        label: 'Bosses',
+        default: BossRule.Prefer,
+        options: [
+          [BossRule.Prefer, 'Always shoot the boss first'],
+          [BossRule.Any, 'Treat like any other enemy'],
+          [BossRule.Only, 'Only shoot bosses'],
+        ],
+      });
+      // **The one thing on this panel that outranks every other question here.**
+      // A player who has picked a monster by hand has answered "which one" more
+      // directly than any ordering can, and the dodge is already holding a
+      // distance from it — so aiming somewhere else would be the two halves of
+      // one decision disagreeing. It falls back the moment the target cannot be
+      // hurt or cannot be reached, because a lock that keeps pouring shots into
+      // an invulnerable phase is a lock that costs a fight.
+      const lockEngaged = context.settings.boolean('lockEngaged', {
+        label: 'Stay on the enemy you Shift+left-clicked',
+        default: true,
       });
       const skipUntouchable = context.settings.boolean('skipUntouchable', {
         label: 'Skip enemies that cannot be hurt',
@@ -287,6 +319,14 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         label: 'Shots pass walls',
         default: false,
       });
+
+      /**
+       * Whether this one is a boss, in the shape the ranking wants it.
+       *
+       * Bound once rather than per aim: it closes over nothing that changes, and
+       * the aim is worked out forty times a second.
+       */
+      const isBossEnemy = (enemy: EntityView): boolean => options.isBoss(enemy.objectType);
 
       const tracker = new MotionTracker();
       /**
@@ -560,17 +600,50 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const cursor =
           chosen === TargetPriority.ClosestToCursor ? options.cursorPoint() : undefined;
 
+        /** Whether a shot from here could reach it at all. */
+        const inRange = (enemy: EntityView): boolean => {
+          const dx = enemy.x - shooterX;
+          const dy = enemy.y - shooterY;
+          return dx * dx + dy * dy <= range * range;
+        };
+
+        // **The enemy the player named by hand, ahead of every ordering here.**
+        // A Shift+left-click on a monster is a more direct answer to "which one"
+        // than any priority can be, and the dodge is already holding a distance
+        // from it — so aiming somewhere else would be two halves of one decision
+        // disagreeing. Every test the ranking would have applied is still
+        // applied: out of reach, unhurtable or with no solution, it is not a
+        // target, and the search below picks the next best thing rather than the
+        // shots going nowhere.
+        const engagedId = lockEngaged.get() ? options.engagedTarget() : undefined;
+        const engaged = engagedId === undefined ? undefined : world.entity(engagedId);
+        const locked =
+          engaged !== undefined &&
+          engaged.isEnemy &&
+          engaged.hp > 0 &&
+          inRange(engaged) &&
+          isShootable(engaged, rules) &&
+          aimPointFor(engaged) !== undefined
+            ? engaged
+            : undefined;
+
         // Ranked and reached from the same place the shot leaves from, so an
         // enemy the player has just run into reach of is one this can see.
-        const target = selectTarget(world.enemies(), {
-          shooterX,
-          shooterY,
-          maxRangeTiles: range,
-          priority: chosen,
-          cursorPoint: cursor,
-          cursorRadiusTiles: cursorRadius.get(),
-          accept: (enemy) => isShootable(enemy, rules) && aimPointFor(enemy) !== undefined,
-        });
+        const target =
+          locked ??
+          selectTarget(world.enemies(), {
+            shooterX,
+            shooterY,
+            maxRangeTiles: range,
+            priority: chosen,
+            // No bound around the cursor: whatever is in weapon range and can
+            // actually be hit is a target, and the nearest of those to the
+            // cursor is the one the player is pointing at. A radius here only
+            // ever meant aiming nowhere while an enemy stood on the screen.
+            cursorPoint: cursor,
+            bosses: { rule: bosses.get(), isBoss: isBossEnemy },
+            accept: (enemy) => isShootable(enemy, rules) && aimPointFor(enemy) !== undefined,
+          });
         if (target === undefined) return;
 
         const point = aimPointFor(target);

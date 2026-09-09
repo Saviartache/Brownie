@@ -13,6 +13,12 @@
  * manual pick takes precedence over the automatic one for as long as it holds,
  * so grabbing a specific ally is never overridden by the boss logic.
  *
+ * **The same press means something to the dodge**, which takes the enemy under
+ * the cursor and closes to weapon range of it. The two never negotiate: this one
+ * answers for allies and that one for enemies, so a click on a teammate starts a
+ * chase and ends an engagement, a click on a monster does the reverse, and a
+ * click on bare ground stops both. See `dodge/engageRing`.
+ *
  * **It lets go on its own.** Following stops when the ally is gone from the map
  * — dead, disconnected or left — and, so the character is not dragged past the
  * fight it was brought to, when the boss is within combat range. Both are the
@@ -48,8 +54,17 @@ export interface AutoFollowInputs {
   readonly isBoss: BossLookup;
   /** Where the player is pointing, for the manual pick. */
   readonly cursorPoint: () => Position | undefined;
-  /** Whether Shift+left-click was pressed since last asked — an edge, consumed on read. */
-  readonly pick: { pending(): boolean };
+  /**
+   * When the last Shift+left-click worth acting on was, in wall-clock ms.
+   *
+   * **A stamp rather than an edge, because the dodge answers the same press.**
+   * It takes the *enemy* under the cursor to close on — see `dodge/engageRing`
+   * — so a flag consumed on read would have whichever of the two ticked first
+   * swallow the click. Each compares the stamp against the last one it acted on
+   * instead, and neither has to know the other exists. Nought means there is
+   * nothing to act on.
+   */
+  readonly pick: { at(): number };
   /** Which way the player is walking under their own power, if at all. */
   readonly steer: { direction(): Position | undefined };
 }
@@ -101,6 +116,15 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         advanced: true,
         default: false,
       });
+
+      /**
+       * The press this feature has already answered.
+       *
+       * **In the plugin rather than in a session's state**, because a press is a
+       * thing that happened to the window: a map change replaces the state below
+       * and must not make a click from a moment ago look unanswered.
+       */
+      let answeredPickAtMs = 0;
 
       const bySession = new Map<string, FollowState>();
       const stateFor = (session: SessionView): FollowState => {
@@ -168,7 +192,11 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         // point exists the instant the player Shift-clicks. The lease is the
         // side effect; the value is only used on a pick.
         const cursor = inputs.cursorPoint();
-        if (inputs.pick.pending()) applyPick(session, state, cursor);
+        const pressedAtMs = inputs.pick.at();
+        if (pressedAtMs !== 0 && pressedAtMs !== answeredPickAtMs) {
+          answeredPickAtMs = pressedAtMs;
+          applyPick(session, state, cursor);
+        }
 
         if (!self.alive) {
           standDown(session, state);

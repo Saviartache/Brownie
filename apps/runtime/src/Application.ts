@@ -13,6 +13,7 @@ import { createAutoAimPlugin } from './features/autoaim/autoAimPlugin.js';
 import { createAutoDrinkPlugin } from './features/autodrink/autoDrinkPlugin.js';
 import { createAutoFollowPlugin } from './features/autofollow/autoFollowPlugin.js';
 import { FollowTarget } from './features/autofollow/FollowTarget.js';
+import { EngagedTarget } from './features/dodge/EngagedTarget.js';
 import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
 import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.js';
@@ -119,6 +120,19 @@ const CURSOR_TRACK_FEATURE = 'cursor.track';
  * forty times a second.
  */
 const CURSOR_CLAIM_INTERVAL_MS = 1000;
+
+/**
+ * How long a Shift+left-click is still worth answering.
+ *
+ * **The press only means anything with the cursor reading it was made against**,
+ * and that reading is itself only fresh for half a second — so a press older
+ * than this would be resolved against a point the player has since moved off,
+ * naming whatever happens to be under the mouse now. It also bounds the one
+ * thing a stamp can do that an edge could not: a feature that was disabled
+ * while the click happened comes back to a press it never saw, and this is what
+ * stops it acting on one.
+ */
+const PICK_FRESH_MS = 500;
 
 /**
  * Whether a target is spent by the first frame that steps towards it.
@@ -230,12 +244,26 @@ export class Application {
   /// belongs to neither — the same reason the cursor and the steer signal are.
   readonly #followTarget = new FollowTarget();
 
-  /// Whether the module has reported a Shift+left-click since it was last asked.
+  /// The enemy the dodge is fighting, written by it and read by auto-aim.
   ///
-  /// An edge, consumed on read: the module reports the press, auto-follow picks
-  /// the player under the cursor once, and the flag falls. A module that stops
-  /// talking simply never sets it again, so a stale press cannot linger.
-  #pickPending = false;
+  /// Owned here for the reason the follow target is: a seam between two features
+  /// belongs to neither of them. One Shift+left-click says "this is the thing I
+  /// am fighting", and holding a distance from it and shooting at it are the two
+  /// halves of that one statement.
+  readonly #engagedTarget = new EngagedTarget();
+
+  /// When the module last reported a Shift+left-click, on this side's clock.
+  ///
+  /// **A stamp rather than an edge, because two features answer one press.**
+  /// Auto-follow takes the ally under the cursor and the dodge takes the enemy,
+  /// and a flag consumed on read would have whichever of them ticked first
+  /// swallow the click. Each compares this against the last one it acted on, so
+  /// both see it and neither can hide it from the other — and neither needs an
+  /// arbiter, because each answers for a different kind of thing.
+  ///
+  /// Read through {@link Application.#pickAt}, which is what stops a press
+  /// nobody was running to answer being acted on much later.
+  #pickAtMs = 0;
 
   /// Whether the module is drawing the dodge picture, and therefore wants it.
   ///
@@ -365,7 +393,7 @@ export class Application {
       // Shift+left-click going down: pick the ally under the cursor to follow.
       // A press edge, latched here and consumed by auto-follow's next tick;
       // anything that is not "1" is not a press and is ignored.
-      else if (kind === 'pick' && first === '1') this.#pickPending = true;
+      else if (kind === 'pick' && first === '1') this.#pickAtMs = Date.now();
     });
 
     // A module that has just connected is holding nothing and pointing nowhere.
@@ -376,7 +404,7 @@ export class Application {
       this.#cursor.release();
       this.#steer.release();
       this.#dodgeView = false;
-      this.#pickPending = false;
+      this.#pickAtMs = 0;
     });
 
     // The proxy is the plugin host's session source and the host supplies the
@@ -531,6 +559,19 @@ export class Application {
    * was disabled and a runtime that died all end it the same way, without
    * anything having to notice which happened.
    */
+  /**
+   * The Shift+left-click both auto-follow and the dodge answer, while it is
+   * still about the cursor's current reading. Nought when there is none.
+   *
+   * Read rather than consumed, so both features see the same press — see
+   * {@link Application.#pickAtMs}.
+   */
+  #pickAt(): number {
+    const at = this.#pickAtMs;
+    if (at === 0 || Date.now() - at > PICK_FRESH_MS) return 0;
+    return at;
+  }
+
   #cursorPoint(): Position | undefined {
     const now = Date.now();
     if (now - this.#cursorClaimedAtMs >= CURSOR_CLAIM_INTERVAL_MS) {
@@ -702,6 +743,23 @@ export class Application {
         // actually is. The distance that keeps an ordinary one at arm's length
         // leaves the player standing well inside a boss four times the width.
         bodyTiles: (objectType) => this.#objects.bodyTiles(objectType),
+        // How far this weapon's shots get, which is the whole of what the engage
+        // ring is built on: a fight is fought at a distance the item in hand
+        // decides, and the same figure auto-aim ranks targets by. Resolved once
+        // per weapon rather than once per plan — see `EquippedWeapon`.
+        weaponReachTiles: (objectType) => this.#weapon.of(objectType)?.reachTiles,
+        // The two halves of a Shift+left-click on a monster: the press, and the
+        // place it was made at. Both come from the module, and the press is
+        // deliberately not consumed here — auto-follow answers the same one for
+        // allies. See {@link Application.#pickAt}.
+        cursorPoint: () => this.#cursorPoint(),
+        pick: { at: () => this.#pickAt() },
+        // And where the answer goes, so auto-aim stays on the same monster.
+        engaged: {
+          set: (objectId) => {
+            this.#engagedTarget.set(objectId);
+          },
+        },
       }),
     );
 
@@ -777,6 +835,12 @@ export class Application {
         // the game's own camera can answer — and asking is what has it asked at
         // all. See {@link Application.#cursorPoint}.
         cursorPoint: () => this.#cursorPoint(),
+        // The game's own answer to "is this the thing the room is about", which
+        // is the same lookup auto-teleport and auto-follow are handed.
+        isBoss: (objectType) => this.#objects.isQuest(objectType),
+        // And what the player said outright, which outranks every ordering the
+        // panel offers. Written by the dodge; see `EngagedTarget`.
+        engagedTarget: () => this.#engagedTarget.current(),
       }),
     );
 
@@ -965,13 +1029,7 @@ export class Application {
         },
         isBoss: (objectType) => this.#objects.isQuest(objectType),
         cursorPoint: () => this.#cursorPoint(),
-        pick: {
-          pending: () => {
-            const pressed = this.#pickPending;
-            this.#pickPending = false;
-            return pressed;
-          },
-        },
+        pick: { at: () => this.#pickAt() },
         steer: { direction: () => this.#steer.direction() },
       }),
     );

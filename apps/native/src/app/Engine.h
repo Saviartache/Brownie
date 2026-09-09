@@ -289,15 +289,20 @@ class Engine {
     /// one writer.
     void ObserveCursorWalk(bool held);
 
-    /// Passes on a Shift+left-click, so auto-follow can pick the ally under the
-    /// cursor. **Render thread**, once a frame, and only on the frame the chord
-    /// goes down.
+    /// Passes on a Shift+left-click, so the runtime can take whatever is under
+    /// the cursor. **Render thread**, once a frame, and only on the frame the
+    /// chord goes down.
+    ///
+    /// **One press, and this side does not care who answers it.** Auto-follow
+    /// takes the ally standing under the last cursor point and the dodge takes
+    /// the enemy, so which of them a press means is settled over there by what
+    /// the cursor landed on.
     ///
     /// **Only the down edge, and no release.** Unlike the walk chord, this is a
-    /// one-shot: the runtime takes the ally standing under the last cursor point
-    /// once — or cancels the follow when none is there — and needs nothing on
-    /// the way up. Left-click is the game's own shoot button, so the press is
-    /// read, never swallowed — the shot still fires, and where the cursor points
+    /// one-shot: the runtime resolves the press against the last cursor point
+    /// once — or lets go when nothing is there — and needs nothing on the way
+    /// up. Left-click is the game's own shoot button, so the press is read,
+    /// never swallowed — the shot still fires, and where the cursor points
     /// travels as its own record the same as ever.
     void ObservePick(bool held);
 
