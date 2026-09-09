@@ -24,6 +24,7 @@ constexpr ClassQuery kTransform{kUnityNamespace, "Transform", {}, kCoreAssemblie
 constexpr ClassQuery kComponent{kUnityNamespace, "Component", {}, kCoreAssemblies};
 constexpr ClassQuery kApplication{kUnityNamespace, "Application", {}, kCoreAssemblies};
 constexpr ClassQuery kCamera{kUnityNamespace, "Camera", {}, kCoreAssemblies};
+constexpr ClassQuery kTime{kUnityNamespace, "Time", {}, kCoreAssemblies};
 constexpr ClassQuery kGraphic{kUnityUiNamespace, "Graphic", {}, kUiAssemblies};
 constexpr ClassQuery kImage{kUnityUiNamespace, "Image", {}, kUiAssemblies};
 
@@ -88,11 +89,11 @@ constexpr std::string_view kComponentType = "UnityEngine.Component";
 constexpr std::string_view kCameraType = "UnityEngine.Camera";
 constexpr std::string_view kVector3Type = "UnityEngine.Vector3";
 constexpr std::string_view kIntType = "System.Int32";
+constexpr std::string_view kFloatType = "System.Single";
+constexpr std::string_view kDoubleType = "System.Double";
 constexpr std::string_view kVoidType = "System.Void";
 constexpr std::string_view kShaderEffectManagerType = "ShaderEffectManager";
 constexpr std::string_view kShaderLibraryType = "JCHBHNEGDFP";
-constexpr std::string_view kShaderPropertiesType =
-    "DecaGames.RotMG.Objects.Map.Data.ShaderProperties";
 constexpr std::string_view kShaderListType =
     "System.Collections.Generic.List<DecaGames.RotMG.Objects.Map.Data.ShaderProperties>";
 
@@ -122,6 +123,19 @@ constexpr std::array kMethods{
     // The no-argument overload. `Quit(int)` exits with a code and is not the
     // one the game's own quit path calls.
     KeyedMethodQuery{kApplicationQuit, MethodQuery{kApplication, "Quit", {}, kVoidType}},
+    // Five static properties with no arguments, so the return type is the whole
+    // of what tells one apart from an overload — which is the shape
+    // `Application.Quit` above already has. `realtimeSinceStartupAsDouble` is
+    // the newest of them and is simply absent on older engines, which is why
+    // the clock treats it as optional rather than as a failure.
+    KeyedMethodQuery{kTimeDelta, MethodQuery{kTime, "get_deltaTime", {}, kFloatType}},
+    KeyedMethodQuery{kTimeFixedDelta, MethodQuery{kTime, "get_fixedDeltaTime", {}, kFloatType}},
+    KeyedMethodQuery{kTimeUnscaledDelta,
+                     MethodQuery{kTime, "get_unscaledDeltaTime", {}, kFloatType}},
+    KeyedMethodQuery{kTimeRealtime,
+                     MethodQuery{kTime, "get_realtimeSinceStartup", {}, kFloatType}},
+    KeyedMethodQuery{kTimeRealtimeDouble,
+                     MethodQuery{kTime, "get_realtimeSinceStartupAsDouble", {}, kDoubleType}},
     KeyedMethodQuery{kCameraMain, MethodQuery{kCamera, "get_main", {}, kCameraType}},
     // **The one-argument overload**, which is the one that exists in every
     // build. The other takes a stereoscopic eye that this game has no use for,

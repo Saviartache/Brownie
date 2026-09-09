@@ -51,6 +51,22 @@ inline constexpr std::string_view kGraphicSetColor = "unity.Graphic.set_color";
 /// away while there is still a runtime to let go of. See `QuitWatch.h`.
 inline constexpr std::string_view kApplicationQuit = "unity.Application.Quit";
 
+/// `UnityEngine.Time`, as the five readings the whole client is measured by.
+///
+/// Detoured rather than called: the first three answer how long a frame was and
+/// are handed back multiplied, the last two answer what time it is and are
+/// handed back from a clock of ours. See `ClientClock.h`.
+///
+/// **The first three are one claim and the last two are another.** A build that
+/// gives up the deltas but not the absolute pair still runs fast; one that
+/// gives up a delta does not run at all, so the module refuses rather than
+/// scaling part of a frame.
+inline constexpr std::string_view kTimeDelta = "unity.Time.deltaTime";
+inline constexpr std::string_view kTimeFixedDelta = "unity.Time.fixedDeltaTime";
+inline constexpr std::string_view kTimeUnscaledDelta = "unity.Time.unscaledDeltaTime";
+inline constexpr std::string_view kTimeRealtime = "unity.Time.realtimeSinceStartup";
+inline constexpr std::string_view kTimeRealtimeDouble = "unity.Time.realtimeSinceStartupAsDouble";
+
 /// The camera, and the one thing worth asking it: where a point in the world
 /// lands on the screen. Inverted, that is where the mouse is pointing — which
 /// nothing else in either process knows. See `ScreenProjection.h`.
