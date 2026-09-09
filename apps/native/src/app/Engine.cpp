@@ -171,7 +171,6 @@ constexpr float kMaxCursorWalkTiles = 30.0F;
 /// runtime's `setFeature` arrives as — the wire carries JSON and this side reads
 /// the token. See `Engine::AcceptFeature`.
 constexpr std::string_view kPlayerNoclipFeature = "player.noclip";
-constexpr std::string_view kPlayerSpeedFeature = "player.speedMultiplier";
 constexpr std::string_view kCursorTrackFeature = "cursor.track";
 constexpr std::string_view kColliderFeature = "player.collider";
 constexpr std::string_view kColliderMultiplierFeature = "player.colliderMultiplier";
@@ -412,25 +411,15 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     // wait the lease out. A key this build has never heard of is neither — the
     // runtime replays every key it holds whenever the link comes up.
     //
-    // The rest are not claims but numbers the claims apply, and each is stored
-    // whether or not its claim is live: they arrive ahead of the claim, and only
-    // when they have changed, so a value refused for arriving first would leave
-    // the claim acting on the number before it.
+    // The fourth is not a claim but the number one of the claims applies, and
+    // it is stored whether or not that claim is live: it arrives ahead of the
+    // claim, and only when it has changed, so a value refused for arriving
+    // first would leave the claim acting on the number before it.
     const bool on = value == kFeatureOn;
     const std::uint64_t now = NowMs();
 
     if (key == kPlayerNoclipFeature) {
         walk_noclip_until_ms_.store(on ? now + kWalkNoclipLeaseMs : 0, std::memory_order_relaxed);
-        return;
-    }
-    if (key == kPlayerSpeedFeature) {
-        // Kept raw and clamped where it is used, unlike the collider's below:
-        // the range belongs to the clock that multiplies by it, and two copies
-        // of a bound are two places for it to drift.
-        const auto parsed = FeatureNumber(value);
-        if (parsed.has_value()) {
-            client_speed_.store(*parsed, std::memory_order_relaxed);
-        }
         return;
     }
     if (key == kCursorTrackFeature) {
@@ -741,13 +730,6 @@ void Engine::AdvanceSetup() {
     if (walk_noclip_wanted && !walk_speed_.installed()) {
         InstallWalkSpeedGate();
     }
-
-    // And the clock, on the same claim and failing apart from both: it wants
-    // Unity's own classes rather than the game's, so a build that gives up the
-    // predicates may not give up the clock and the other way round.
-    if (walk_noclip_wanted && !clock_.installed()) {
-        InstallClientClock();
-    }
 }
 
 void Engine::TryRedirect() {
@@ -838,30 +820,6 @@ void Engine::InstallWalkSpeedGate() {
     (void)walk_speed_.Install(binding_.MethodAddress(game::kTileSpeedHere).value_or(nullptr),
                               binding_.MethodAddress(game::kApplyTileSpeed).value_or(nullptr),
                               binding_.FieldOffset(game::kPlayerMoveMultiplier).value_or(0));
-}
-
-void Engine::InstallClientClock() {
-    // In the order `game::ClockReading` numbers them, which is the order the
-    // detours are baked in. A reading the build did not give up arrives here as
-    // null and the clock decides whether it can do without it.
-    const std::array<void*, game::ClientClock::kReadings> readings{
-        binding_.MethodAddress(game::kTimeDelta).value_or(nullptr),
-        binding_.MethodAddress(game::kTimeFixedDelta).value_or(nullptr),
-        binding_.MethodAddress(game::kTimeUnscaledDelta).value_or(nullptr),
-        binding_.MethodAddress(game::kTimeRealtime).value_or(nullptr),
-        binding_.MethodAddress(game::kTimeRealtimeDouble).value_or(nullptr),
-    };
-    if (!clock_.Install(readings).ok()) {
-        // Failure is the ordinary answer until IL2CPP has registered
-        // `UnityEngine.Time`, and the loop is the retry, so it stays out of the
-        // runtime's log.
-        return;
-    }
-    // Once, on the turn the detours go in. How many, because two of the five
-    // are allowed to be missing and a client running fast on three of them is
-    // not the same state as one running fast on all five.
-    Say("client clock: " + std::to_string(clock_.hooked()) + " of " +
-        std::to_string(game::ClientClock::kReadings) + " reading(s) detoured");
 }
 
 void Engine::InstallPlayerNoclip() {
@@ -1541,14 +1499,6 @@ void Engine::DrawFrame() {
     // feature failing to do what was asked of it.
     walk_speed_.SetEnabled(walk_wanted);
 
-    // And the same claim once more for the clock, which is the speed slider's
-    // whole mechanism. The number goes with the switch and on every frame, for
-    // the reason the switch does: one relaxed store is cheaper than remembering
-    // what was last sent, and it is what puts the slider back where the
-    // operator left it after a set of detours has gone out and come back.
-    clock_.SetEnabled(walk_wanted);
-    clock_.SetSpeed(client_speed_.load(std::memory_order_relaxed));
-
     model_.Refresh(frame_model_, frame_model_version_);
 
     // Accumulated rather than assigned: the counter is zeroed by reading it, and
@@ -1580,12 +1530,6 @@ void Engine::DrawFrame() {
     frame_model_.walk_gates = walk_noclip_.hooked();
     frame_model_.walk_speed_held = walk_speed_.installed();
     frame_model_.walk_speeds_denied = walk_speed_.denied();
-    frame_model_.clock_installed = clock_.installed();
-    // The number the detours are actually multiplying by, not the one off the
-    // wire: what the panel is for is what is in the game, and the two differ
-    // exactly when the switch is off or the runtime asked for something this
-    // build will not do.
-    frame_model_.clock_scale = clock_.scale();
     frame_model_.text_installed = patches_.text_installed();
     frame_model_.texts_shown = patches_.texts_shown();
     frame_model_.camera_bound = projection_.bound();

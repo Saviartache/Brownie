@@ -37,7 +37,6 @@
 #include "core/Colour.h"
 #include "core/Result.h"
 #include "core/Snapshot.h"
-#include "game/ClientClock.h"
 #include "game/PlayerNoclip.h"
 #include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
@@ -354,12 +353,6 @@ class Engine {
     /// both are in.
     void InstallPlayerNoclip();
 
-    /// Puts the client clock's detours in place: the speed slider's whole
-    /// mechanism, and nothing to do with the walkability predicates above. Only
-    /// called once the runtime has claimed noclip, for the reason
-    /// {@link walk_speed_multiplier_} gives.
-    void InstallClientClock();
-
     /// Puts the tile-speed gate in place: the other half of player noclip, and
     /// the half that keeps water from slowing the player it just let through a
     /// tree. Only called once the runtime has claimed noclip, for the reason
@@ -506,7 +499,6 @@ class Engine {
     game::ProjectileNoclip shot_noclip_;
     game::PlayerNoclip walk_noclip_;
     game::PlayerTileSpeed walk_speed_;
-    game::ClientClock clock_;
     game::QuitWatch quit_;
     /// Holds no hook — three method addresses and nothing else — so it needs no
     /// place in the ordering above.
@@ -525,23 +517,6 @@ class Engine {
     /// Written by the IPC thread, read by the game's on every frame and by the
     /// setup pass.
     std::atomic<std::uint64_t> walk_noclip_until_ms_{0};
-
-    /// How much faster than the wall the whole client runs while that claim is
-    /// live, as the runtime's slider last set it.
-    ///
-    /// **On noclip's claim rather than a claim of its own**, and that is the
-    /// safety argument as much as a wiring one: a client running fast is a
-    /// client whose account of where it walked the server would reject, and the
-    /// only reason it does not is that the runtime holds the socket for as long
-    /// as noclip is on. The two end together.
-    ///
-    /// **Not a lease itself**, for the reason the collider's multiplier is not:
-    /// it is the number a claim applies rather than a claim, it arrives ahead
-    /// of the claim and only when it has moved, and it is the clock's clamp —
-    /// not this one — that decides what a value off the wire may be.
-    ///
-    /// Written by the IPC thread, read by the game's on every frame.
-    std::atomic<float> client_speed_{game::kRealTime};
 
     /// Published on the IPC thread, read on the render thread.
     Snapshot<overlay::OverlayModel> model_;

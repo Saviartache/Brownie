@@ -165,14 +165,13 @@ void CopyStateAsJson(const OverlayModel& model) {
         "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsWritten\": %u,"
         " \"shotNoclipInstalled\": %s, \"shotsPassed\": %u, \"noclipWanted\": %s,"
         " \"walkGates\": %d, \"walksAllowed\": %u, \"walkSpeedHeld\": %s,"
-        " \"walkSpeedsDenied\": %u, \"clockInstalled\": %s, \"clockScale\": %.2f,"
+        " \"walkSpeedsDenied\": %u,"
         " \"textInstalled\": %s, \"textsShown\": %u",
         model.tint_installed ? "true" : "false", model.tinted,
         model.collision_bound ? "true" : "false", model.collisions_written,
         model.shot_noclip_installed ? "true" : "false", model.shots_passed,
         model.walk_noclip_wanted ? "true" : "false", static_cast<int>(model.walk_gates),
         model.walks_allowed, model.walk_speed_held ? "true" : "false", model.walk_speeds_denied,
-        model.clock_installed ? "true" : "false", static_cast<double>(model.clock_scale),
         model.text_installed ? "true" : "false", model.texts_shown);
     // Null rather than absent when nothing is scaling the circle: a report that
     // drops the key leaves a reader unable to tell "off" from "this build did
@@ -221,12 +220,11 @@ constexpr const char* kMarkerStatus = "Show where we are walking";
 constexpr const char* kAimMarkerStatus = "Show where we are aiming";
 constexpr const char* kDodgeMarkerStatus = "Show where we are dodging";
 constexpr const char* kNoclipStatus = "Player noclip";
-constexpr const char* kClockStatus = "Client clock";
 constexpr const char* kTextStatus = "Floating text";
 
 constexpr const char* kVisualisationStatuses[] = {
-    kTintStatus,      kColliderStatus,    kShotWallStatus, kMarkerStatus, kAimMarkerStatus,
-    kDodgeMarkerStatus, kNoclipStatus,    kClockStatus,    kTextStatus};
+    kTintStatus,        kColliderStatus, kShotWallStatus, kMarkerStatus,
+    kAimMarkerStatus,   kDodgeMarkerStatus, kNoclipStatus, kTextStatus};
 
 /// Where the value column starts: past the longest label there is, and a
 /// couple of characters clear of it.
@@ -390,17 +388,6 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
                    "%u answer(s) forced across %d gate(s), %u speed(s) denied",
                    model.walks_allowed, static_cast<int>(model.walk_gates),
                    model.walk_speeds_denied);
-    }
-
-    // Its own line rather than noclip's, because it is its own mechanism on its
-    // own detours: what noclip's line describes is the ground, and this is the
-    // clock every frame of the game is measured against.
-    if (!model.clock_installed) {
-        StatusLine(column, kClockStatus, "not resolved");
-    } else if (model.clock_scale <= 1.0F) {
-        StatusLine(column, kClockStatus, "real time");
-    } else {
-        StatusLine(column, kClockStatus, "running at %.2fx", static_cast<double>(model.clock_scale));
     }
 
     if (!model.text_installed) {
