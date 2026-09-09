@@ -929,7 +929,9 @@ describe('the auto-aim plugin', () => {
     setTime(200);
     moving.y = 0.6;
     tick();
-    const onTheTick = aimAt.mock.calls.at(-1)?.[0]?.y;
+    // Not-a-number when nothing was aimed at all, which fails the comparison
+    // below rather than quietly comparing against nothing.
+    const onTheTick = aimAt.mock.calls.at(-1)?.[0]?.y ?? Number.NaN;
 
     // Half a tick later, with nothing new said about it. The enemy has kept
     // walking, and an aim that has not moved is an aim behind it.
@@ -996,7 +998,7 @@ describe('the auto-aim plugin', () => {
       // Half a tick on, and nobody has said anything about anybody since.
       scene.setTime(300);
       scene.plan();
-      return scene.aimAt.mock.calls.at(-1)?.[0]?.y;
+      return scene.aimAt.mock.calls.at(-1)?.[0]?.y ?? Number.NaN;
     };
 
     // The runner has closed the best part of a tile the world model does not
@@ -1070,7 +1072,7 @@ describe('the auto-aim plugin', () => {
     setTime(200);
     walker.y = 0.8;
     tick();
-    const at100 = aimAt.mock.calls.at(-1)?.[0]?.y;
+    const at100 = aimAt.mock.calls.at(-1)?.[0]?.y ?? Number.NaN;
 
     host.settingsOf('auto-aim')?.apply('leadPercent', 150);
     plan();
