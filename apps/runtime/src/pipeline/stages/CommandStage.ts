@@ -6,6 +6,22 @@ import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketP
 const CHAT_PACKET = 'PLAYERTEXT';
 
 /**
+ * Trailing bytes that break a command line without being visible in the chat
+ * box the player typed it into.
+ *
+ * Seen on a live session as the server answering `Unrecognized command
+ * /nexus}` for a `/nexus` the player swears they typed — the closing brace was
+ * on the wire and in no text box. Which layer of the client put it there is
+ * not answerable from the proxy, but the proxy is the one place both symptoms
+ * cross: a trailing brace both hides the line from the plugin that should
+ * claim it and makes the server refuse the command the player meant. Stripping
+ * it here — a run of braces and whitespace at the end of a slash line only —
+ * fixes both at once, and rewrites the packet so what forwards is what was
+ * meant. Ordinary chat is left byte for byte as typed.
+ */
+const TRAILING_JUNK = /[}\s]+$/;
+
+/**
  * What marks a line as ours.
  *
  * The client sends whatever is typed, slash and all, and it is the *server*
@@ -53,7 +69,18 @@ export class CommandStage implements PipelineStage {
     const text = packet.string('text');
     if (text === undefined || !text.startsWith(PREFIX)) return;
 
-    const words = text.slice(PREFIX.length).trim().split(/\s+/);
+    // Cleaned before the name is read, so the junk cannot hide behind it: a
+    // plugin asked for `nexus}` would have to register it to ever match. And
+    // rewritten on the packet, not just locally, so a line nobody claims
+    // forwards as the command the player meant rather than the one the client
+    // mangled — the server refuses `/tell Bob hi}` exactly the way it refused
+    // `/nexus}`.
+    const cleaned = text.replace(TRAILING_JUNK, '');
+    if (cleaned !== text) packet.set('text', cleaned);
+    // Stripping can leave a bare prefix, which is not a command.
+    if (cleaned === PREFIX) return;
+
+    const words = cleaned.slice(PREFIX.length).trim().split(/\s+/);
     const name = words[0];
     // A bare prefix is not a command. Left alone rather than treated as one
     // with an empty name, which no plugin can have registered anyway.

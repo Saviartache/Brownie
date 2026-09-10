@@ -147,6 +147,46 @@ describe('CommandStage', () => {
     expect(packet.verdict).toBe(Verdict.Forward);
   });
 
+  // Seen on a live session as the server answering `Unrecognized command
+  // /nexus}` — the brace was on the wire, in no text box, and it both hid the
+  // line from the plugin that should have claimed it and made the server
+  // refuse the command. Stripping it is what fixes both.
+  it('claims a command whose line arrives with a trailing brace', () => {
+    const h = harness();
+    h.enable();
+    const packet = chat('/nexus}');
+
+    h.stage.handle(packet, FROM_CLIENT);
+
+    expect(h.calls).toEqual([[]]);
+    expect(packet.verdict).toBe(Verdict.Drop);
+  });
+
+  it('rewrites an unclaimed line before forwarding, so the game sees the command as typed', () => {
+    const h = harness();
+    h.enable();
+    const packet = chat('/tell someone hello}');
+
+    h.stage.handle(packet, FROM_CLIENT);
+
+    expect(h.calls).toEqual([]);
+    expect(packet.verdict).toBe(Verdict.Forward);
+    // Without the rewrite the server receives the mangled line and refuses it.
+    expect(packet.string('text')).toBe('/tell someone hello');
+    expect(packet.modified).toBe(true);
+  });
+
+  it('strips a run of braces and whitespace, and leaves the rest of the line alone', () => {
+    const h = harness();
+    h.enable();
+    const packet = chat('/nexus } } ');
+
+    h.stage.handle(packet, FROM_CLIENT);
+
+    expect(h.calls).toEqual([[]]);
+    expect(packet.verdict).toBe(Verdict.Drop);
+  });
+
   it('ignores a disabled plugin, so its command reaches the game', () => {
     const h = harness();
     const packet = chat('/nexus');
