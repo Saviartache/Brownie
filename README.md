@@ -46,12 +46,37 @@ trip later — and the shots already in the air are counted against that health
 too, so it can leave on a forecast instead of waiting for the damage. Once it
 has escaped, the hits the escape was racing are dropped, so they never apply.
 
+- **Escape to the Nexus (off = block damage only)** — the mode switch, on by
+  default. Off, nothing ever leaves the map: the damage kinds an
+  acknowledgement truly carries are still refused below the line, no forecast
+  is taken, and a death the server has already decided is shown rather than
+  hidden behind an escape that cannot come.
+- **Refuse damage that would leave below (% health)** — the hard floor, 30 by
+  default and adjustable like every number here, asked per hit against health
+  as it stands, so healing back above it lets damage through again on the very
+  next hit. What it can refuse is measured, not assumed — the table in the
+  hazard-guard plugin is the record:
+
+  - **Area effects are refused outright** (`AOEACK`): the server applies one
+    from the position the report names, so refusing the report refuses the
+    damage.
+  - **Damaging ground is refused only alongside an escape** (`GROUNDDAMAGE`):
+    the server drops the connection after roughly ten seconds of a character
+    standing in damaging ground saying nothing, so the windowed refusal
+    hazard-guard keeps is all there safely is without one.
+  - **Projectiles cannot be refused** (`PLAYERHIT`): the server simulates its
+    own bullets against the reported position, and declining the
+    acknowledgement was measured to stop nothing. The floor still charges
+    every one to its health tracking and leaves on a crossing when the escape
+    is on; with the escape off, a projectile below the line lands, and the
+    answers to it are the dodge and the Nexus.
 - **Escape at or below (% health)** — the ordinary threshold, 25 by default.
+  The stricter of it and the floor is the line that refuses and leaves.
 - **Leave before the hit lands** — act on shots in flight, not only on damage
   already taken.
 - **Escape on a forecast at or below (% health)** — a separate, much lower
   floor for predictions, 10 by default. A forecast is a guess; shots get dodged
-  and walked out of, so this is deliberately far below the threshold above.
+  and walked out of, so this is deliberately far below the floor above.
 - *Advanced:* how far ahead to count inbound shots (ms), and escaping on a shot
   spawned right on top of you (tiles).
 

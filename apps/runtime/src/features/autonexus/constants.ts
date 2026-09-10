@@ -30,6 +30,18 @@ export const MAX_VOLLEY_SHOTS = 128;
 /** Default escape threshold, as a percentage of maximum health. */
 export const DEFAULT_THRESHOLD_PERCENT = 25;
 
+/**
+ * Default hard health floor, as a percentage of maximum health.
+ *
+ * The line an incoming hit may not cross: any acknowledgement that would leave
+ * the player at or below it is refused outright — the server never hears it, so
+ * the damage is never applied — and the escape fires. Above the older threshold
+ * this is what makes the floor *hard*: hits between the two used to be
+ * forwarded, and a burst of them could land before the escape did. See
+ * `takeHit` in the plugin.
+ */
+export const DEFAULT_HEALTH_FLOOR_PERCENT = 30;
+
 /** Default radius within which a freshly spawned shot triggers an escape. */
 export const DEFAULT_CLOSE_SPAWN_TILES = 0.15;
 
@@ -95,6 +107,21 @@ export const AOE_MAX_AGE_MS = 1500;
 
 /** A tracked shot older than this is assumed gone, bounding the bullet log. */
 export const BULLET_MAX_AGE_MS = 12_000;
+
+/**
+ * How long a hit the escape outran is held before it is sent anyway.
+ *
+ * The reference implementation's `LethalHoldTime`, and the reason it exists
+ * belongs with our own measurements: refusing a `PLAYERHIT` outright was
+ * measured to stop nothing — the server simulates its own bullets — while
+ * leaving the shot unacknowledged costs the server a conversation it expected
+ * to have. So the acknowledgement is not refused but **delayed**: the escape
+ * goes first, the hit follows this long after, and by then the character it
+ * names has left the map. Long enough for the escape to cross the wire ahead
+ * of it; short enough to release while the map that shot is still the one the
+ * connection is on.
+ */
+export const LETHAL_ACK_RELEASE_MS = 100;
 
 /** Simulated health snaps to the server's value only past this much drift. */
 export const HP_DRIFT_SNAP = 30;

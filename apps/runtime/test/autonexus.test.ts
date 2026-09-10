@@ -292,6 +292,13 @@ describe('the auto-nexus plugin', () => {
     return host;
   }
 
+  /** The same plugin with the leaving switched off — the floor and nothing else. */
+  function loadBlockOnly(): PluginHost {
+    const host = loadEnabled();
+    host.settingsOf('auto-nexus')?.apply('escapeEnabled', false);
+    return host;
+  }
+
   const enemyShoot = (bulletId: number, ownerId: number, damage: number, numShots = 1) =>
     packetOf('ENEMYSHOOT', {
       bulletId,
@@ -307,6 +314,19 @@ describe('the auto-nexus plugin', () => {
   const playerHit = (bulletId: number, objectId: number) =>
     packetOf('PLAYERHIT', { bulletId, objectId });
 
+  /** An area effect centred on the player, whose acknowledgement will land. */
+  const aoeOn = (x: number, y: number, damage: number) =>
+    packetOf('AOE', {
+      position: { x, y },
+      radius: 3,
+      damage,
+      effect: 0,
+      effectDuration: 0,
+      originType: 0,
+      color: 0,
+      armorPierce: false,
+    });
+
   const newtick = () =>
     packetOf('NEWTICK', {
       tickId: 0,
@@ -314,6 +334,32 @@ describe('the auto-nexus plugin', () => {
       serverRealTimeMs: 0,
       serverLastRttMs: 0,
       statuses: [],
+    });
+
+  const mapInfo = () =>
+    packetOf('MAPINFO', {
+      width: 1,
+      height: 1,
+      name: 'Dungeon',
+      displayName: 'Dungeon',
+      realmName: '',
+      fp: 0,
+      background: 0,
+      difficulty: 0,
+      allowPlayerTeleport: false,
+      noSave: false,
+      showDisplays: false,
+      maxPlayers: 0,
+      gameOpenedTime: 0,
+      serverVersion: '',
+      viewDistance: 0,
+      bgColor: 0,
+      modifier: '',
+      unknownShort1: 0,
+      unknownBool: false,
+      unknownShort2: 0,
+      maxRealmScore: 0,
+      currentRealmScore: 0,
     });
 
   it('drops the acknowledgement and escapes when a tracked hit is fatal', () => {
@@ -326,8 +372,323 @@ describe('the auto-nexus plugin', () => {
     host.dispatchPacket(hit, session); // 800 - 700 = 100, at/below 25% (250)
 
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
-    // The server must never learn the hit landed.
+    // The server must never learn the hit landed — not now, at least: it is
+    // held behind the escape, which is the next test's business.
     expect(hit.verdict).toBe('drop');
+    expect(sendToServer).toHaveBeenCalledTimes(1);
+  });
+
+  // The reference implementation's `HoldLethalPlayerHit`: the server applies
+  // projectile damage with or without the acknowledgement, so the
+  // acknowledgement is not refused but **delayed** — the escape crosses the
+  // wire first, and the hit follows it onto a character that has left.
+  it('sends the held hit a moment behind the escape', async () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 800, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 700), session);
+    host.dispatchPacket(playerHit(100, 5), session);
+
+    expect(sendToServer).toHaveBeenCalledTimes(1); // only the escape, so far
+    // Long enough for the hold to release; the real timer is the host's.
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    expect(sendToServer).toHaveBeenCalledTimes(2);
+    expect(sendToServer).toHaveBeenLastCalledWith('PLAYERHIT', { bulletId: 100, objectId: 5 });
+  });
+
+  it('drops a held hit when the map changes before its release', async () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 800, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 700), session);
+    host.dispatchPacket(playerHit(100, 5), session);
+    expect(sendToServer).toHaveBeenCalledTimes(1);
+
+    // The escape lands as a new map before the hold runs out: the hit now
+    // belongs to the map just left, and sending it would answer for a shot
+    // in a place the connection is no longer in.
+    host.dispatchPacket(mapInfo(), session);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    expect(sendToServer).toHaveBeenCalledTimes(1); // the escape, and nothing since
+  });
+
+  // The floor (30%) sits above the threshold (25%), and the band between them
+  // is the whole fix: a hit leaving the player there used to be forwarded, and
+  // a burst of them could land on the server faster than the escape crossed
+  // the wire behind it.
+  it('refuses a hit that would cross the floor even though it clears the threshold', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 400, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 120), session);
+
+    const hit = playerHit(100, 5);
+    host.dispatchPacket(hit, session); // 400 - 120 = 280: above 250, below 300
+
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+    expect(hit.verdict).toBe('drop');
+  });
+
+  it('forwards what stays above the floor, and charges it to the tracker', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 1000, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 100), session);
+
+    const first = playerHit(100, 5);
+    host.dispatchPacket(first, session); // 1000 - 100 = 900, far above 300
+    expect(first.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+
+    // The forwarded hit is already charged: 900 tracked, so a second hit that
+    // only the tracker can see coming is refused on the floor.
+    host.dispatchPacket(enemyShoot(101, 5, 650), session);
+    const second = playerHit(101, 5);
+    host.dispatchPacket(second, session); // 900 - 650 = 250, below the floor
+    expect(second.verdict).toBe('drop');
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  it('refuses an area-effect acknowledgement that names nothing pending, when low', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 280, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    // No AOE was ever announced: the old code forwarded this blind, and the
+    // server applied damage nothing had modelled.
+    const ack = packetOf('AOEACK', { time: 0, position: { x: 10, y: 10 } });
+    host.dispatchPacket(ack, session);
+
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+    expect(ack.verdict).toBe('drop');
+  });
+
+  it('forwards an unmatched area-effect acknowledgement at high health', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 900, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    const ack = packetOf('AOEACK', { time: 0, position: { x: 10, y: 10 } });
+    host.dispatchPacket(ack, session);
+
+    expect(ack.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  // The live failure this guards against: an effect was announced somewhere
+  // across the room, the client answered it from where it stood, and health
+  // sat in the band where a flat unknown-damage estimate crossed the floor —
+  // so every heal, buff or dodged blast "escaped" at nearly half health. An
+  // effect seen and stood clear of is provably harmless: the server charges
+  // nothing for a position outside the radius.
+  it('stays for an area effect it saw and stood clear of, however low above the floor', () => {
+    const host = loadEnabled();
+    const { session, self, sendToServer } = fakeSession({ hp: 400, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    // Announced far from the player: (40, 40) against a player at (10, 10).
+    host.dispatchPacket(
+      packetOf('AOE', {
+        position: { x: 40, y: 40 },
+        radius: 2,
+        damage: 150,
+        effect: 0,
+        effectDuration: 0,
+        originType: 0,
+        color: 0,
+        armorPierce: false,
+      }),
+      session,
+    );
+
+    const ack = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(ack, session);
+
+    expect(ack.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('stays for a harmless effect that landed on the player', () => {
+    const host = loadEnabled();
+    const { session, self, sendToServer } = fakeSession({ hp: 350, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    // A heal or buff: zero damage, centred on the player.
+    host.dispatchPacket(
+      packetOf('AOE', {
+        position: { x: self.x, y: self.y },
+        radius: 3,
+        damage: 0,
+        effect: 0,
+        effectDuration: 0,
+        originType: 0,
+        color: 0,
+        armorPierce: false,
+      }),
+      session,
+    );
+
+    const ack = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(ack, session);
+
+    expect(ack.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('leaves on server-confirmed health inside the band between floor and threshold', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 280, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session); // the server says 280 (28%)
+
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  // ── Block-only: the escape switched off, the floor left to work alone ─────
+
+  // The measured truth this section rests on — the table in hazard-guard's
+  // header: the server simulates its own bullets, so a refused `PLAYERHIT`
+  // stops nothing. Below the line, block-only mode holds what *can* be held
+  // (area effects outright, ground to hazard-guard's window) and is honest
+  // about the rest.
+  it('forwards and charges a crossing projectile hit with the escape off', () => {
+    const host = loadBlockOnly();
+    const { session, sendToServer } = fakeSession({ hp: 400, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(enemyShoot(100, 5, 150), session);
+
+    // 400 - 150 = 250, below the floor — and forwarded anyway, because the
+    // server applies this damage with or without the acknowledgement.
+    // Pretending to refuse it would be a switch that says it protects while
+    // the health bar keeps dropping.
+    const hit = playerHit(100, 5);
+    host.dispatchPacket(hit, session);
+    expect(hit.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+
+    // Charged, not skipped: the tracker must not read high while the server
+    // deducts the damage for real. A second hit is judged against 250.
+    host.dispatchPacket(enemyShoot(101, 5, 100), session);
+    const second = playerHit(101, 5);
+    host.dispatchPacket(second, session);
+    expect(second.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('refuses a crossing area effect without leaving, and keeps refusing', () => {
+    const host = loadBlockOnly();
+    const { session, self, sendToServer } = fakeSession({ hp: 400, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(aoeOn(self.x, self.y, 150), session);
+
+    // 400 - 150 = 250, below the floor — and an area effect is carried by its
+    // acknowledgement, so refusing the report refuses the damage.
+    const first = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(first, session);
+    expect(first.verdict).toBe('drop');
+    expect(sendToServer).not.toHaveBeenCalled();
+
+    // The refusal is not one-shot the way an escape is: without the leaving
+    // there is no latch, so every later effect meets the same gate.
+    host.dispatchPacket(aoeOn(self.x, self.y, 100), session);
+    const second = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(second, session);
+    expect(second.verdict).toBe('drop');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('forwards ground admissions with the escape off, leaving the window to hazard-guard', () => {
+    const host = loadBlockOnly();
+    const { session, sendToServer } = fakeSession({ hp: 260, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+
+    // Already below the floor, standing in lava: refusing every admission got
+    // the connection dropped after roughly ten seconds, in a reconnect loop.
+    // The windowed refusal hazard-guard keeps is all there safely is, so this
+    // floor lets the admission through and charges it.
+    const tile = packetOf('GROUNDDAMAGE', { time: 0, position: { x: 10, y: 10 } });
+    host.dispatchPacket(tile, session);
+    expect(tile.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('refuses ground alongside an escape, which ends the standoff by leaving', () => {
+    const host = loadEnabled();
+    const { session, sendToServer } = fakeSession({ hp: 320, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+
+    const tile = packetOf('GROUNDDAMAGE', { time: 0, position: { x: 10, y: 10 } });
+    host.dispatchPacket(tile, session); // estimate crosses the floor
+    expect(tile.verdict).toBe('drop');
+    expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
+  });
+
+  // The other half of the deal: the floor is a line, not a latch. Healing
+  // lifts health back over it — the tracker adopts the server's value once
+  // the two have drifted apart — and the next effect passes again.
+  it('lets area damage through again once health is healed back above the floor', () => {
+    const host = loadBlockOnly();
+    const { session, self, sendToServer } = fakeSession({ hp: 400, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    host.dispatchPacket(aoeOn(self.x, self.y, 150), session);
+
+    const refused = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(refused, session); // 250, below the floor
+    expect(refused.verdict).toBe('drop');
+
+    // A potion, and enough ticks for the tracker to adopt it: the warm-up
+    // first, then the drift snap on the heal.
+    self.hp = 700;
+    for (let i = 0; i < HP_SYNC_WARMUP_TICKS + 2; i += 1) host.dispatchPacket(newtick(), session);
+
+    host.dispatchPacket(aoeOn(self.x, self.y, 100), session);
+    const passes = packetOf('AOEACK', { time: 0, position: { x: self.x, y: self.y } });
+    host.dispatchPacket(passes, session); // 700 - 100 = 600, well above
+    expect(passes.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('takes its line from the floor setting, whichever way it is moved', () => {
+    // The same area effect leaving 42% of a thousand: below a floor of 50,
+    // far above one of 10.
+    const raised = loadBlockOnly();
+    raised.settingsOf('auto-nexus')?.apply('floorPercent', 50);
+    const high = fakeSession({ hp: 500, maxHp: 1000 });
+    raised.dispatchPacket(newtick(), high.session);
+    raised.dispatchPacket(aoeOn(high.self.x, high.self.y, 80), high.session);
+    const refused = packetOf('AOEACK', { time: 0, position: { x: high.self.x, y: high.self.y } });
+    raised.dispatchPacket(refused, high.session); // 420 ≤ 500
+    expect(refused.verdict).toBe('drop');
+
+    const lowered = loadBlockOnly();
+    lowered.settingsOf('auto-nexus')?.apply('floorPercent', 10);
+    const low = fakeSession({ hp: 500, maxHp: 1000 });
+    lowered.dispatchPacket(newtick(), low.session);
+    lowered.dispatchPacket(aoeOn(low.self.x, low.self.y, 80), low.session);
+    const passes = packetOf('AOEACK', { time: 0, position: { x: low.self.x, y: low.self.y } });
+    lowered.dispatchPacket(passes, low.session); // 420 > the line of 250
+    expect(passes.verdict).toBe('forward');
+  });
+
+  it('does not leave on server-confirmed low health with the escape off', () => {
+    const host = loadBlockOnly();
+    const { session, sendToServer } = fakeSession({ hp: 280, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    expect(sendToServer).not.toHaveBeenCalled();
+  });
+
+  it('shows a lethal DAMAGE rather than hiding it for an escape that cannot come', () => {
+    const host = loadBlockOnly();
+    const { session, sendToServer } = fakeSession({ hp: 1000, maxHp: 1000 });
+    host.dispatchPacket(newtick(), session);
+    const dmg = packetOf('DAMAGE', {
+      targetId: 1,
+      effects: [],
+      damageAmount: 9999,
+      kill: true,
+      bulletId: 0,
+      objectId: 5,
+    });
+    host.dispatchPacket(dmg, session);
+    expect(dmg.verdict).toBe('forward');
+    expect(sendToServer).not.toHaveBeenCalled();
   });
 
   it('forwards a survivable hit and stays', () => {
@@ -396,18 +757,19 @@ describe('the auto-nexus plugin', () => {
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
   });
 
-  // A thousand maximum health puts the acknowledged floor at 250 (25%) and the
-  // forecast's own at 100 (10%), so every case below starts above the first and
-  // can only be decided by the second.
+  // A thousand maximum health puts the hard floor at 300 (30%) and the
+  // forecast's own at 100 (10%), so every case below starts above the first
+  // and can only be decided by the second.
   it('escapes on a forecast that is nearly lethal, before any acknowledgement', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
-      hp: 300,
+      hp: 350,
       maxHp: 1000,
       shots: [inFlight({ damage: 250 })],
     });
-    host.dispatchPacket(newtick(), session); // tracker adopts 300
-    // 300 - 250 = 50, at or below the forecast's floor, and nothing has hit yet.
+    host.dispatchPacket(newtick(), session); // tracker adopts 350
+    // 350 - 250 = 100, at or below the forecast's floor, and nothing has hit
+    // yet — and health itself is still above the hard floor.
     host.dispatchPacket(enemyShoot(100, 5, 250), session);
     expect(sendToServer).toHaveBeenCalledWith('ESCAPE', {});
   });
@@ -415,21 +777,21 @@ describe('the auto-nexus plugin', () => {
   it('stays for shots that will land but leave health well up', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
-      hp: 300,
+      hp: 350,
       maxHp: 1000,
       shots: [inFlight({ damage: 100 })],
     });
     host.dispatchPacket(newtick(), session);
-    // 300 - 100 = 200: under the acknowledged floor, nowhere near the forecast's.
-    // A hit that is going to land is not a reason to leave, only a reason to be
-    // counted when it does.
+    // 350 - 100 = 250: above the forecast's floor, and above the hard one
+    // besides. A hit that is going to land is not a reason to leave, only a
+    // reason to be counted when it does.
     host.dispatchPacket(enemyShoot(100, 5, 100), session);
     expect(sendToServer).not.toHaveBeenCalled();
   });
 
   it('refuses the acknowledgement of a hit it has already left', () => {
     const host = loadEnabled();
-    const { session } = fakeSession({ hp: 300, maxHp: 1000, shots: [inFlight({ damage: 250 })] });
+    const { session } = fakeSession({ hp: 350, maxHp: 1000, shots: [inFlight({ damage: 250 })] });
     host.dispatchPacket(newtick(), session);
     host.dispatchPacket(enemyShoot(100, 5, 250), session);
 
@@ -454,17 +816,17 @@ describe('the auto-nexus plugin', () => {
   it('does not count a shot the client has already answered for', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
-      hp: 500,
+      hp: 600,
       maxHp: 1000,
       shots: [inFlight({ damage: 200 })],
     });
     host.dispatchPacket(newtick(), session);
     host.dispatchPacket(enemyShoot(100, 5, 200), session);
-    host.dispatchPacket(playerHit(100, 5), session); // 500 → 300, and it is spent
+    host.dispatchPacket(playerHit(100, 5), session); // 600 → 400, and it is spent
 
     // A multi-hit shot stays in the world after it lands. Announcing another
     // one only serves to take the forecast again: counting the spent shot would
-    // charge its 200 twice and leave 100, at the forecast's floor.
+    // charge its 200 twice and leave 200, at the forecast's floor.
     host.dispatchPacket(enemyShoot(101, 5, 1), session);
     expect(sendToServer).not.toHaveBeenCalled();
   });
@@ -472,7 +834,7 @@ describe('the auto-nexus plugin', () => {
   it('stays for a shot that will miss, however low health is', () => {
     const host = loadEnabled();
     const { session, sendToServer } = fakeSession({
-      hp: 300,
+      hp: 350,
       maxHp: 1000,
       shots: [inFlight({ damage: 250, y: 13 })], // three tiles off the line
     });
@@ -518,33 +880,7 @@ describe('the auto-nexus plugin', () => {
     host.dispatchPacket(playerHit(1, 5), session);
     expect(sendToServer).toHaveBeenCalledTimes(1);
 
-    host.dispatchPacket(
-      packetOf('MAPINFO', {
-        width: 1,
-        height: 1,
-        name: 'Dungeon',
-        displayName: 'Dungeon',
-        realmName: '',
-        fp: 0,
-        background: 0,
-        difficulty: 0,
-        allowPlayerTeleport: false,
-        noSave: false,
-        showDisplays: false,
-        maxPlayers: 0,
-        gameOpenedTime: 0,
-        serverVersion: '',
-        viewDistance: 0,
-        bgColor: 0,
-        modifier: '',
-        unknownShort1: 0,
-        unknownBool: false,
-        unknownShort2: 0,
-        maxRealmScore: 0,
-        currentRealmScore: 0,
-      }),
-      session,
-    );
+    host.dispatchPacket(mapInfo(), session);
     host.dispatchPacket(newtick(), session); // re-adopts 200
     host.dispatchPacket(playerHit(2, 5), session); // fatal again
     expect(sendToServer).toHaveBeenCalledTimes(2);
