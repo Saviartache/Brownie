@@ -21,6 +21,7 @@ import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.j
 import { createAutoTeleportPlugin } from './features/autoteleport/autoTeleportPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
 import { createColliderPlugin } from './features/collider/colliderPlugin.js';
+import { createCursorWalkPlugin } from './features/cursorwalk/cursorWalkPlugin.js';
 import { createDodgePlugin } from './features/dodge/dodgePlugin.js';
 import { SteerTracker } from './features/dodge/SteerIntent.js';
 import { createGlowPlugin } from './features/glow/glowPlugin.js';
@@ -614,9 +615,6 @@ export class Application {
     this.#plugins.load(
       createDodgePlugin({
         output: {
-          moveTo: (x, y, speedTilesPerSecond, holdMs) => {
-            this.#native.publishRecord(moveRecord(x, y, speedTilesPerSecond, holdMs, FROM_MAP));
-          },
           // **The same record, measured from the character instead.** Where the
           // player is arrives here in `MOVE` and `NEWTICK`, five times a second,
           // while the character walks at the frame rate — so a heading turned
@@ -709,15 +707,22 @@ export class Application {
             this.#native.publishRecord('dodge-end');
           },
         },
-        // The manual override, which comes from the module whole: the chord is
-        // window input and the place it points at is measured against the
-        // game's own camera. Nothing on the wire knows either.
-        //
-        // **Both halves, and the point only while the chord is down.** The
-        // module keeps measuring the cursor for anything that asked — cursor
-        // aim does — and walking to it is what the *chord* means, not what
-        // pointing means.
-        cursorWalk: { target: () => (this.#cursorWalkHeld ? this.#cursor.point() : undefined) },
+        // The cursor-walk chord, which the dodge stands down for rather than
+        // answers: the walk itself is another plugin's now, so it works with
+        // the dodge switched off. **Both halves, and the point only while
+        // somebody is driving.** The module keeps measuring the cursor for
+        // anything that asked — cursor aim does — and walking to it is what the
+        // *chord* means, not what pointing means. The switch below is what
+        // keeps one writer of the module's move target: while the cursor-walk
+        // plugin is enabled the dodge stands aside and that plugin walks, and
+        // the moment it is not, this reports nothing and the planner plans —
+        // never both, and never neither answering a chord that is held.
+        cursorWalk: {
+          target: () =>
+            this.#cursorWalkHeld && this.#plugins.isEnabled('cursor-walk')
+              ? this.#cursor.point()
+              : undefined,
+        },
         // And the other half of "who is driving": what the player's own hands
         // are asking for, so the planner can leave it alone while it is safe
         // and cancel it when it is not.
@@ -764,6 +769,34 @@ export class Application {
             this.#engagedTarget.set(objectId);
           },
         },
+      }),
+    );
+
+    // The chord the dodge used to own, out on its own. It needs the same thing
+    // the dodge needed — a way to tell the module to walk, which is the
+    // composition root's to hand over and not something a file in `plugins/`
+    // can be given — and nothing else, which is exactly why it left: sharing
+    // the dodge's switch meant switching the planner off took the player's own
+    // walk-to-cursor with it. Loaded enabled, so the chord answers the first
+    // time it is ever held.
+    this.#plugins.load(
+      createCursorWalkPlugin({
+        output: {
+          moveTo: (x, y, speedTilesPerSecond, holdMs) => {
+            this.#native.publishRecord(moveRecord(x, y, speedTilesPerSecond, holdMs, FROM_MAP));
+          },
+          // An offset of nothing is the honest "stand still": the module walks
+          // towards a place it has by definition already reached. The shortest
+          // hold, because it is the end of a walk rather than one — the same
+          // record auto-follow and auto-portal end theirs with.
+          stop: (speedTilesPerSecond) => {
+            this.#native.publishRecord(moveRecord(0, 0, speedTilesPerSecond, 1, FROM_PLAYER));
+          },
+        },
+        // The chord whole: window input from the module, the place measured
+        // against the game's own camera. The dodge reads a gated copy of this
+        // (see above) so the two never publish a target in the same moment.
+        target: () => (this.#cursorWalkHeld ? this.#cursor.point() : undefined),
       }),
     );
 

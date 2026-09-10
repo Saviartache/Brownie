@@ -693,8 +693,9 @@ in between, because where the chord points is already travelling as `cursor-at`
 for a reader that wants it whether or not anybody is holding anything. **The
 module reports the chord and decides nothing.** Where to walk needs the
 character's speed, which is a stat off the wire, so the answer comes back as an
-ordinary `move` — the same target the dodge produces, from the same plugin, so
-that one writer owns the module's move target. The runtime clears the boolean
+ordinary `move` — issued by the cursor-walk plugin, which owns the chord
+outright; the dodge stands down while it is held, so one writer owns the
+module's move target. The runtime clears the boolean
 when the module connects: a chord held by a module that has since restarted is
 a key nobody is pressing.
 

@@ -173,15 +173,16 @@ A planner over every shot in flight, the walls, damaging ground, enemy bodies
 and thrown-bomb telegraphs. It stays quiet while your own walking is fine and
 speaks only when your course is genuinely about to cost you — then continuously
 until it does not have to. Holding `Ctrl` and the middle mouse button to walk
-somewhere outranks it entirely: a person pointing at a place has more
+somewhere outranks it entirely — that is Cursor Walk's to answer, and this one
+stands down for it: a person pointing at a place has more
 information than any planner.
 
 - **How hard it tries** — *Relaxed* (steps in late, leaves your walking alone),
   *Balanced* (what it was tuned at), *Cautious* (wide margins, takes the wheel
   sooner), or *Custom* for your own numbers.
 - **Hold the ground you are standing on** — an anchor it keeps you near while
-  it dodges, for holding a spot in a fight. Bindable to its own key, so it can
-  be re-anchored mid-fight without opening the overlay.
+  it dodges, for holding a spot in a fight. Bindable to its own key, so it can be
+  re-anchored mid-fight without opening the overlay.
 - **`Shift` + left-click an enemy to close on it**, and **hold it at (% of your
   weapon range)** — the ground it holds you to becomes a *distance* from that
   monster instead of a place, worked out from the reach of the weapon in your
@@ -195,9 +196,24 @@ information than any planner.
   **Safety** (caution, extra margin, distrust of far predictions, wall and
   hazard clearance, dodging bombs), **Spacing** (how far monsters are kept),
   **Control** (leaving your own walking alone, cancelling your input while it
-  drives, walking speed, `Ctrl`+middle-click walk-to-cursor).
+  drives, walking speed).
 
 Bindable to a key.
+
+### Cursor Walk
+
+Hold `Ctrl` and click the middle mouse button, and the character walks to
+wherever the cursor is pointing — the way out of being wedged against geometry,
+which no planner can fix for you because every course it could pick is stopped
+at the first step. It works with Auto Dodge on or off: the dodge stands down
+while the chord is held, so the two never fight over who is driving.
+
+- **Walk at (% of full speed)**, *Advanced:* **keep walking for (ms)** — the
+  same margins Auto Dodge walks with, kept a little under the full speed stat
+  because that figure is the limit the server accepts rather than a speed to
+  ask for.
+
+On until switched off.
 
 ### Player Noclip
 

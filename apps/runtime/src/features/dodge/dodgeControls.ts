@@ -79,7 +79,6 @@ export interface DodgeControls {
     readonly interceptControl: SettingHandle<boolean>;
     readonly speedPercent: SettingHandle<number>;
     readonly holdMs: SettingHandle<number>;
-    readonly cursorWalk: SettingHandle<boolean>;
   };
 }
 
@@ -523,12 +522,6 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     max: 500,
     step: 10,
   });
-  const cursorWalk = settings.boolean('cursorWalk', {
-    label: 'Ctrl+middle-click walks to your cursor',
-    group: 'Control',
-    advanced: true,
-    default: true,
-  });
 
   const tuning: DodgeTuningHandles = {
     horizonMs,
@@ -558,7 +551,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     avoidBlasts,
     spacing: { mindMonsters },
     hop: { enabled: hopEnabled, tiles: hopTiles, cooldownMs: hopCooldownMs },
-    driving: { respectIntent, interceptControl, speedPercent, holdMs, cursorWalk },
+    driving: { respectIntent, interceptControl, speedPercent, holdMs },
   };
 }
 

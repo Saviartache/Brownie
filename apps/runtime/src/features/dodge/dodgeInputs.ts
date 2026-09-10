@@ -14,27 +14,6 @@ import type { ShotPath } from './ShotPaths.js';
 
 export interface DodgeOutput {
   /**
-   * Asks the module to walk towards a place on the map.
-   *
-   * A *target*, not a jump. The module issues a small step towards it on every
-   * frame, capped at what the speed allows — commanding further than that does
-   * not make the player walk there, it makes them appear there and then be put
-   * back. `holdMs` is how long the target stands if nothing replaces it, which
-   * is what makes "no fresh plan" mean "stop".
-   *
-   * **The player's own walking is counted against that cap**, and by the module
-   * rather than here: the step lands on top of the game's own movement, so the
-   * two agreeing about a direction used to travel at both speeds at once. What
-   * they actually covered is the ground that appeared under them, which only
-   * the frame can see — see `PlayerControl::RoomToStep`. So a command is a
-   * ceiling on the *sum*, and asking for more of it than they have left over
-   * simply moves them less.
-   *
-   * **For the chord, and for nothing else.** A place is what the player names
-   * when they point at one; see {@link moveBy} for why a plan is not a place.
-   */
-  moveTo(x: number, y: number, speedTilesPerSecond: number, holdMs: number): void;
-  /**
    * Asks the module to walk *this way*, measured from wherever the player is.
    *
    * **The planner decides a heading, and the runtime is the wrong place to turn
@@ -226,10 +205,18 @@ export interface DodgeCatalog {
 export interface DodgeInputs extends DodgeCatalog {
   readonly output: DodgeOutput;
   /**
-   * The manual override, which lives in *this* plugin rather than beside it. Two
-   * plugins both publishing move targets would be two writers of one snapshot,
-   * arguing about it forty times a second; one tick deciding between the planner
-   * and the player is a decision instead of a race.
+   * The chord the cursor-walk plugin answers, read here only to stand down
+   * while it drives.
+   *
+   * **A yield and not a walk, since the walk moved out.** The Ctrl+middle-click
+   * chord has to work with the dodge switched off — it is the way out of being
+   * wedged against geometry, which is not a thing the planner causes nor one it
+   * can fix — so it lives in its own plugin with its own switch
+   * (`cursorWalkPlugin`). The composition root hands this side a target only
+   * while that plugin is driving, which keeps one writer of the module's move
+   * target: two plugins both publishing walk targets would be two writers
+   * arguing forty times a second, and this way there is a decision instead of a
+   * race.
    */
   readonly cursorWalk: CursorWalkInput;
   readonly steer: SteerInput;

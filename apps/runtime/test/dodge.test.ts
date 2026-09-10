@@ -2075,8 +2075,6 @@ describe('when the plugin decides', () => {
 
   interface Harness {
     host: PluginHost;
-    /** A place on the map, which only the chord names. */
-    moveTo: ReturnType<typeof vi.fn>;
     /** An offset from wherever the player is, which is what the planner says. */
     moveBy: ReturnType<typeof vi.fn>;
     /** The same, spent on one frame. See `Hop.ts`. */
@@ -2165,7 +2163,6 @@ describe('when the plugin decides', () => {
       store?: PluginPreferences;
     } = {},
   ): Harness {
-    const moveTo = vi.fn();
     const moveBy = vi.fn();
     const hopBy = vi.fn();
     const showPicture = vi.fn();
@@ -2229,7 +2226,7 @@ describe('when the plugin decides', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveTo, moveBy, hopBy, showPicture },
+        output: { moveBy, hopBy, showPicture },
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
         view: { wanted: () => view.on },
@@ -2266,7 +2263,6 @@ describe('when the plugin decides', () => {
 
     return {
       host,
-      moveTo,
       moveBy,
       hopBy,
       commands,
@@ -2709,47 +2705,29 @@ describe('when the plugin decides', () => {
     expect(offsetX * intent.x + offsetY * intent.y).toBeLessThan(0);
   });
 
-  it('walks to the cursor when the module names a place, planner or no planner', () => {
-    const { moveTo, plan, cursor } = underFire(0);
+  // **The chord is another plugin's walk now** — see `cursorWalkPlugin`, which
+  // is what makes it answer with the dodge switched off. What is being checked
+  // here is the standing aside: while the chord names a place, no command of
+  // any kind leaves this plugin, planner or no planner.
+  it('stands down entirely while the chord is pointing somewhere', () => {
+    const { commands, plan, cursor } = underFire(900);
     cursor.target = { x: 13, y: 7 };
 
     plan();
 
-    expect(moveTo).toHaveBeenCalledTimes(1);
-    const [x, y, speed] = moveTo.mock.calls[0] as [number, number, number, number];
-    expect(x).toBe(13);
-    expect(y).toBe(7);
-    expect(speed).toBeCloseTo(5.52);
+    expect(commands()).toEqual([]);
   });
 
-  it('takes the wheel from the planner while the chord is pointing somewhere', () => {
-    const { moveTo, plan, cursor } = underFire(900);
-    cursor.target = { x: 13, y: 7 };
-
-    plan();
-
-    expect(moveTo).toHaveBeenCalled();
-    expect(moveTo.mock.calls[0]?.slice(0, 2)).toEqual([13, 7]);
-  });
-
-  // The target the module holds keeps being walked towards until it lapses, so
-  // a planner that merely stops speaking leaves the player walking somewhere it
-  // has already stopped choosing — against whatever they are pressing.
-  it('hands the wheel back the moment it no longer needs it', () => {
-    const { moveTo, moveBy, plan, cursor } = underFire(0);
+  it('plans again the moment the chord lets go', () => {
+    const { commands, plan, cursor } = underFire(900);
     cursor.target = { x: 13, y: 7 };
     plan();
+    expect(commands()).toEqual([]);
+
     cursor.target = undefined;
-
     plan();
 
-    expect(moveTo).toHaveBeenCalledTimes(1);
-    expect(moveBy).toHaveBeenCalledTimes(1);
-    const [x, y, , hold] = moveBy.mock.calls[0] as [number, number, number, number];
-    // No distance at all, which the module has by definition already covered.
-    expect(x).toBe(0);
-    expect(y).toBe(0);
-    expect(hold).toBe(1);
+    expect(commands().length).toBeGreaterThan(0);
   });
 
   // **A hop is a different record, and it has to be.** An offset is resolved
@@ -2995,12 +2973,11 @@ describe('when the plugin decides', () => {
   });
 
   it('says nothing at all when it was not driving in the first place', () => {
-    const { moveTo, moveBy, plan } = underFire(0);
+    const { moveBy, plan } = underFire(0);
 
     plan();
     plan();
 
-    expect(moveTo).not.toHaveBeenCalled();
     expect(moveBy).not.toHaveBeenCalled();
   });
 
@@ -3351,7 +3328,6 @@ describe('the hit redirect', () => {
     host.load(
       createDodgePlugin({
         output: {
-          moveTo: () => undefined,
           moveBy: () => undefined,
           hopBy: () => undefined,
           showPicture: () => undefined,

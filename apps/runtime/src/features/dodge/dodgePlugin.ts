@@ -27,10 +27,13 @@
  *
  * **Three things decide who is driving, in this order.** The chord the player
  * holds to walk somewhere wins outright — a person pointing at a place has more
- * information than any planner. Otherwise the planner decides, and its first
- * answer is almost always "say nothing", which leaves the player's own walking
- * untouched. Only when their course is genuinely about to cost them does it
- * speak, and then it speaks continuously until it does not have to.
+ * information than any planner — and it is another plugin's now, so that it
+ * works with the dodge switched off; this feature only stands down while it is
+ * held (see `cursorWalkPlugin` and the wiring in `dodgeInputs`). Otherwise the
+ * planner decides, and its first answer is almost always "say nothing", which
+ * leaves the player's own walking untouched. Only when their course is
+ * genuinely about to cost them does it speak, and then it speaks continuously
+ * until it does not have to.
  *
  * **A key can name the ground it holds them to**, which is the one thing here
  * the planner cannot work out for itself: where a person means to be standing
@@ -340,39 +343,22 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
       });
 
       /**
-       * The player naming a place, which beats everything else here.
+       * Whether the player is walking somewhere by the chord, which beats
+       * everything else here.
        *
-       * **The way out of the one failure the planner cannot fix for itself.** A
-       * character wedged against geometry has no course that goes anywhere —
-       * every candidate is stopped at the first step — so the best plan
-       * available is to stand there, which is where they already are.
-       * Ctrl+middle-click names somewhere to go instead.
-       *
-       * **A place rather than an offset, and the only command here that is.**
-       * The cursor is measured against the game's own camera, so it already
-       * names a point on the map that owes nothing to this side's idea of where
-       * the player is. **And no wall test on this path, deliberately**: the
-       * check is the thing refusing to leave, and the game's own collision is
-       * still between the player and anything worse.
+       * **Another plugin's wheel now, and this is only the standing aside.**
+       * The chord used to be this feature's own override — the way out of the
+       * one failure the planner cannot fix for itself, a character wedged
+       * against geometry with no course that goes anywhere — and it left for
+       * exactly that reason: it is worth as much with the dodge switched off
+       * as on. See `cursorWalkPlugin`. The composition root reports a target
+       * here only while that plugin is driving, so there is still one writer
+       * of the module's move target and never a race for it.
        *
        * @returns whether the player is steering by hand, in which case the
        *   planner does not get a say this plan.
        */
-      const walkToCursor = (session: SessionView): boolean => {
-        if (!controls.driving.cursorWalk.get()) return false;
-        const target = inputs.cursorWalk.target();
-        if (target === undefined) return false;
-
-        planner.reset();
-        commanding = true;
-        inputs.output.moveTo(
-          target.x,
-          target.y,
-          walkSpeedOf(session, controls),
-          controls.driving.holdMs.get(),
-        );
-        return true;
-      };
+      const walkingToCursor = (): boolean => inputs.cursorWalk.target() !== undefined;
 
       /**
        * Gives the wheel back, now rather than when the last command lapses.
@@ -479,10 +465,15 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         // planner was given rather than a second opinion.
         aimRing(session);
 
-        // Before anything else, including the check for shots: being stuck is
-        // not a thing that happens only under fire, and a player asking to be
-        // moved is answered whether or not the planner had an opinion.
-        if (walkToCursor(session)) return;
+        // Before anything else, including the check for shots: a player asking
+        // to be moved is answered whether or not the planner had an opinion.
+        if (walkingToCursor()) {
+          // The wheel changed hands, so the fight the planner was tracking
+          // moved by a command it did not issue: start again from what is true
+          // now rather than from a future built before the player spoke.
+          planner.reset();
+          return;
+        }
 
         const planning = planningSettings(controls);
         scene.observe(session, controls, planning);
