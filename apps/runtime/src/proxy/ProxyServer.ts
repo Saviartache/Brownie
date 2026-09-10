@@ -24,6 +24,24 @@ export interface TargetResolver {
   resolve(packet: MutablePacket): ServerTarget | undefined;
 }
 
+/**
+ * What an embedded Flash client asks before it will open a game socket.
+ *
+ * A browser-embedded SWF (Ruffle and the like) opens one connection, sends
+ * `<policy-file-request/>\0`, and only dials the game on a second one if the
+ * first answered with a policy that allows it. The standalone projector asks
+ * nothing — but answering costs one branch, and the probe is the difference
+ * between "works everywhere" and "works in the projector only".
+ */
+const POLICY_PROBE = '<policy-file-request/>';
+
+/** What the probe is answered with: everything, to the proxy's own port. */
+const POLICY_REPLY = Buffer.from(
+  '<?xml version="1.0"?>' +
+    '<!DOCTYPE cross-domain-policy SYSTEM "http://www.adobe.com/xml/dtds/cross-domain-policy.dtd">' +
+    '<cross-domain-policy><allow-access-from domain="*" to-ports="*"/></cross-domain-policy>\0',
+);
+
 export interface ProxyServerOptions {
   readonly registry: PacketRegistry;
   readonly log: Logger;
@@ -194,14 +212,45 @@ export class ProxyServer implements SessionApi {
   // ── Internals ─────────────────────────────────────────────────────────────
 
   #accept(socket: Socket): void {
-    const id = `s${String(++this.#nextId)}`;
+    // The first bytes decide what kind of client this is. A game client's
+    // opening bytes are a frame length — big-endian, so a leading byte of `<`
+    // is not one — while an embedded Flash client's are the policy probe
+    // above. The probe is answered and the connection dropped without a
+    // session; anything else is put back on the socket (`unshift`, the
+    // standard idiom for sniffing a stream's first bytes) and the session
+    // reads it as though it had never been looked at.
+    //
+    // The probe is asked for in one write, but TCP does not promise one
+    // `data` event per write, so a partial prefix waits for the rest rather
+    // than being mistaken for either kind of client.
+    const probe = (seen: string): void => {
+      socket.once('data', (chunk: Buffer) => {
+        const text = seen + chunk.toString('latin1');
+        if (POLICY_PROBE.startsWith(text)) {
+          probe(text);
+          return;
+        }
+        if (text.startsWith(POLICY_PROBE)) {
+          this.#log.debug('answered a Flash socket policy probe');
+          socket.end(POLICY_REPLY);
+          return;
+        }
+        socket.unshift(chunk);
+        const id = `s${String(++this.#nextId)}`;
+        this.#openSession(id, new SocketTransport(socket));
+      });
+    };
+    probe('');
+  }
+
+  #openSession(id: string, transport: SocketTransport): void {
     const world = new WorldState(this.#options.worldOptions ?? {});
     let view: SessionView | undefined;
 
     const session = new ProxySession({
       id,
       registry: this.#options.registry,
-      clientTransport: new SocketTransport(socket),
+      clientTransport: transport,
       connector: this.#options.connector,
       resolveTarget: (packet) => this.#options.targets.resolve(packet),
       buildPipeline: (built) => {

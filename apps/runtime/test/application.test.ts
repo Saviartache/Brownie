@@ -137,7 +137,13 @@ describe('Application', () => {
     const socket = await connect(port);
     socket.write(PeerCiphers.gameClient().encipher(helloish('x')));
 
-    await until(() => app.proxy.sessionCount === 0, 'the session to be refused');
+    // The refusal closes the client socket — counting sessions alone would
+    // pass before one had opened, because a session begins when the client
+    // speaks.
+    await new Promise<void>((resolve, reject) => {
+      socket.once('close', resolve);
+      socket.once('error', reject);
+    });
     expect(connector.transports).toHaveLength(0);
   });
 
@@ -172,7 +178,8 @@ describe('Application', () => {
 
   it('closes live sessions when it stops', async () => {
     const { app, port } = await start();
-    await connect(port);
+    const socket = await connect(port);
+    socket.write(PeerCiphers.gameClient().encipher(helloish('staying')));
     await until(() => app.proxy.sessionCount === 1, 'the session');
 
     await app.stop();

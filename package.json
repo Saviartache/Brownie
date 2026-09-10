@@ -29,7 +29,8 @@
     "test:link": "node scripts/link-check.mjs",
     "profile:ipc": "node --expose-gc scripts/profile-ipc.mjs",
     "profile:link": "node scripts/profile-link.mjs",
-    "live": "node scripts/live-run.mjs"
+    "live": "node scripts/live-run.mjs",
+    "flash": "node scripts/flash-run.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

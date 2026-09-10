@@ -78,6 +78,23 @@ describe('resolveConfig', () => {
     });
   });
 
+  it('names a server to forward to, for a client pointed here by hand', () => {
+    expect(resolveConfig().servers.upstream).toBe('');
+    expect(resolveConfig({ env: { BROWNIE_SERVER_HOST: '54.234.226.24' } }).servers.upstream).toBe(
+      '54.234.226.24',
+    );
+    expect(resolveConfig({ file: { servers: { upstream: '10.0.0.1' } } }).servers.upstream).toBe(
+      '10.0.0.1',
+    );
+    // The environment wins, as everywhere else.
+    expect(
+      resolveConfig({
+        file: { servers: { upstream: '10.0.0.1' } },
+        env: { BROWNIE_SERVER_HOST: '54.234.226.24' },
+      }).servers.upstream,
+    ).toBe('54.234.226.24');
+  });
+
   it('falls back to info for a log level it does not know, rather than going silent', () => {
     expect(resolveConfig({ env: { BROWNIE_LOG_LEVEL: 'shout' } }).logging.level).toBe(
       LogLevel.Info,

@@ -341,8 +341,11 @@ export class Application {
       // The native module reports where the game was actually heading before it
       // was redirected here; without that the allowlist has nothing to check and
       // refuses every session. An explicit option still wins, for driving the
-      // proxy without a module at all.
+      // proxy without a module at all, and the configured upstream is the last
+      // resort — a Flash client pointed here by hand has no module to say where
+      // it was going, so the configuration has to.
       requestedHost: options.requestedHost ?? (() => this.#native.requestedHost),
+      upstream: this.#config.servers.upstream,
     });
 
     // A target the module saw on the game's *own* `connect` permits itself.

@@ -135,6 +135,9 @@ describe('ProxyServer', () => {
     h.server.onDisconnected((session) => disconnected.push(session.id));
 
     const socket = await h.connect();
+    // A session begins when the client speaks, not when the socket appears —
+    // the first bytes are what rule out a Flash policy probe.
+    socket.write(PeerCiphers.gameClient().encipher(teleportFrame(1, 'hello')));
     await until(() => h.server.sessionCount === 1, 'the session to be accepted');
     expect(connected).toHaveLength(1);
     expect(h.server.current()?.id).toBe(connected[0]);
@@ -143,6 +146,29 @@ describe('ProxyServer', () => {
     await until(() => h.server.sessionCount === 0, 'the session to be dropped');
     expect(disconnected).toEqual(connected);
     expect(h.server.current()).toBeUndefined();
+  });
+
+  it('answers an embedded Flash policy probe without opening a session', async () => {
+    const h = await harness();
+    const socket = await h.connect();
+
+    const reply = await new Promise<Buffer>((resolve, reject) => {
+      const parts: Buffer[] = [];
+      socket.on('data', (part: Buffer) => {
+        parts.push(part);
+        const whole = Buffer.concat(parts);
+        if (whole.includes(0)) resolve(whole);
+      });
+      socket.once('error', reject);
+      socket.write('<policy-file-request/>\0');
+    });
+
+    expect(reply.subarray(0, 5).toString()).toBe('<?xml');
+    expect(reply.toString()).toContain('allow-access-from');
+    // A probe is one connection that asks and leaves; the game itself would
+    // arrive on the next one.
+    await until(() => h.server.sessionCount === 0, 'no session to exist');
+    expect(h.connector.transports).toHaveLength(0);
   });
 
   it('carries a packet from a real socket through to the server link', async () => {
@@ -208,14 +234,20 @@ describe('ProxyServer', () => {
 
     socket.write(PeerCiphers.gameClient().encipher(teleportFrame(1, 'x')));
 
-    await until(() => h.server.sessionCount === 0, 'the session to be refused');
+    // The refusal closes the client socket, which is the observable end of the
+    // session: counting sessions alone would pass before one had opened.
+    await new Promise<void>((resolve, reject) => {
+      socket.once('close', resolve);
+      socket.once('error', reject);
+    });
     expect(h.connector.transports).toHaveLength(0);
     expect(h.sink.messages().join(' ')).toMatch(/no allowed server target/);
   });
 
   it('closes every live session when it shuts down', async () => {
     const h = await harness();
-    await h.connect();
+    const socket = await h.connect();
+    socket.write(PeerCiphers.gameClient().encipher(teleportFrame(1, 'hello')));
     await until(() => h.server.sessionCount === 1, 'the session to be accepted');
 
     await h.server.close();

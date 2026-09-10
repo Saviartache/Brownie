@@ -17,6 +17,17 @@ export interface RuntimeConfig {
     /** Hosts a session may be connected to. Anything else is refused. */
     readonly allow: readonly string[];
     readonly port: number;
+    /**
+     * A game server IPv4 the proxy forwards to when nothing reported where the
+     * client was heading.
+     *
+     * Empty is the normal case: the injected module names the server for an
+     * Exalt client. A value stands in for clients with no module — the Flash
+     * client is pointed at the proxy by hand, so the other half of the trip is
+     * configured by hand too. Trusted like an `allow` entry: the operator
+     * wrote both.
+     */
+    readonly upstream: string;
   };
   readonly native: {
     /**
@@ -71,7 +82,7 @@ export class ConfigError extends Error {
 /** Everything the runtime does without being told. */
 export const DEFAULT_CONFIG: RuntimeConfig = Object.freeze({
   proxy: { host: '127.0.0.1', port: 2050 },
-  servers: { allow: [], port: 2050 },
+  servers: { allow: [], port: 2050, upstream: '' },
   native: { enabled: false, pipeName: 'brownie-bridge', secretHex: '' },
   logging: { level: LogLevel.Info, file: '' },
   plugins: { directory: 'plugins' },
@@ -135,6 +146,12 @@ export function resolveConfig(sources: ConfigSources = {}): RuntimeConfig {
     servers: {
       allow: hostList(servers['allow'], 'servers.allow'),
       port: firstPort(undefined, servers['port'], DEFAULT_CONFIG.servers.port, 'servers.port'),
+      upstream: firstString(
+        env['BROWNIE_SERVER_HOST'],
+        servers['upstream'],
+        DEFAULT_CONFIG.servers.upstream,
+        'servers.upstream',
+      ),
     },
     native: {
       // A configured secret still implies enabled — someone who went to the

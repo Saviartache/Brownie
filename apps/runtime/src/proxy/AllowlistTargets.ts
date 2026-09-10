@@ -17,6 +17,16 @@ export interface AllowlistTargetsOptions {
    * decides whether we go there.
    */
   readonly requestedHost?: () => string | undefined;
+  /**
+   * A game server named by configuration, for a client that was pointed here
+   * by hand rather than redirected.
+   *
+   * The Flash client has no injected module to report where it was heading —
+   * it is told to connect to the proxy directly, so the proxy has to be told
+   * the other half the same way. Trusted exactly as an `allow` entry is: both
+   * are the operator's own configuration.
+   */
+  readonly upstream?: string;
 }
 
 /**
@@ -32,16 +42,30 @@ export class AllowlistTargets implements TargetResolver {
   readonly #allow: Set<string>;
   readonly #port: number;
   readonly #requestedHost: (() => string | undefined) | undefined;
+  readonly #upstream: string | undefined;
 
   constructor(options: AllowlistTargetsOptions) {
     this.#log = options.log.child('targets');
     this.#allow = new Set(options.allow);
     this.#port = options.port;
     this.#requestedHost = options.requestedHost;
+    this.#upstream = options.upstream === '' ? undefined : options.upstream;
+    // The configured upstream is trusted on the same terms as the allowlist it
+    // joins: the operator wrote both.
+    if (this.#upstream !== undefined && isIPv4(this.#upstream)) {
+      this.#allow.add(this.#upstream);
+    } else if (this.#upstream !== undefined) {
+      this.#log.warn(`ignored upstream "${this.#upstream}": not an IPv4 address`);
+    }
   }
 
   get allowed(): readonly string[] {
     return [...this.#allow];
+  }
+
+  /** The configured upstream, when there is one — what a hand-pointed client reaches. */
+  get upstream(): string | undefined {
+    return this.#upstream;
   }
 
   /**
@@ -58,7 +82,9 @@ export class AllowlistTargets implements TargetResolver {
   }
 
   resolve(packet: MutablePacket): ServerTarget | undefined {
-    const requested = this.#requestedHost?.();
+    // A redirected client knows where it was heading; one pointed here by hand
+    // does not, and the configured upstream stands in for it.
+    const requested = this.#requestedHost?.() ?? this.#upstream;
     if (requested === undefined || requested === '') {
       this.#log.warn(`no server was requested for ${packet.name}; refusing the session`);
       return undefined;
