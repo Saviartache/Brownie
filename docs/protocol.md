@@ -309,3 +309,28 @@ be, keyed with the thrower's object type; see `state/blasts/BlastRadiusTable.ts`
 could hurt anybody, and one that could not is a heal or a buff landing on the
 party. Counting one as a detonation confirms — and so cancels — whatever real
 prediction it happens to land near.
+
+## Cross-checked against RealmShark
+
+`references/RealmShark` is an independent Java implementation of this protocol
+(a pcap sniffer), and its tree was diffed against this package field by field.
+What the comparison showed, and what it is worth for the next audit:
+
+* **The packet tables agree.** Every packet id RealmShark names, this package
+  defines — no gaps that would turn a packet it understands into one of our
+  opaque forwards. The only differences are names (`CREATE_SUCCESS` /
+  `CREATESUCCESS`, `SHOOT_ACK` / `SHOOTACKCOUNTER`) and five arena-era packets
+  we still carry and it has dropped.
+* **The layouts that matter agree**, including the trailing-optionals on
+  `ENEMYSHOOT` (`numShots`/`angleInc` present only when the body does not end
+  at `damage`), the `int16` length on `MOVE.records`, and `DAMAGE`'s boolean —
+  `kill` here, `damageProperties` there, same byte at the same offset.
+* **The string-stat table is identical**, all fifteen ids: 6, 31, 38, 54, 62,
+  71, 72, 80, 82, 115, 121, 127, 128, 147, 155. Our `StatData.stackCount` is
+  their `statValueTwo` — the compressed int every stat carries after its value.
+* **The RC4 keys are the same**, and the keystream rules they imply are why
+  RealmShark needs a `TickAligner` — sniffing from the middle of a connection,
+  it brute-forces the cipher position off consecutive `NEWTICK` tick numbers,
+  and re-aligns whenever a `MOVE` echoes a tick it did not expect. A proxy that
+  terminates the TCP connection never needs this; it is also an independent
+  confirmation of the tick numbering the noclip hold is careful not to break.

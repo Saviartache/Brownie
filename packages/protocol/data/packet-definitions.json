@@ -130,42 +130,66 @@
         {
           "name": "targetObjectId",
           "type": "compressedInt",
-          "presentWhen": { "field": "presentFields", "bit": 64 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 64
+          }
         },
         {
           "name": "positionX",
           "type": "float",
-          "presentWhen": { "field": "presentFields", "bit": 2 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 2
+          }
         },
         {
           "name": "positionY",
           "type": "float",
-          "presentWhen": { "field": "presentFields", "bit": 4 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 4
+          }
         },
         {
           "name": "targetPositionX",
           "type": "float",
-          "presentWhen": { "field": "presentFields", "bit": 8 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 8
+          }
         },
         {
           "name": "targetPositionY",
           "type": "float",
-          "presentWhen": { "field": "presentFields", "bit": 16 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 16
+          }
         },
         {
           "name": "color",
           "type": "int32",
-          "presentWhen": { "field": "presentFields", "bit": 1 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 1
+          }
         },
         {
           "name": "duration",
           "type": "float",
-          "presentWhen": { "field": "presentFields", "bit": 32 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 32
+          }
         },
         {
           "name": "unknown",
           "type": "byte",
-          "presentWhen": { "field": "presentFields", "bit": 128 }
+          "presentWhen": {
+            "field": "presentFields",
+            "bit": 128
+          }
         }
       ]
     },
@@ -217,7 +241,7 @@
           "name": "angleInc",
           "type": "float",
           "optional": true,
-          "default": -1.0
+          "default": -1
         }
       ]
     },
@@ -322,7 +346,7 @@
         },
         {
           "name": "bulletId",
-          "type": "uint16"
+          "type": "int16"
         },
         {
           "name": "objectId",
@@ -529,7 +553,7 @@
           "name": "angleInc",
           "type": "float",
           "optional": true,
-          "default": 0.0
+          "default": 0
         }
       ]
     },
@@ -731,7 +755,7 @@
           "type": "compressedInt"
         }
       ],
-      "note": "Partial definition \u2014 fameBonuses and pcStats have complex encoding. Remaining bytes pass through as unreadData."
+      "note": "Partial definition — fameBonuses and pcStats have complex encoding. Remaining bytes pass through as unreadData."
     },
     "47": {
       "name": "USEPORTAL",
@@ -1568,26 +1592,96 @@
       "name": "VAULTCONTENT",
       "direction": "server",
       "fields": [
-        { "name": "lastVaultUpdate",          "type": "bool"          },
-        { "name": "vaultChestObjectId",        "type": "compressedInt" },
-        { "name": "materialChestObjectId",     "type": "compressedInt" },
-        { "name": "giftChestObjectId",         "type": "compressedInt" },
-        { "name": "potionStorageObjectId",     "type": "compressedInt" },
-        { "name": "seasonalSpoilChestObjectId","type": "compressedInt" },
-        { "name": "vaultContents",      "type": "array", "lengthType": "compressedInt", "elementType": "compressedInt" },
-        { "name": "materialContents",   "type": "array", "lengthType": "compressedInt", "elementType": "compressedInt" },
-        { "name": "giftContents",       "type": "array", "lengthType": "compressedInt", "elementType": "compressedInt" },
-        { "name": "potionContents",     "type": "array", "lengthType": "compressedInt", "elementType": "compressedInt" },
-        { "name": "seasonalSpoilContent","type": "array", "lengthType": "compressedInt", "elementType": "compressedInt" },
-        { "name": "vaultUpgradeCost",    "type": "int16" },
-        { "name": "materialUpgradeCost", "type": "int16" },
-        { "name": "seasonalSpoilUpgradeCost", "type": "int16" },
-        { "name": "potionUpgradeCost",   "type": "int16" },
-        { "name": "currentPotionMax",    "type": "int16" },
-        { "name": "nextPotionMax",       "type": "int16" },
-        { "name": "vaultChestEnchants",  "type": "string" },
-        { "name": "giftChestEnchants",   "type": "string" },
-        { "name": "spoilsChestEnchants", "type": "string" }
+        {
+          "name": "lastVaultUpdate",
+          "type": "bool"
+        },
+        {
+          "name": "vaultChestObjectId",
+          "type": "compressedInt"
+        },
+        {
+          "name": "materialChestObjectId",
+          "type": "compressedInt"
+        },
+        {
+          "name": "giftChestObjectId",
+          "type": "compressedInt"
+        },
+        {
+          "name": "potionStorageObjectId",
+          "type": "compressedInt"
+        },
+        {
+          "name": "seasonalSpoilChestObjectId",
+          "type": "compressedInt"
+        },
+        {
+          "name": "vaultContents",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
+        },
+        {
+          "name": "materialContents",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
+        },
+        {
+          "name": "giftContents",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
+        },
+        {
+          "name": "potionContents",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
+        },
+        {
+          "name": "seasonalSpoilContent",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
+        },
+        {
+          "name": "vaultUpgradeCost",
+          "type": "int16"
+        },
+        {
+          "name": "materialUpgradeCost",
+          "type": "int16"
+        },
+        {
+          "name": "seasonalSpoilUpgradeCost",
+          "type": "int16"
+        },
+        {
+          "name": "potionUpgradeCost",
+          "type": "int16"
+        },
+        {
+          "name": "currentPotionMax",
+          "type": "int16"
+        },
+        {
+          "name": "nextPotionMax",
+          "type": "int16"
+        },
+        {
+          "name": "vaultChestEnchants",
+          "type": "string"
+        },
+        {
+          "name": "giftChestEnchants",
+          "type": "string"
+        },
+        {
+          "name": "spoilsChestEnchants",
+          "type": "string"
+        }
       ]
     },
     "118": {

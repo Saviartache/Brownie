@@ -31,9 +31,6 @@ import { Verdict, type EntityView, type Position, type PluginContext } from '@br
 const DEFAULT_RADIUS_TILES = 4;
 const MAX_RADIUS_TILES = 15;
 
-/** Sixteen bits of bullet id, as the wire carries them. */
-const BULLET_ID_MASK = 0xffff;
-
 /**
  * The nearest other player within `radiusTiles`, or `undefined` when there is
  * nobody to blame.
@@ -111,10 +108,6 @@ export function registerHitRedirect(context: PluginContext): void {
 
     packet.drop();
 
-    // **The same sixteen bits, not the same number.** `PLAYERHIT` declares its
-    // bullet id signed and `OTHERHIT` declares it unsigned, so an id past
-    // 0x7fff arrives negative here and would be refused by the encoder on the
-    // way out — a shot the server would never see answered for.
     session.sendToServer('OTHERHIT', {
       // **The client's own clock, not the connection's.** This is the same
       // field auto-ability and auto-drink stamp, and the server checks it the
@@ -124,7 +117,10 @@ export function registerHitRedirect(context: PluginContext): void {
       // since *our* connect, which is a different quantity that happened to
       // look plausible.
       time: Math.trunc(session.world.clientTimeMs),
-      bulletId: bulletId & BULLET_ID_MASK,
+      // The bullet id passes through as it arrived: both packets declare it
+      // signed, so the same sixteen bits — and the same number, negative ids
+      // included — encode straight back out.
+      bulletId,
       objectId,
       targetId,
     });

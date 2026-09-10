@@ -3426,21 +3426,21 @@ describe('the hit redirect', () => {
     expect(sendToServer).not.toHaveBeenCalled();
   });
 
-  it('sends a bullet id the encoder will actually take', () => {
+  it('passes a negative bullet id through as the same signed sixteen bits', () => {
     const host = loadEnabled(true);
     const { session, sendToServer } = fakeSession(nearby);
 
     host.dispatchPacket(playerHit(-2, 5), session);
 
+    // Both packets declare the field signed, so the number travels unchanged —
+    // no masking into a range the encoder would refuse.
     const fields = sendToServer.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(fields['bulletId']).toBe(0xfffe);
+    expect(fields['bulletId']).toBe(-2);
 
     const encoded = createPacket(registry, 'OTHERHIT');
     encoded.fields = fields as typeof encoded.fields;
-    expect(() => encodePacket(registry, encoded)).not.toThrow();
-
-    const raw = createPacket(registry, 'OTHERHIT');
-    raw.fields = { ...fields, bulletId: -2 };
-    expect(() => encodePacket(registry, raw)).toThrow();
+    const frame = encodePacket(registry, encoded);
+    // Header (5) + time (4) puts the bullet id at offset 9, signed.
+    expect(frame.readInt16BE(9)).toBe(-2);
   });
 });
