@@ -203,7 +203,7 @@ void ScenePatches::Apply(std::uint64_t now_ms) {
     // relies on exactly that — so this costs one comparison and detaches
     // nothing. It is here because the pass below *allocates* managed objects,
     // strings and types, which is the case where being wrong about that is not
-    // survivable. Twice a second, on a path that is about to walk the scene.
+    // survivable. Every pass, on a path that is about to walk the scene.
     const game::ThreadScope scope{runtime->api(), runtime->domain()};
     if (!scope.attached()) {
         return;

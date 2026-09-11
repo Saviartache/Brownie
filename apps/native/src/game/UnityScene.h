@@ -12,10 +12,12 @@
 // at memory the collector has given back. What is cached is the *shape* — which
 // method is where — and that settles once for the run.
 //
-// **These calls are not cheap and are not meant to be made often.**
-// `GameObject.Find` walks the scene; the reference module ran its whole pass
-// twice a second and no faster. Everything here is behind a cadence for that
-// reason, and none of it belongs on a per-frame path.
+// **These calls are not cheap, and most of them are not meant to be made
+// often.** `GameObject.Find` walks the scene; the reference module ran its
+// whole pass twice a second and no faster, and the UI discovery here keeps
+// that pace. The exception is the collision write, which `ScenePatches` runs
+// every frame — see `kCollisionPassIntervalMs` there — so the scaled circle is
+// re-applied within a frame of the game rebuilding its properties.
 
 #pragma once
 

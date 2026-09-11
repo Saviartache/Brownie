@@ -16,10 +16,11 @@
 // runs on the game's own thread, which is the only one that may call into
 // managed code.
 //
-// **The pass is on a cadence and a slow one.** It starts with
-// `GameObject.Find`, which walks the scene; the reference module ran it twice a
-// second and no faster, and there is nothing here that a frame would notice
-// happening later.
+// **The pass is on a cadence, and the two halves on different ones.** It starts
+// with `GameObject.Find`, which walks the scene; the reference module ran it
+// twice a second and no faster. The collision half asks for more — see
+// `kCollisionPassIntervalMs` — and the UI half keeps the reference module's
+// pace.
 
 #pragma once
 
@@ -60,9 +61,11 @@ struct ScenePatchWants {
 
 class ScenePatches {
   public:
-    /// Collision is refreshed often enough to recover quickly when the game
-    /// rebuilds its properties. UI discovery remains deliberately slower.
-    static constexpr std::uint32_t kCollisionPassIntervalMs = 25;
+    /// Collision is re-applied every millisecond — in practice every frame,
+    /// which is as fast as the pass can run — so a properties rebuild is
+    /// scaled back down the frame after it happens. UI discovery remains
+    /// deliberately slower.
+    static constexpr std::uint32_t kCollisionPassIntervalMs = 1;
     static constexpr std::uint32_t kUiPassIntervalMs = 1000;
 
     ScenePatches() noexcept = default;
