@@ -61,11 +61,10 @@ struct ScenePatchWants {
 
 class ScenePatches {
   public:
-    /// Collision is re-applied every millisecond — in practice every frame,
-    /// which is as fast as the pass can run — so a properties rebuild is
-    /// scaled back down the frame after it happens. UI discovery remains
-    /// deliberately slower.
-    static constexpr std::uint32_t kCollisionPassIntervalMs = 1;
+    /// Collision is re-applied four times a second — twice the reference
+    /// module's pace, so a properties rebuild is recovered in a quarter of a
+    /// second — while UI discovery remains deliberately slower.
+    static constexpr std::uint32_t kCollisionPassIntervalMs = 250;
     static constexpr std::uint32_t kUiPassIntervalMs = 1000;
 
     ScenePatches() noexcept = default;
