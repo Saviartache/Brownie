@@ -19,7 +19,6 @@
 
 import type { PluginContext, SessionView, SettingHandle } from '@brownie/plugin-api';
 import type { DodgeSettings } from './DodgePlanner.js';
-import { MAX_HOP_TILES } from './Hop.js';
 import {
   DODGE_PRESETS,
   DodgePresetId,
@@ -69,11 +68,6 @@ export interface DodgeControls {
   readonly spacing: {
     readonly mindMonsters: SettingHandle<boolean>;
   };
-  readonly hop: {
-    readonly enabled: SettingHandle<boolean>;
-    readonly tiles: SettingHandle<number>;
-    readonly cooldownMs: SettingHandle<number>;
-  };
   readonly driving: {
     readonly respectIntent: SettingHandle<boolean>;
     readonly interceptControl: SettingHandle<boolean>;
@@ -102,9 +96,6 @@ export function planningSettings(controls: DodgeControls): DodgeSettings {
     holdGroundWeight: tuning.holdGroundWeight.get(),
     dpsRadiusTiles: tuning.dpsRadiusTiles.get(),
     budget: tuning.budget.get(),
-    hopEnabled: controls.hop.enabled.get(),
-    hopTiles: controls.hop.tiles.get(),
-    hopCooldownMs: controls.hop.cooldownMs.get(),
   };
 }
 
@@ -401,8 +392,8 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // leaves nothing to dodge with, so a step that would end inside this radius is
   // *refused* rather than charged for — there is no arrangement of shots for
   // which walking into a pool is the answer. What is left when the only way out
-  // runs across one is the emergency step, which covers the same ground on a
-  // single frame and lands on the far side; see `Hop`.
+  // runs across one is a walk that starts from inside it, which is the case the
+  // ratchet below exists to still allow.
   //
   // The margin exists because the planner has no way to be sure where the
   // character will actually end up — the server has its own opinion, the command
@@ -415,8 +406,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
   // where the character already is and this distance. Somebody who has been
   // pushed inside can therefore still move — within the band, and outwards — so
   // it can never hold them in there, and it never quietly turns itself off the
-  // moment it is most needed. The emergency step obeys the same rule, because a
-  // hop is the easier way through a barrier.
+  // moment it is most needed.
   const hazardClearanceTiles = settings.range('hazardClearanceTiles', {
     label: 'Keep clear of lava and damaging ground by (tiles)',
     group: 'Safety',
@@ -448,45 +438,6 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     group: 'Spacing',
     advanced: true,
     default: true,
-  });
-
-  // ── The emergency step ──────────────────────────────────────────────────
-  //
-  // A frame's worth of movement spent at once, for the shot that lands before a
-  // step of walking finishes. Its own group because it is the one thing here
-  // that is not a walk, and because the numbers that bound it are the module's
-  // rather than a matter of taste — see `Hop.ts`.
-
-  const hopEnabled = settings.boolean('hopEnabled', {
-    label: 'Sidestep instantly when there is no time to walk',
-    group: 'Emergency',
-    default: true,
-  });
-  // Capped at what one frame may actually carry. Asking for more does not move
-  // the character further — the module clamps it — it only makes the planner
-  // choose a landing place nothing ever reaches.
-  const hopTiles = settings.range('hopTiles', {
-    label: 'Instant sidestep distance (tiles)',
-    group: 'Emergency',
-    advanced: true,
-    default: MAX_HOP_TILES,
-    min: 0.2,
-    max: MAX_HOP_TILES,
-    step: 0.05,
-    visibleWhen: { key: 'hopEnabled', equals: [true] },
-  });
-  // **What stops it becoming a way of walking.** One frame at the limit is a
-  // step the character could have taken; one every frame is a sprint, and the
-  // server takes those back. Long enough that a burst is a burst.
-  const hopCooldownMs = settings.range('hopCooldownMs', {
-    label: 'And no sooner than every (ms)',
-    group: 'Emergency',
-    advanced: true,
-    default: 400,
-    min: 100,
-    max: 2000,
-    step: 50,
-    visibleWhen: { key: 'hopEnabled', equals: [true] },
   });
 
   const respectIntent = settings.boolean('respectIntent', {
@@ -550,7 +501,6 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     hazards: { avoid: avoidDamagingGround, clearanceTiles: hazardClearanceTiles },
     avoidBlasts,
     spacing: { mindMonsters },
-    hop: { enabled: hopEnabled, tiles: hopTiles, cooldownMs: hopCooldownMs },
     driving: { respectIntent, interceptControl, speedPercent, holdMs },
   };
 }

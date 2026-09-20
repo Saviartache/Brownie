@@ -98,6 +98,13 @@ export function runCli(argv: readonly string[], now = new Date()): CliResult {
         return describeFile(file.name, file.content, file.parts);
       });
 
+      // Said rather than skipped silently: the sprites are half of what the
+      // overlay's picture choosers need, and a run that quietly left them out
+      // looks like a working one.
+      if (result.spritesTrouble !== undefined) {
+        say(`  sprites could not be extracted: ${result.spritesTrouble}`);
+      }
+
       writeManifest(options.out, buildManifest(install, result.unityVersion, files, now));
       say(`wrote ${String(files.length)} file(s) to ${options.out}`);
       return { exitCode: 0, output };

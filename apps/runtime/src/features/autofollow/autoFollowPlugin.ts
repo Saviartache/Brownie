@@ -33,6 +33,7 @@ import {
   type Position,
   type SessionView,
 } from '@brownie/plugin-api';
+import { bareName } from '../../state/playerName.js';
 import { nearestBoss, type BossLookup } from '../autoteleport/bossApproach.js';
 import { PICK_RADIUS_TILES, WALK_HOLD_MS } from './constants.js';
 import { followPoint, nearestPlayerTo, tilesBetween } from './followMath.js';
@@ -176,7 +177,7 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
               );
         if (picked !== undefined) {
           state.manualId = picked.objectId;
-          session.notify(`Following ${picked.name || 'player'}.`, 'Auto Follow');
+          session.notify(`Following ${bareName(picked.name) || 'player'}.`, 'Auto Follow');
           return;
         }
         if (activeTarget(state) !== undefined) session.notify('Follow cancelled.', 'Auto Follow');

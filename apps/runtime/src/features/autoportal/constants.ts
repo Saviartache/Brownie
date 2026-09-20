@@ -20,3 +20,10 @@ export const WALK_HOLD_MS = 500;
  * frees. Spaced so a portal that never opens is not a packet a tick.
  */
 export const ENTER_INTERVAL_MS = 1000;
+
+/**
+ * The portal a chooser draws when a dungeon's own art is missing entirely -
+ * the ordinary realm portal, whose purple swirl is what "a portal" looks like
+ * to anybody who has played. `Portal of Cowardice` in `objects.xml`.
+ */
+export const STANDARD_PORTAL_TYPE = 0x0703;

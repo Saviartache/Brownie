@@ -35,8 +35,7 @@
  *    even when both are perfectly safe.
  * 7. *How far it walked*, so the character stands still when nothing forces a
  *    move.
- * 8. *Whether it spent the hop*, which is a frame of movement and a cooldown.
- * 9. *Whether it reversed*, which is the only term here that exists to stop a
+ * 8. *Whether it reversed*, which is the only term here that exists to stop a
  *    character vibrating between two answers the field cannot tell apart.
  *
  * **Every constant below is quoted against `anchorPerTile`**, which is the one
@@ -74,15 +73,6 @@ export interface TrajectoryWeights {
    * it, and an indifferent planner picks whichever way the arithmetic rounded.
    */
   readonly travelPerTile: number;
-  /**
-   * Charged once for a trajectory that spends the hop.
-   *
-   * Below a tile of walking, deliberately: the ladder puts movement distance
-   * above an unnecessary hop, so a hop that travels less than a walk should
-   * still win. What this buys is the tie — the hop is a frame of movement and a
-   * cooldown, so it is not spent where a walk does the same job.
-   */
-  readonly hopPerUse: number;
   /**
    * The most a complete reversal of the held direction costs.
    *
@@ -208,8 +198,8 @@ export interface TrajectoryStep {
  * What one tick of a trajectory costs.
  *
  * Split from the trajectory-wide terms below because this is the part that is
- * summed: the hop and the reversal are properties of the *decision*, charged
- * once, and folding them in here would charge them once per tick.
+ * summed: the reversal is a property of the *decision*, charged
+ * once, and folding it in here would charge it once per tick.
  */
 export function stepCost(weights: TrajectoryWeights, step: TrajectoryStep): number {
   const charged =
@@ -257,17 +247,14 @@ export function stepCost(weights: TrajectoryWeights, step: TrajectoryStep): numb
 /**
  * What the *decision* costs, on top of the ticks it leads to.
  *
- * Charged once per trajectory: the hop is one frame of movement and a cooldown
- * however far it goes, and a reversal is a property of the first step alone —
- * only the first step is ever commanded, and the rest of the trajectory is a
- * claim about what the next plan will still be able to do.
+ * Charged once per trajectory: a reversal is a property of the first step
+ * alone — only the first step is ever commanded, and the rest of the trajectory
+ * is a claim about what the next plan will still be able to do.
  *
  * @param along How much the first step agrees with the direction already being
  *   walked, from `-1` for a reversal to `1` for carrying straight on. Pass `1`
  *   when nothing is being held, which charges nothing.
  */
-export function decisionCost(weights: TrajectoryWeights, hop: boolean, along: number): number {
-  let cost = hop ? weights.hopPerUse : 0;
-  cost += (weights.turnPerReversal * (1 - along)) / 2;
-  return cost;
+export function decisionCost(weights: TrajectoryWeights, along: number): number {
+  return (weights.turnPerReversal * (1 - along)) / 2;
 }

@@ -59,10 +59,17 @@ export interface ItemFacts {
   readonly setItem: boolean;
   /** How many stack in one potion-belt slot. 0 when the belt refuses it. */
   readonly beltStack: number;
+  /**
+   * What feeding it to a pet is worth. 0 for the items that state no value —
+   * most of what a vault holds states one.
+   */
+  readonly feedPower: number;
   /** What drinking it does, for the ones that are potions. */
   readonly potion: PotionFacts | undefined;
   /** What using it does, for the ones that are abilities. */
   readonly ability: AbilityFacts | undefined;
+  /** `<Key />` — the item opens a dungeon portal when used. */
+  readonly key: boolean;
 }
 
 /** What the data file says about one container — a loot bag, a chest, a grave. */
@@ -82,6 +89,38 @@ export interface ContainerFacts {
 
 /** `<Class>Container</Class>` — the game's own marker for a bag or a chest. */
 const CONTAINER_CLASS = 'Container';
+
+/** The families the game's gear slot types divide into. */
+export const GearFamily = {
+  Weapon: 'weapon',
+  Ability: 'ability',
+  Armor: 'armor',
+  Ring: 'ring',
+} as const;
+
+export type GearFamily = (typeof GearFamily)[keyof typeof GearFamily];
+
+/**
+ * Slot type → gear family.
+ *
+ * The game's own numbering, and it is checked against the data file rather
+ * than assumed: every slot type below holds items the file labels with the
+ * matching family, and the two it leaves out are 10 — every potion, dye and
+ * consumable the game has — and 26, which is pet eggs.
+ */
+const FAMILY_BY_SLOT_TYPE: ReadonlyMap<number, GearFamily> = new Map([
+  ...([1, 2, 3, 8, 17, 24] as const).map((slot) => [slot, GearFamily.Weapon] as const),
+  ...([4, 5, 11, 12, 13, 15, 16, 18, 19, 20, 21, 22, 23, 25, 27, 28, 29, 30, 31] as const).map(
+    (slot) => [slot, GearFamily.Ability] as const,
+  ),
+  ...([6, 7, 14] as const).map((slot) => [slot, GearFamily.Armor] as const),
+  ...([9] as const).map((slot) => [slot, GearFamily.Ring] as const),
+]);
+
+/** Which gear family a slot type belongs to, or nothing for what is not gear. */
+export function gearFamilyOf(slotType: number): GearFamily | undefined {
+  return FAMILY_BY_SLOT_TYPE.get(slotType);
+}
 
 /** The game's stat codes for the six, as `<Activate stat="…">` writes them. */
 const PERMANENT_BY_CODE: ReadonlyMap<string, PermanentStat> = new Map([
@@ -113,8 +152,10 @@ export function readItemFacts(element: string): ItemFacts | undefined {
     untiered: labels.has('UT'),
     setItem: labels.has('ST'),
     beltStack: readBeltStack(element),
+    feedPower: parseGameNumber(childText(element, 'feedPower')) ?? 0,
     potion: readPotion(element),
     ability: readAbilityFacts(element),
+    key: hasChild(element, 'Key'),
   };
 }
 

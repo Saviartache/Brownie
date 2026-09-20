@@ -112,6 +112,7 @@ const SHOP_WORDS: readonly string[] = [
   'instantdelivery',
   'autodelivery',
   'fastdelivery',
+  'fastservice',
   'giftcard',
   'dailylottery',
   'freespins',
@@ -227,8 +228,16 @@ const MASKED_SCHEME = [
 const SHORTENERS =
   /\btinyurl\b|\bbit\s*[._-]*ly\b|\bis\.gd\b|\bclck\.ru\b|\btiny\.(?:cc|one)\b|\blnk\.bio\b|\blinktr\b/;
 
-/** The one platform whose name survives the compacting, folded to match it. */
+/**
+ * Platform names read where the dots and spaces are already gone.
+ *
+ * `telegram` is a word on its own. `dsc.gg` is a Discord invite under a shorter
+ * name, and its disguises — `dsc [dot] gg`, `dsc gg`, `d5c.gg` — all compact to
+ * one string, which `(?:dot)?` is there to meet: the dot spelled out, the same
+ * shape `SHOP_DOMAINS` allows for.
+ */
 const TELEGRAM = compactOf('telegram');
+const DSC_GG = /dsc(?:dot)?gg/;
 
 /** Where the conversation is being moved to, which is never in the game. */
 const OFF_GAME_PLATFORMS =
@@ -325,7 +334,10 @@ export const SPAM_SIGNALS: readonly SpamSignal[] = [
   {
     id: 'off-game-platform',
     category: SpamCategory.Link,
-    matches: (text) => OFF_GAME_PLATFORMS.test(text.flat) || text.compact.includes(TELEGRAM),
+    matches: (text) =>
+      OFF_GAME_PLATFORMS.test(text.flat) ||
+      text.compact.includes(TELEGRAM) ||
+      DSC_GG.test(text.compact),
   },
   {
     id: 'obfuscated-address',

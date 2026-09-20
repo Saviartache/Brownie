@@ -96,7 +96,7 @@ interface Harness {
   flush: () => void;
 }
 
-function harness(): Harness {
+function harness(sprites?: () => string | undefined): Harness {
   const sink = new RecordingSink();
   const log = testLogger(sink);
   const overlay = new FakeOverlay();
@@ -107,6 +107,7 @@ function harness(): Harness {
     host,
     native: overlay,
     log,
+    sprites: sprites ?? (() => undefined),
     schedule: (fn) => pending.push(fn),
   });
 
@@ -227,6 +228,100 @@ describe('OverlayControlPlane', () => {
     expect(select?.[13]).toBe('Planning'); // group
     expect(radius?.[11]).toBe('1'); // advanced
     expect(radius?.[14]).toBe('planner=gradient'); // visibleWhen
+  });
+
+  it('draws a picture multi-select from the sprite file the game data carried', () => {
+    // Set per test rather than in the harness: most tests have no game data,
+    // and a sprites record that appeared everywhere would be one more field to
+    // step over in every expectation below.
+    const h = harness(() => 'C:/wherever/game-data/sprites.bin');
+    h.host.load(
+      plugin('auto-portal', (ctx) => {
+        ctx.settings.assetMultiSelect('portals', {
+          default: [],
+          options: [
+            ['1823', 'Pirate Cave'],
+            ['1824', 'Undead Lair', '1803'],
+          ],
+        });
+      }),
+    );
+    h.plane.start();
+    h.flush();
+
+    // Named once, before the plugins it is drawn into, and by path alone — the
+    // module reads the file off the disk it shares with this process. (The raw
+    // record is percent-encoded like every other; `of` is what decodes.)
+    expect(h.overlay.of('sprites')).toEqual([['C:/wherever/game-data/sprites.bin']]);
+
+    const [setting] = h.overlay.of('setting');
+    // The kind the picture widget is drawn from, and the sprite keys of the
+    // options in their own order — empty for the option that carries none.
+    expect(setting?.[3]).toBe('assetMultiSelect');
+    expect(setting?.[12]).toBe('Pirate Cave=1823;Undead Lair=1824');
+    expect(setting?.[15]).toBe(';1803');
+  });
+
+  it('splits an option list too long for one frame across options records', () => {
+    const h = harness();
+    // ~30 bytes a cell: enough of them to pass the 100 KiB budget several
+    // times over, the way the real item catalog does.
+    const many = Array.from({ length: 12000 }, (_unused, i) => [
+      String(1000 + i),
+      `Item ${String(i)}`,
+    ]);
+    h.host.load(
+      plugin('auto-loot', (ctx) => {
+        ctx.settings.assetMultiSelect('always', {
+          default: [],
+          options: many.map(
+            (item, i): readonly [string, string] | readonly [string, string, string] =>
+              i % 2 === 0 ? [item[0]!, item[1]!] : [item[0]!, item[1]!, item[0]!],
+          ),
+        });
+      }),
+    );
+    h.plane.start();
+    h.flush();
+
+    const settings = h.overlay.of('setting');
+    expect(settings).toHaveLength(1);
+    // The setting's own options field stays empty - the list travels beside it.
+    expect(settings[0]![12]).toBe('');
+    expect(settings[0]![15]).toBe('');
+
+    const pieces = h.overlay.of('options');
+    expect(pieces.length).toBeGreaterThan(1);
+    // Every record fits a frame with room to spare, whatever the catalog grows
+    // to; and the pieces reassemble, in order, into the whole list.
+    const whole: string[] = [];
+    const sprites: string[] = [];
+    for (const [, key, index, count, cells, keys] of pieces) {
+      const record = `options|${String(key)}|${index ?? ''}|${count ?? ''}|${cells ?? ''}|${keys ?? ''}`;
+      expect(record.length).toBeLessThan(200 * 1024);
+      expect(index).toBe(String(whole.length));
+      expect(String(count)).toBe(String(pieces.length));
+      whole.push(cells ?? '');
+      sprites.push(keys ?? '');
+    }
+    const labels = whole.join(';');
+    expect(labels).toContain('Item 0=1000');
+    expect(labels).toContain(`Item ${String(many.length - 1)}=${String(1000 + many.length - 1)}`);
+    // Even sprite keys line up with their own cells, piece by piece.
+    expect(
+      sprites
+        .join(';')
+        .split(';')
+        .filter((k) => k !== '').length,
+    ).toBe(6000);
+  });
+
+  it('says nothing about sprites when the game data carries none', () => {
+    const h = harness();
+    h.host.load(plugin('auto-portal', () => undefined));
+    h.plane.start();
+    h.flush();
+    expect(h.overlay.records.some((record) => recordKind(record) === 'sprites')).toBe(false);
   });
 
   it('sends a multi-select as a string kind carrying its options', () => {

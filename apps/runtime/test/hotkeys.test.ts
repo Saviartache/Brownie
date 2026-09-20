@@ -579,6 +579,7 @@ describe('the bind an overlay draws', () => {
       host: plugins,
       native: overlay,
       log,
+      sprites: () => undefined,
       schedule: (flush) => flush(),
     });
     return { plugins, overlay, plane };

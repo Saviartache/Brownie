@@ -33,9 +33,14 @@ const UNKNOWN_PORTAL = 0x7fff;
 const LOOT_BAG = 0x0500;
 
 const PORTALS: readonly DungeonPortal[] = [
-  { type: PUPPET, name: 'Puppet Theatre Portal', dungeonName: "Puppet Master's Theatre" },
-  { type: SHATTERS, name: 'Shatters Portal', dungeonName: 'Shatters' },
-  { type: SNAKE_PIT, name: 'Snake Pit Portal', dungeonName: 'Snake Pit' },
+  {
+    type: PUPPET,
+    name: 'Puppet Theatre Portal',
+    dungeonName: "Puppet Master's Theatre",
+    keyType: undefined,
+  },
+  { type: SHATTERS, name: 'Shatters Portal', dungeonName: 'Shatters', keyType: undefined },
+  { type: SNAKE_PIT, name: 'Snake Pit Portal', dungeonName: 'Snake Pit', keyType: undefined },
 ];
 
 const NAMES = new Map(PORTALS.map((portal) => [portal.type, portal.dungeonName]));

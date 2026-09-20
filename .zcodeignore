@@ -1,0 +1,124 @@
+# Everything here is either produced by a build, extracted from a local game
+# install, or a secret. The rule this file follows: if a fresh clone can
+# regenerate it, or if it came off this machine rather than out of the source,
+# it does not belong in the history.
+
+# ── Dependencies and build output ───────────────────────────────────────────
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# The native module's build tree. Zig's cache and the DLL it produces are both
+# derived from `apps/native/src` — and the DLL is the thing that gets injected,
+# so a binary in the history is a binary somebody will run without having built
+# it. `apps/native/vendor/` is *not* here on purpose: imgui, MinHook and Detours
+# are sources the build compiles, and without them a fresh clone cannot build.
+apps/native/build/
+apps/native/zig-out/
+apps/native/.zig-cache/
+
+# What `npm run build:release` assembles: the same DLL, a 90 MB copy of the Node
+# binary, and a copy of the game's own data. Every byte of it is derived from
+# something else in this list.
+release/
+
+# ── Extracted from the local game install ───────────────────────────────────
+# The game's own data files, read at startup and regenerated per install by
+# `tools/gamedata`. Thirty-five megabytes of somebody else's XML.
+game-data/
+
+# The extractor's working tree: game binaries, decrypted metadata, merged XML,
+# and the third-party tools it downloads. Half a gigabyte, all of it derived
+# from whatever client this machine happens to have.
+tools/extractor/output/
+tools/extractor/local.yml
+tools/extractor/*.exe
+# Everything the extractor downloads into these, whether it lands as a folder
+# or as one large executable with no extension — which `cpp2il` does, and which
+# a directory-only pattern quietly let through.
+tools/extractor/tools/il2cpp/*
+tools/extractor/tools/assetripper/*
+!tools/extractor/tools/**/README.md
+
+# Cheat Engine's MCP bridge, installed locally rather than vendored: it brings
+# its own virtual environment and Cheat Engine's own files with it.
+tools/cheatengine-mcp-bridge/
+
+# ── Reference implementations ───────────────────────────────────────────────
+# Other people's source, kept beside this one to be read rather than built:
+# `RealmEngine` is the implementation this project is a rewrite of, and
+# `RealmShark` is a packet analyser whose protocol handling is worth consulting
+# when the wire disagrees with `packet-definitions.json` — which it has.
+#
+# Not vendored and not submodules: nothing here is compiled, linked or shipped,
+# and neither is ours to redistribute. Clone them yourself:
+#
+#   git clone https://github.com/Evergreen-Techworks/realm-engine-client.git references/RealmEngine
+#   git clone https://github.com/X-com/RealmShark.git references/RealmShark
+references/
+
+# ── Local machine state ─────────────────────────────────────────────────────
+# The working plan: what is finished, what is next, and what each stage has to
+# meet before it counts as done. Somebody's own notes about the work rather than
+# part of it, so it stays on the machine it is being written on.
+docs/migration/plan.md
+docs/migration/newfeatures.md
+
+config/local.json
+# Every switch and knob the user set from the overlay, written by the runtime
+# rather than by hand. One person's preferences, not part of the project.
+config/plugins.json
+config/plugins.json.tmp
+logs/
+*.log
+
+# **Never.** A capture holds bytes from a real session, which is why the runtime
+# warns out loud on every run that samples them.
+packet-census.json
+
+# **Never.** The runtime mints a fresh secret per run and publishes it where the
+# module can read it; anything of this shape is either that or a private key,
+# and one in a repository is one that everybody has.
+*.key
+*.pem
+.env
+.env.*
+
+# ── Editors and operating systems ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

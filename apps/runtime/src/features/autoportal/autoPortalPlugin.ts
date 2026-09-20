@@ -29,7 +29,12 @@ import {
   type SessionView,
 } from '@brownie/plugin-api';
 import type { DungeonPortal } from '../../state/ObjectCatalog.js';
-import { ENTER_INTERVAL_MS, ENTER_RADIUS_TILES, WALK_HOLD_MS } from './constants.js';
+import {
+  ENTER_INTERVAL_MS,
+  ENTER_RADIUS_TILES,
+  STANDARD_PORTAL_TYPE,
+  WALK_HOLD_MS,
+} from './constants.js';
 import { findChosenPortals, isNexus, withinReach } from './portals.js';
 
 /** Asks the native module to walk, or to stop — the one thing a plugin cannot do alone. */
@@ -47,6 +52,12 @@ export interface AutoPortalInputs {
   readonly displayName: (objectType: number) => string | undefined;
   /** Every dungeon portal the game data describes, for the chooser. */
   readonly dungeonPortals: () => readonly DungeonPortal[];
+  /**
+   * Whether the sprite file carries a picture of this object type. The chooser
+   * walks a chain - the key that opens the dungeon, the portal itself, the
+   * ordinary realm portal - and this is what tells it where the chain stops.
+   */
+  readonly spriteAvailable: (objectType: number) => boolean;
   /** Which way the player is walking under their own power, if at all. */
   readonly steer: { direction(): Position | undefined };
 }
@@ -67,11 +78,30 @@ function newState(): PortalState {
 
 export function createAutoPortalPlugin(inputs: AutoPortalInputs): Plugin {
   // The option list is a fixed catalog fact, so it is built once here rather
-  // than per tick: value is the object type as a string, label is its name,
-  // ordered by name so the chooser reads alphabetically.
+  // than per tick: value is the portal's object type as a string, label is the
+  // dungeon's name, and the picture is the key that opens it — the row of keys
+  // being the thing a player recognises at a glance where a row of portals
+  // would be near-identical swirls. A picture that the sprite file does not
+  // carry steps down a chain — the key, the portal itself, the ordinary realm
+  // portal — so every choice has a face; and when there are no sprites at all
+  // the overlay draws the checkbox list instead.
+  const pictureOf = (portal: DungeonPortal): string => {
+    const chain = [portal.keyType, portal.type, STANDARD_PORTAL_TYPE];
+    for (const candidate of chain) {
+      if (candidate !== undefined && inputs.spriteAvailable(candidate)) {
+        return String(candidate);
+      }
+    }
+    return '';
+  };
   const options = inputs
     .dungeonPortals()
-    .map((portal): readonly [string, string] => [String(portal.type), portal.name])
+    .map((portal): readonly [string, string] | readonly [string, string, string] => {
+      const picture = pictureOf(portal);
+      return picture === ''
+        ? [String(portal.type), portal.name]
+        : [String(portal.type), portal.name, picture];
+    })
     .sort((a, b) => a[1].localeCompare(b[1]));
 
   return definePlugin({
@@ -83,7 +113,7 @@ export function createAutoPortalPlugin(inputs: AutoPortalInputs): Plugin {
     },
 
     setup(context) {
-      const chosenSetting = context.settings.multiSelect('portals', {
+      const chosenSetting = context.settings.assetMultiSelect('portals', {
         label: 'Dungeons to enter',
         default: [],
         options,

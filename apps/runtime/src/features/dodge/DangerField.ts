@@ -155,10 +155,8 @@ export class DangerField {
   #stamp = new Int32Array(0);
   #queryId = 0;
 
-  /** How many grids there are, the lead's included. */
+  /** How many grids there are, one per slice of the horizon. */
   #built = 0;
-  /** And how many of those are slices of the horizon. */
-  #horizon = 0;
   #cellsX = 0;
   #cellsY = 0;
   #cells = 0;
@@ -172,19 +170,7 @@ export class DangerField {
 
   /** How many slices of the horizon are indexed. */
   get slices(): number {
-    return this.#horizon;
-  }
-
-  /**
-   * The grid over the moment of planning, or `-1` when there is no lead at all.
-   *
-   * **Where the shots are *now*, which is a different question from where they
-   * will be when a decision reaches the character.** Only one kind of move has
-   * to ask it — see `TrajectoryPlanner` — so it is a slice like any other rather
-   * than a shift of every index.
-   */
-  get leadSlice(): number {
-    return this.#horizon < this.#built ? this.#horizon : -1;
+    return this.#built;
   }
 
   /**
@@ -207,7 +193,6 @@ export class DangerField {
   /** Drops the index. */
   clear(): void {
     this.#built = 0;
-    this.#horizon = 0;
     this.#segments = 0;
   }
 
@@ -222,11 +207,7 @@ export class DangerField {
    */
   build(shots: ShotField, options: DangerFieldOptions): void {
     const slices = Math.max(0, shots.slices - 1);
-    this.#horizon = slices;
-    // One more grid when a decision takes time to arrive: what a hop lands in is
-    // decided over the whole window from now, not from the moment the model
-    // assumes the command reaches the character.
-    this.#built = slices + (shots.hasLead && slices > 0 ? 1 : 0);
+    this.#built = slices;
     this.#segments = 0;
     // **Never reset, and that is what makes the per-query stamp free.** A
     // counter that started again each plan would collide with the marks a
@@ -317,53 +298,6 @@ export class DangerField {
 
       this.#sliceTo[slice] = this.#segments;
     }
-
-    if (this.#built > slices) this.#collectLead(shots, slices, highX, highY);
-  }
-
-  /**
-   * The same, over the window between now and the first sample.
-   *
-   * Every shot that exists at all has a segment here — from where it is at this
-   * instant to where slice nought puts it — which is exactly the ground an
-   * instant displacement must not land in.
-   */
-  #collectLead(shots: ShotField, slice: number, highX: number, highY: number): void {
-    const segment = this.#segment;
-    this.#sliceFrom[slice] = this.#segments;
-    this.#largeCount[slice] = 0;
-
-    for (let shot = 0; shot < shots.count; shot += 1) {
-      if (shots.liveToOf(shot) < 0) continue;
-      const fromX = shots.leadXOf(shot);
-      const fromY = shots.leadYOf(shot);
-      const toX = shots.xOf(shot, 0);
-      const toY = shots.yOf(shot, 0);
-      const half = Math.max(shots.leadHalfOf(shot), shots.halfOf(shot, 0));
-
-      const lowX = (fromX < toX ? fromX : toX) - half;
-      const lowY = (fromY < toY ? fromY : toY) - half;
-      const boxHighX = (fromX > toX ? fromX : toX) + half;
-      const boxHighY = (fromY > toY ? fromY : toY) + half;
-      if (boxHighX < this.#originX || lowX > highX) continue;
-      if (boxHighY < this.#originY || lowY > highY) continue;
-
-      const at = this.#segments * SEGMENT_STRIDE;
-      segment[at] = fromX;
-      segment[at + 1] = fromY;
-      segment[at + 2] = toX;
-      segment[at + 3] = toY;
-      segment[at + 4] = half;
-      segment[at + 5] = 1;
-      segment[at + 6] = shot;
-      segment[at + 7] = lowX;
-      segment[at + 8] = lowY;
-      segment[at + 9] = boxHighX;
-      segment[at + 10] = boxHighY;
-      this.#segments += 1;
-    }
-
-    this.#sliceTo[slice] = this.#segments;
   }
 
   /**

@@ -22,6 +22,7 @@
  */
 
 import { PluginCategory, definePlugin, type Plugin, type SettingHandle } from '@brownie/plugin-api';
+import { bareName } from '../../state/playerName.js';
 import { matchesAnyRule, parseSenderRules, type SenderRules } from './senderRules.js';
 import { scanText } from './scanText.js';
 import { SPAM_CATEGORIES, firstMatchingSignal, type SpamCategory } from './spamSignals.js';
@@ -126,7 +127,12 @@ export function createChatFilterPlugin(): Plugin {
         const sender = (packet.string('name') ?? '').trim();
         const senderLower = sender.toLowerCase();
         if (SYSTEM_SENDERS.has(senderLower)) return;
-        if (senderLower === session.self.name.trim().toLowerCase()) return;
+        // Both sides bare, because the two spellings of one name need not agree:
+        // the name stat can carry a trailing token the chat line does not, and a
+        // straight comparison then says our own line is somebody else's and hands
+        // it to the filter. The rules below are matched against the name as the
+        // server spelled it, which is a different question and stays that way.
+        if (bareName(sender).toLowerCase() === bareName(session.self.name).toLowerCase()) return;
 
         // Negative fame is not a player: it is how this game marks the NPCs and
         // the server-side speakers that share the packet with real chat.

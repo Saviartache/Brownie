@@ -14,6 +14,10 @@ constexpr std::string_view kSyncEnd = "sync-end";
 constexpr std::string_view kPlugin = "plugin";
 constexpr std::string_view kSetting = "setting";
 constexpr std::string_view kBind = "bind";
+/// The sprite file the picture controls draw from, named by path alone.
+constexpr std::string_view kSprites = "sprites";
+/// One frame-sized piece of a setting's option list, too long to travel whole.
+constexpr std::string_view kOptions = "options";
 
 /// Field positions, counted from the kind. Named because a bare `fields[9]` in
 /// the middle of a parser is unreadable and the wire format is positional
@@ -29,6 +33,21 @@ enum PluginField : std::size_t {
     /// Everything up to the error. `enableable` was appended later, and a
     /// record without it describes a plugin this build can still draw.
     kPluginMinimumFields = 7,
+};
+
+enum OptionsField : std::size_t {
+    kOptionsPlugin = 1,
+    kOptionsKey = 2,
+    /// Which piece this is, and of how many. Carried for the reader that wants
+    /// to check it holds the whole list; this mirror appends in arrival order,
+    /// which the runtime's publication order makes the right order.
+    kOptionsIndex = 3,
+    kOptionsCount = 4,
+    kOptionsCells = 5,
+    /// This piece's sprite keys, aligned to its cells. Appended, so a chunk
+    /// from before pictures carries one field less and is still understood.
+    kOptionsSprites = 6,
+    kOptionsMinimumFields = 6,
 };
 
 enum BindField : std::size_t {
@@ -61,6 +80,9 @@ enum SettingField : std::size_t {
     kSettingOptions = 13,
     kSettingGroup = 14,
     kSettingVisibleWhen = 15,
+    /// The sprite key of each option, `;`-joined in the options' own order.
+    /// Absent on every earlier kind, which is the point of appending it.
+    kSettingSprites = 16,
     /// Everything up to and including the value. A record shorter than this
     /// describes no control at all; anything after it has a usable default.
     kSettingMinimumFields = 7,
@@ -68,9 +90,8 @@ enum SettingField : std::size_t {
 
 /// The order the overlay files categories in, roughly what a run is spent on:
 /// fighting, moving, carrying, looking, and the rest.
-constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",
-                                               "visuals", "utility",  "commands",
-                                               "developer"};
+constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",    "visuals",
+                                               "utility", "commands", "developer"};
 
 /// The plugin a record belongs to, or null when its own record never arrived.
 ///
@@ -188,6 +209,7 @@ constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",
     if (name == "range") return SettingKind::kRange;
     if (name == "select") return SettingKind::kSelect;
     if (name == "multiSelect") return SettingKind::kMultiSelect;
+    if (name == "assetMultiSelect") return SettingKind::kAssetMultiSelect;
     if (name == "colour") return SettingKind::kColour;
     if (name == "button") return SettingKind::kButton;
     // Text is the fallback for a kind this build predates: every setting has a
@@ -221,12 +243,27 @@ constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",
         // runtime would have sent had the two been equal anyway.
         const std::size_t equals = item.find('=');
         if (equals == std::string::npos) {
-            options.push_back({item, item});
+            options.push_back({item, item, ""});
             continue;
         }
-        options.push_back({item.substr(0, equals), item.substr(equals + 1)});
+        options.push_back({item.substr(0, equals), item.substr(equals + 1), ""});
     }
     return options;
+}
+
+/// Stamps the sprite keys of a picture multi-select onto its parsed options.
+///
+/// One key per option, `;`-joined and in the options' own order, empty for an
+/// option that carries none. A list that disagrees with the option count is
+/// trimmed or padded rather than refused: the sprite is decoration, and losing
+/// the whole control over an alignment this build can check but not repair
+/// would trade a picture for a setting.
+void ApplySpriteKeys(std::vector<SettingOption>& options, const std::string& raw) {
+    std::vector<std::string> keys = SplitList(raw);
+    if (keys.size() < options.size()) keys.resize(options.size());
+    for (std::size_t i = 0; i < options.size() && i < keys.size(); ++i) {
+        options[i].sprite = std::move(keys[i]);
+    }
 }
 
 }  // namespace
@@ -278,6 +315,7 @@ bool ControlMirror::Apply(std::string_view record) {
 
     if (kind == kSyncBegin) {
         staging_.clear();
+        staging_sprites_.clear();
         syncing_ = true;
         return false;
     }
@@ -287,6 +325,8 @@ bool ControlMirror::Apply(std::string_view record) {
             return false;
         }
         syncing_ = false;
+        sprites_path_ = std::move(staging_sprites_);
+        staging_sprites_.clear();
         // Grouped once here rather than every frame, and stably, so plugins
         // sharing a category keep the order the runtime listed them in.
         std::stable_sort(staging_.begin(), staging_.end(),
@@ -321,6 +361,41 @@ bool ControlMirror::Apply(std::string_view record) {
         // toggle anyway, so its plugins are all offered.
         row.enableable = fields.size() <= kPluginEnableable || Flag(fields, kPluginEnableable);
         staging_.push_back(std::move(row));
+        return false;
+    }
+
+    if (kind == kOptions) {
+        // `options|pluginId|key|index|count|cells|sprites`. The cells are the
+        // same `Label=value;` list the setting's own options field carries,
+        // split at cell boundaries so the pieces concatenate in arrival order —
+        // which is publication order, and inside the sync bracket, so the list
+        // is whole exactly when the setting it belongs to is. The sprites field
+        // carries this piece's own sprite keys, aligned to its cells the way
+        // the setting record's is aligned to its own.
+        if (fields.size() < 6) {
+            return false;
+        }
+        PluginRow* plugin = Owner(staging_, fields[kOptionsPlugin]);
+        if (plugin == nullptr) {
+            return false;
+        }
+        for (SettingRow& row : plugin->settings) {
+            if (row.key != fields[kOptionsKey]) continue;
+            std::vector<SettingOption> part = ParseOptions(fields[kOptionsCells]);
+            ApplySpriteKeys(part, Field(fields, kOptionsSprites));
+            row.options.reserve(row.options.size() + part.size());
+            for (SettingOption& option : part) {
+                row.options.push_back(std::move(option));
+            }
+            break;
+        }
+        return false;
+    }
+
+    if (kind == kSprites) {
+        // One field, the path; an empty one means the runtime has no sprite
+        // file and is said plainly rather than by silence.
+        staging_sprites_ = fields.size() > 1 ? fields[1] : "";
         return false;
     }
 
@@ -370,6 +445,9 @@ bool ControlMirror::Apply(std::string_view record) {
         (void)Number(Field(fields, kSettingStep), row.step);
         row.advanced = Flag(fields, kSettingAdvanced);
         row.options = ParseOptions(Field(fields, kSettingOptions));
+        if (row.kind == SettingKind::kAssetMultiSelect) {
+            ApplySpriteKeys(row.options, Field(fields, kSettingSprites));
+        }
         row.group = Field(fields, kSettingGroup);
 
         const std::string& visible = Field(fields, kSettingVisibleWhen);
@@ -401,6 +479,8 @@ bool ControlMirror::Apply(std::string_view record) {
 void ControlMirror::Reset() noexcept {
     plugins_.clear();
     staging_.clear();
+    staging_sprites_.clear();
+    sprites_path_.clear();
     syncing_ = false;
     // An emptied list is a new state of the list, so it counts as a sync. An
     // overlay waiting for its interaction to be answered is answered by the

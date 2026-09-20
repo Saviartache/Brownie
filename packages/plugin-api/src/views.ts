@@ -353,6 +353,22 @@ export interface WorldView {
    * dodge a confirmed one: it is over.
    */
   blasts(): Iterable<BlastView>;
+
+  /**
+   * The learned self-blast keep-out radius for an enemy type, in tiles.
+   *
+   * Some enemies damage with a server area effect centred on *themselves*, with
+   * no throw and no landing circle: the danger becomes visible the instant it
+   * lands, and nothing can react to it after the fact. The only defence is not
+   * standing there, and this is the radius not to stand within — learned from
+   * the detonations themselves, because naming each enemy that attacks this way
+   * does not scale past the ones somebody happened to meet. The margin and the
+   * player's own half are the reader's to add.
+   *
+   * `undefined` for a type never observed blasting itself, which is the
+   * ordinary case for nearly every enemy in the game.
+   */
+  selfBlastKeepoutTiles(objectType: number): number | undefined;
 }
 
 /**

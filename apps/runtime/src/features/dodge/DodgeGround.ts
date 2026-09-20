@@ -32,8 +32,12 @@ export interface DodgeGround {
    * is a route that a server correction or a frame of latency puts inside it.
    * Negative once the body is actually on some, and `Infinity` when there is
    * none near enough for the difference to decide anything.
+   *
+   * @param aheadMs When the player would be standing there. Only the ground
+   *   that *moves* — an enemy's learned self-blast radius, carried forward by
+   *   the enemy's own movement — takes any notice of it; a pool is where it is.
    */
-  hazardGapTiles(x: number, y: number): number;
+  hazardGapTiles(x: number, y: number, aheadMs?: number): number;
   /**
    * How far inside a monster's keep-away distance a place is, and nought
    * anywhere with room to spare.

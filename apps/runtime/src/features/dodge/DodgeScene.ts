@@ -21,12 +21,14 @@ import { StatType } from '../../constants/StatType.js';
 import { bodyTilesFromPercent } from '../../gamedata/GameCatalogs.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
+import { MAX_SELF_BLAST_TILES } from '../../state/blasts/SelfBlastTable.js';
 import type { DodgeSettings } from './DodgePlanner.js';
 import type { DodgeGround } from './DodgeGround.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeCatalog } from './dodgeInputs.js';
 import { GroundCache } from './GroundCache.js';
 import { ENEMY_CONTACT_HALF_TILES, EnemyBodies, type BodySighting } from './EnemyBodies.js';
+import { SelfBlastKeepouts, type KeepOutSighting } from './SelfBlastKeepouts.js';
 
 /** How far past the player's own reach to look for bodies worth avoiding. */
 const ENEMY_SEARCH_MARGIN_TILES = 2;
@@ -59,6 +61,16 @@ const MAX_BODY_DOUBT_MS = 250;
 export class DodgeScene {
   readonly #catalog: DodgeCatalog;
   readonly #bodies = new EnemyBodies();
+  /**
+   * Ground that hurts around enemies learned to blast themselves.
+   *
+   * **Collected whatever the spacing switch says**, because a self blast is not
+   * a preference: there is no keep-away setting whose value could stand in for
+   * "this ground takes a fifth of your health the instant you are noticed on
+   * it". It follows the hazard switch instead, which is the one that asks the
+   * question it answers. See `SelfBlastKeepouts`.
+   */
+  readonly #keepOuts = new SelfBlastKeepouts();
   /**
    * What the ground is, one tile at a time.
    *
@@ -112,6 +124,24 @@ export class DodgeScene {
     halfTiles: ENEMY_CONTACT_HALF_TILES,
   };
 
+  /**
+   * What is read back about one learned self-blaster, rewritten in place for
+   * the same reason {@link #sighting} is.
+   */
+  readonly #keepSighting: {
+    x: number;
+    y: number;
+    velocityX: number;
+    velocityY: number;
+    radiusTiles: number;
+  } = {
+    x: 0,
+    y: 0,
+    velocityX: 0,
+    velocityY: 0,
+    radiusTiles: 0,
+  };
+
   /** How far off a wall a *route* is planned, this plan. */
   #clearance = 0;
   /** How far off damaging ground a *route* is planned, this plan. */
@@ -135,6 +165,8 @@ export class DodgeScene {
   #sightedAtMs = 0;
   /** How much wider a body is drawn and avoided for the age of its sighting. */
   #bodyDoubtTiles = 0;
+  /** The map the last plan read, for the keep-out radii the catalog cannot state. */
+  #map: WorldView | undefined;
 
   /**
    * The map, as a trajectory sees it.
@@ -155,8 +187,13 @@ export class DodgeScene {
     };
     this.world = {
       canStand: (x, y) => !this.#wallsMatter || this.#ground.canStand(x, y, this.#clearance),
-      hazardGapTiles: (x, y) =>
-        this.#damagingMatters ? this.#ground.hazardGap(x, y, this.#hazardClearance) : Infinity,
+      hazardGapTiles: (x, y, aheadMs) =>
+        this.#damagingMatters
+          ? Math.min(
+              this.#ground.hazardGap(x, y, this.#hazardClearance),
+              this.#keepOuts.gapAt(x, y, aheadMs),
+            )
+          : Infinity,
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
       contactAt: (x, y, aheadMs) => this.#bodies.contactAt(x, y, aheadMs),
     };
@@ -245,39 +282,58 @@ export class DodgeScene {
       this.#damagingMatters && (map.tileAt(self.x, self.y)?.damaging ?? false);
 
     this.#minding = controls.spacing.mindMonsters.get();
-    if (!this.#minding) {
-      this.#bodies.clear();
-      return;
+    if (!this.#minding) this.#bodies.clear();
+    this.#planAtMs = map.gameTimeMs;
+
+    if (this.#minding) {
+      this.#keepAwayTiles = Math.max(0, controls.tuning.keepAwayTiles.get());
+      // Far enough to see the edge of the bubble as well as the edge of the
+      // walk: a body the far end of a course would step into is one this has
+      // to have collected, and one culled for being far away is one the
+      // planner walks straight at.
+      const reach = (planning.leadMs + planning.horizonMs) / 1000;
+      const searchTiles = walkSpeedOf(session, controls) * reach + this.#keepAwayTiles;
+      // **Where a monster is, is not known — it is inferred, and the inference
+      // ages.** Positions arrive five times a second and a plan is made fifty,
+      // so between two ticks the only thing holding a body in place is a
+      // velocity derived from the last two sightings — which is wrong the
+      // moment it turns, stops or is knocked back. Widening the body by the
+      // age of the reading is the same admission the shots make with their
+      // drift term, and it is what stops the planner routing a step through a
+      // place it merely believes is empty. It also widens the drawn circle, so
+      // the picture shows the body the planner is actually avoiding rather
+      // than a claim it does not have.
+      this.#bodyDoubtTiles =
+        (BODY_DOUBT_TILES_PER_SECOND *
+          Math.min(Math.max(map.gameTimeMs - this.#sightedAtMs, 0), MAX_BODY_DOUBT_MS)) /
+        1000;
+      this.#bodies.collect(
+        map.enemies(),
+        self.x,
+        self.y,
+        searchTiles + ENEMY_SEARCH_MARGIN_TILES,
+        this.#read,
+      );
     }
 
-    this.#keepAwayTiles = Math.max(0, controls.tuning.keepAwayTiles.get());
-    // Far enough to see the edge of the bubble as well as the edge of the walk:
-    // a body the far end of a course would step into is one this has to have
-    // collected, and one culled for being far away is one the planner walks
-    // straight at.
-    const reach = (planning.leadMs + planning.horizonMs) / 1000;
-    const searchTiles = walkSpeedOf(session, controls) * reach + this.#keepAwayTiles;
-    this.#planAtMs = map.gameTimeMs;
-    // **Where a monster is, is not known — it is inferred, and the inference
-    // ages.** Positions arrive five times a second and a plan is made fifty, so
-    // between two ticks the only thing holding a body in place is a velocity
-    // derived from the last two sightings — which is wrong the moment it turns,
-    // stops or is knocked back. Widening the body by the age of the reading is
-    // the same admission the shots make with their drift term, and it is what
-    // stops the planner routing a step through a place it merely believes is
-    // empty. It also widens the drawn circle, so the picture shows the body the
-    // planner is actually avoiding rather than a claim it does not have.
-    this.#bodyDoubtTiles =
-      (BODY_DOUBT_TILES_PER_SECOND *
-        Math.min(Math.max(map.gameTimeMs - this.#sightedAtMs, 0), MAX_BODY_DOUBT_MS)) /
-      1000;
-    this.#bodies.collect(
-      map.enemies(),
-      self.x,
-      self.y,
-      searchTiles + ENEMY_SEARCH_MARGIN_TILES,
-      this.#read,
-    );
+    // **The keep-out discs follow the hazard switch, not the spacing one.**
+    // A self blast is not a matter of taste about distance — there is no
+    // keep-away setting whose value could stand in for the radius the enemy
+    // itself was measured at — and the question they answer ("does this ground
+    // cost health?") is the hazard switch's own.
+    if (this.#damagingMatters) {
+      this.#map = map;
+      const reach = (planning.leadMs + planning.horizonMs) / 1000;
+      this.#keepOuts.collect(
+        map.enemies(),
+        self.x,
+        self.y,
+        walkSpeedOf(session, controls) * reach + MAX_SELF_BLAST_TILES,
+        this.#readKeepOut,
+      );
+    } else {
+      this.#keepOuts.clear();
+    }
   }
 
   /**
@@ -297,9 +353,11 @@ export class DodgeScene {
   /** Forgets the fight. A new connection is a new map full of strangers. */
   reset(): void {
     this.#bodies.clear();
+    this.#keepOuts.clear();
     this.#motion.clear();
     this.#ground.clear();
     this.#minding = false;
+    this.#map = undefined;
   }
 
   /**
@@ -355,5 +413,31 @@ export class DodgeScene {
     this.#sighting.halfTiles =
       (width === undefined ? ENEMY_CONTACT_HALF_TILES : width / 2) + this.#bodyDoubtTiles;
     return this.#sighting;
+  };
+
+  /**
+   * What one learned self-blaster is doing, or nothing for an enemy whose type
+   * never taught a radius.
+   *
+   * Bound like {@link #read} rather than built per plan, and reading the same
+   * motion the body list does, so the disc and the body cannot disagree about
+   * where the enemy is.
+   */
+  readonly #readKeepOut = (enemy: EntityView): KeepOutSighting | undefined => {
+    const radiusTiles = this.#map?.selfBlastKeepoutTiles(enemy.objectType);
+    if (radiusTiles === undefined || !(radiusTiles > 0)) return undefined;
+    // **A corpse is history; a setpiece that never had health is not.** A dead
+    // monster reports `hp` nought against a `maxHp` it really had, while a
+    // tower's blast is the one thing that proves it is alive — and dropping it
+    // here would leave the most dangerous fixture on the map unkept-out-of.
+    if (enemy.hp <= 0 && enemy.maxHp > 0) return undefined;
+
+    const seen = this.#motion.motionAt(enemy.objectId, this.#planAtMs);
+    this.#keepSighting.x = seen?.x ?? enemy.x;
+    this.#keepSighting.y = seen?.y ?? enemy.y;
+    this.#keepSighting.velocityX = seen?.velocityX ?? 0;
+    this.#keepSighting.velocityY = seen?.velocityY ?? 0;
+    this.#keepSighting.radiusTiles = radiusTiles;
+    return this.#keepSighting;
   };
 }

@@ -27,7 +27,20 @@ export {
 export { runCli, type CliResult } from './cli.js';
 export {
   CLASS_TEXT_ASSET,
+  CLASS_TEXTURE_2D,
   SerializedFileError,
+  findAssetsByName,
+  readTextAsset,
   readTextAssets,
+  readTexture2D,
+  type AssetEntry,
   type TextAsset,
+  type TextureAsset,
 } from './unity/SerializedFile.js';
+export {
+  SpriteSheetError,
+  readSpriteSheet,
+  type SpriteGroup,
+  type SpriteRect,
+} from './unity/SpriteSheet.js';
+export { SPRITES_FILE, buildSpritesFile } from './sprites.js';

@@ -3,6 +3,7 @@ import {
   humaniseKey,
   MULTI_SELECT_DELIMITER,
   normaliseColour,
+  type AssetMultiSelectSettingOptions,
   type BooleanSettingOptions,
   type ButtonOptions,
   type ColourSettingOptions,
@@ -156,7 +157,31 @@ export class SettingsRegistry implements SettingsApi {
       }
     }
     const descriptor = { kind: 'multiSelect' as const, key, ...withLabel(key, options) };
-    this.#declare(descriptor, canonicalSelection(descriptor, options.default));
+    this.#declare(descriptor, canonicalSelection(descriptor.options, options.default));
+    return this.#multiHandle<T>(key);
+  }
+
+  /**
+   * The picture multi-select. Deliberately the same value machinery as the
+   * multi-select — one canonical string of chosen keys — so the two read the
+   * same from config, coerce the same from the overlay, and differ in nothing
+   * but what the overlay draws.
+   */
+  assetMultiSelect<T extends string>(
+    key: string,
+    options: AssetMultiSelectSettingOptions<T>,
+  ): MultiSelectHandle<T> {
+    const pairs = options.options.map((option) => [option[0], option[1]] as const);
+    const known = new Set<string>(pairs.map(([value]) => value));
+    for (const chosen of options.default) {
+      if (!known.has(chosen)) {
+        throw new TypeError(
+          `setting "${key}" defaults to "${chosen}", which is not one of its options`,
+        );
+      }
+    }
+    const descriptor = { kind: 'assetMultiSelect' as const, key, ...withLabel(key, options) };
+    this.#declare(descriptor, canonicalSelection(pairs, options.default));
     return this.#multiHandle<T>(key);
   }
 
@@ -302,13 +327,16 @@ function splitSelection(value: string): string[] {
  * options were declared, joined by the delimiter, with unknowns already dropped
  * by the caller. Independent of the order the keys arrived in, so the same set
  * always produces the same string.
+ *
+ * Takes plain value/label pairs because the two kinds that share it differ
+ * only in what their options may carry beside the pair.
  */
 function canonicalSelection(
-  descriptor: MultiSelectSettingOptions<string>,
+  options: ReadonlyArray<readonly [string, string]>,
   chosen: readonly string[],
 ): string {
   const wanted = new Set(chosen);
-  return descriptor.options
+  return options
     .filter(([value]) => wanted.has(value))
     .map(([value]) => value)
     .join(MULTI_SELECT_DELIMITER);
@@ -348,8 +376,20 @@ function coerce(descriptor: SettingDescriptor, raw: unknown): SettingValue | und
       if (!Array.isArray(raws)) return undefined;
       const chosen = new Set(raws.map(String));
       return canonicalSelection(
-        descriptor,
+        descriptor.options,
         descriptor.options.filter(([value]) => chosen.has(value)).map(([value]) => value),
+      );
+    }
+    case 'assetMultiSelect': {
+      // The same contract as the multi-select above, over the pairs the picture
+      // options carry; the sprites take no part in what the value is.
+      const raws = typeof raw === 'string' ? raw.split(MULTI_SELECT_DELIMITER) : raw;
+      if (!Array.isArray(raws)) return undefined;
+      const pairs = descriptor.options.map((option) => [option[0], option[1]] as const);
+      const chosen = new Set(raws.map(String));
+      return canonicalSelection(
+        pairs,
+        pairs.filter(([value]) => chosen.has(value)).map(([value]) => value),
       );
     }
     case 'text': {

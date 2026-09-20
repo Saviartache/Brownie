@@ -110,6 +110,9 @@ enum class SettingKind : std::uint8_t {
     kRange,
     kSelect,
     kMultiSelect,
+    /// A multi-select drawn as a grid of the options' own pictures. Same value
+    /// on the wire as `kMultiSelect`; the difference is entirely in the drawing.
+    kAssetMultiSelect,
     kText,
     kColour,
     kButton,
@@ -119,6 +122,10 @@ enum class SettingKind : std::uint8_t {
 struct SettingOption {
     std::string label;
     std::string value;
+    /// The sprite this option is drawn as, for a picture multi-select: a key
+    /// into the sprite atlas — an object type as decimal text. Empty for an
+    /// option with no picture, which draws its label instead.
+    std::string sprite;
 };
 
 /// One setting of one plugin, exactly as the runtime described it.
@@ -222,6 +229,9 @@ struct OverlayModel {
     WeaponStatus weapon;
     MemoryReading memory;
     std::vector<PluginRow> plugins;
+    /// The sprite file the runtime named, for the picture controls. Empty when
+    /// it named none — see `ControlMirror::sprites_path`.
+    std::string sprites_path;
     /// How many plugin syncs the runtime has published. The overlay watches it
     /// to know when an interaction it sent has been answered.
     std::uint64_t controls_version = 0;
@@ -307,6 +317,56 @@ struct OverlayModel {
 /// thread and the pipe belongs to the IPC thread, so a frame hands the action
 /// over and returns. See `Engine::DrawFrame`.
 using ActionSink = std::function<void(std::string action)>;
+
+/// One sprite in the atlas: the rectangle it occupies, in pixels.
+struct SpriteRect {
+    std::uint32_t x = 0;
+    std::uint32_t y = 0;
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
+};
+
+/**
+ * The sprite atlas the runtime's game data described, held in memory.
+ *
+ * The pixels never become a texture. The atlas is pixel art - sprites eight
+ * pixels wide, drawn four times that size - and the one sampler the renderer
+ * offers is linear, which on art like this smears a tile into its neighbours
+ * and into mush. So the widgets draw each visible sprite as one filled
+ * rectangle per source pixel instead: crisp at any size, no bleed, no sampler,
+ * and cheap, because the grid clips to the rows on screen. The file is read
+ * once, the first frame a panel that needs it is drawn.
+ */
+class SpriteAtlas {
+  public:
+    /// Loads `path` if it is not the file already held.
+    ///
+    /// A file that cannot be read or understood is remembered as refused: the
+    /// picture widgets fall back to the checkbox list rather than retrying a
+    /// megabyte read every frame for a file that will not have changed.
+    void Refresh(std::string_view path);
+
+    /// Drops everything. Nothing here outlives the file it came from, so this
+    /// is only called when the overlay itself goes away.
+    void Shutdown() noexcept;
+
+    [[nodiscard]] bool ready() const noexcept { return !pixels_.empty(); }
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
+    /// The atlas pixels, RGBA, `width() * height() * 4` of them.
+    [[nodiscard]] const std::uint8_t* pixels() const noexcept {
+        return reinterpret_cast<const std::uint8_t*>(pixels_.data());
+    }
+    [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
+    /// One sprite by the key the settings carry, or null for an unknown one.
+    [[nodiscard]] const SpriteRect* find(std::string_view key) const;
+
+  private:
+    std::string path_;
+    std::unordered_map<std::uint32_t, SpriteRect> rects_;
+    std::string pixels_;
+    std::uint32_t width_ = 0;
+    bool failed_ = false;
+};
 
 /// The one piece of state the overlay keeps, and only because it must.
 ///
@@ -432,6 +492,10 @@ struct UiState {
     BindCapture capture;
     InspectorInput inspector;
     MultiSelectFilters multi_filters;
+    /// The picture choosers' sprites, refreshed from the model's path.
+    SpriteAtlas atlas;
+    /// One picture chooser's visible options per frame, by option index.
+    std::vector<std::size_t> asset_matches;
 
     /// Whether to draw where the module is walking, and where it is pointing
     /// the player's shots, over the map itself.

@@ -1,5 +1,13 @@
 import type { MutablePacket } from '@brownie/plugin-api';
+import { projectileHalfTiles } from '../../features/dodge/hitbox.js';
+import { maxSpeedTilesPerSecond, type ProjectileDefinition } from '../../gamedata/projectiles.js';
 import { DEFAULT_EFFECT_SECONDS, isBlastEffect } from '../../state/blasts/BlastStore.js';
+import {
+  isSelfBlast,
+  MAX_SELF_BLAST_TILES,
+  SELF_BLAST_CENTRE_TILES,
+  TELEGRAPH_REACH_TILES,
+} from '../../state/blasts/SelfBlastTable.js';
 import type { WorldState } from '../../state/WorldState.js';
 import { readStats } from '../../state/stats.js';
 import { PacketOrigin, type PacketContext, type PipelineStage } from '../PacketPipeline.js';
@@ -239,6 +247,18 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         }
         const firedAtMs = world.gameTimeMs;
 
+        // **A shot that will never move is not a shot — it is a damage field
+        // sitting on its owner.** `Bone Tower`'s projectile declares
+        // `<Speed>0</Speed>`: it appears on the tower and stays there, and the
+        // next one appears the moment the last expires, so the tower's own
+        // ground is permanently painful to stand on and only the tower's *type*
+        // says so. Learned here rather than traced, because the announcement is
+        // the one moment the owner and the shot are both known. See
+        // `learnStationaryShot`.
+        if (owner.isEnemy && maxSpeedTilesPerSecond(definition) === 0) {
+          learnStationaryShot(world, owner.objectType, owner.x, owner.y, definition, x, y);
+        }
+
         // A volley arrives as one packet: consecutive bullet ids fanned out by
         // a fixed angle step. Recording only the first would leave the rest
         // invisible, which is precisely the case a dodge exists for.
@@ -396,23 +416,29 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
     [
       // The detonation itself, which is far too late to walk out of — the
       // client answers it with an `AOEACK` saying where the player was. Kept
-      // because it confirms a telegraph was read correctly, and because it
-      // carries the one thing the telegraph never does: how wide the blast
-      // actually was, which is what the next one from the same enemy is planned
-      // around.
+      // because it confirms a telegraph was read correctly, because it carries
+      // the one thing the telegraph never does — how wide the blast actually
+      // was, which is what the next one from the same enemy is planned
+      // around — and because an *unmatched* one is the only witness there will
+      // ever be to an enemy that blasts itself without warning.
       'AOE',
       (packet, world) => {
         const at = locationOf(packet.get('position'));
         if (at === undefined) return;
-        world.blastStore.landed(world.gameTimeMs, {
+        const radiusTiles = packet.number('radius') ?? 0;
+        // Damage, or a condition to be under. An area effect that does
+        // neither is a heal or a buff landing on the party, and treating one
+        // as a detonation cancels whatever real prediction it lands near.
+        const harmful = (packet.number('damage') ?? 0) > 0 || (packet.number('effect') ?? 0) > 0;
+        const matched = world.blastStore.landed(world.gameTimeMs, {
           x: at.x,
           y: at.y,
-          radiusTiles: packet.number('radius') ?? 0,
-          // Damage, or a condition to be under. An area effect that does
-          // neither is a heal or a buff landing on the party, and treating one
-          // as a detonation cancels whatever real prediction it lands near.
-          harmful: (packet.number('damage') ?? 0) > 0 || (packet.number('effect') ?? 0) > 0,
+          radiusTiles,
+          harmful,
         });
+        if (!matched && harmful) {
+          learnSelfBlast(world, at.x, at.y, radiusTiles, packet.number('originType') ?? 0);
+        }
       },
     ],
   ]);
@@ -436,6 +462,51 @@ function pointOf(
 function locationOf(value: unknown): { x: number; y: number } | undefined {
   const record = asRecord(value);
   return pointOf(numberOf(record, 'x'), numberOf(record, 'y'));
+}
+
+/**
+ * Teaches the self-blast keep-out from a detonation that matched no telegraph.
+ *
+ * The two halves of the question are asked in the order of their cost: the
+ * telegraph check is one walk over a handful of live predictions, and the enemy
+ * walk only happens for a blast that was genuinely unwarned. Both must hold —
+ * a warned blast is dodgeable as a blast, and a blast centred on nobody or on
+ * the wrong type is aimed fire, and either learned as a self blast would put a
+ * standing keep-out on an enemy that never hurt anybody standing near it.
+ */
+function learnSelfBlast(
+  world: WorldState,
+  x: number,
+  y: number,
+  radiusTiles: number,
+  originType: number,
+): void {
+  if (!(radiusTiles > 0) || radiusTiles > MAX_SELF_BLAST_TILES) return;
+  if (world.blastStore.announcedNear(x, y, radiusTiles + TELEGRAPH_REACH_TILES)) return;
+  if (!isSelfBlast(x, y, originType, world.enemies())) return;
+  world.selfBlasts.learn(originType, radiusTiles);
+}
+
+/**
+ * Teaches the self-blast keep-out from a shot that never moves and sits on its
+ * owner.
+ *
+ * The radius is the shot's collision square circumscribed — the keep-out is a
+ * disc and the field is a square, and the disc has to cover the square's
+ * corners. No living check: a setpiece tower that reports no health is exactly
+ * the enemy this path exists for, and a dead corpse stops announcing shots.
+ */
+function learnStationaryShot(
+  world: WorldState,
+  ownerType: number,
+  ownerX: number,
+  ownerY: number,
+  definition: ProjectileDefinition,
+  x: number,
+  y: number,
+): void {
+  if (Math.hypot(ownerX - x, ownerY - y) > SELF_BLAST_CENTRE_TILES) return;
+  world.selfBlasts.learn(ownerType, projectileHalfTiles(definition.collisionMult) * Math.SQRT2);
 }
 
 // Packet fields are data we were handed, so every read is a check. These

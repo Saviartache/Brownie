@@ -5,11 +5,11 @@
 // would cost more than it returns. Anything that needs more than this belongs
 // on the Node side, where the contract is already tested against a hostile peer.
 
-#include <cstdio>
-#include <cstring>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <optional>
@@ -51,8 +51,8 @@
 #include "ipc/SessionKey.h"
 #include "overlay/ActionQueue.h"
 #include "overlay/ControlRecord.h"
-#include "overlay/InputQueue.h"
 #include "overlay/DodgePicture.h"
+#include "overlay/InputQueue.h"
 #include "overlay/WorldRecord.h"
 
 namespace {
@@ -136,8 +136,7 @@ void ResultCarriesTheReason() {
     const brownie::Result<int> ok{7};
     Check(ok.ok() && ok.value() == 7, "a value comes back");
 
-    const brownie::Result<int> failed{
-        brownie::Error{brownie::ErrorCode::kProtocol, "because"}};
+    const brownie::Result<int> failed{brownie::Error{brownie::ErrorCode::kProtocol, "because"}};
     Check(!failed.ok(), "a failure is not ok");
     Check(failed.error().code() == brownie::ErrorCode::kProtocol, "the code survives");
     Check(failed.value_or(-1) == -1, "and a fallback is available");
@@ -171,7 +170,8 @@ void FrameReaderReassembles() {
                 break;
             }
             ++seen;
-            Check(frame.value().header.seq == static_cast<std::uint32_t>(seen), "frames arrive in order");
+            Check(frame.value().header.seq == static_cast<std::uint32_t>(seen),
+                  "frames arrive in order");
         }
     }
     Check(seen == 2, "both frames were reassembled");
@@ -299,7 +299,8 @@ void HooksDivertAndRestore() {
     Check(Doubled(g_twenty_one) == 42, "installing alone does not divert anything");
 
     Check(installed.Enable().ok(), "the hook enables");
-    Check(Doubled(g_twenty_one) == 63, "and the detour runs, with the original reachable through it");
+    Check(Doubled(g_twenty_one) == 63,
+          "and the detour runs, with the original reachable through it");
 
     Check(installed.Disable().ok(), "the hook disables");
     Check(Doubled(g_twenty_one) == 42, "and the target is itself again");
@@ -381,7 +382,8 @@ void WorldRecordsAreReadStrictly() {
     // A truncated or malformed record must not half-fill the status: a position
     // of zero would draw the player at the corner of the map.
     brownie::overlay::WorldStatus partial;
-    Check(!brownie::overlay::ParseWorldRecord("world|640|770", partial), "a short record is refused");
+    Check(!brownie::overlay::ParseWorldRecord("world|640|770", partial),
+          "a short record is refused");
     Check(!partial.known, "and writes nothing");
     Check(!brownie::overlay::ParseWorldRecord("world|640|770|12.5|0|0|0", partial),
           "a field that is not a whole number is refused");
@@ -531,9 +533,9 @@ void AimRecordsAreReadStrictly() {
     // Five of the six describe no lead at all, so a half-written motion is read
     // as none — and the shift the enemy fields describe still stands.
     brownie::overlay::AimCommand half_written;
-    Check(brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25|300|-150|80|800",
-                                           half_written),
-          "a half-written motion still leaves a usable aim");
+    Check(
+        brownie::overlay::ParseAimRecord("aim|500|0|350|8821|450|25|300|-150|80|800", half_written),
+        "a half-written motion still leaves a usable aim");
     Check(!half_written.has_motion, "which is read as carrying none");
     Check(half_written.object_id == 8821, "while the enemy it names survives");
 
@@ -879,8 +881,7 @@ void PlayerTileSpeedInstallsBothOrNeither() {
     int method = 0;
     constexpr std::uint32_t kMultiplierAt = 0x5D8;
 
-    Check(!gate.Install(nullptr, &method, kMultiplierAt).ok(),
-          "one method alone installs nothing");
+    Check(!gate.Install(nullptr, &method, kMultiplierAt).ok(), "one method alone installs nothing");
     Check(!gate.Install(&method, nullptr, kMultiplierAt).ok(), "whichever of the two it is");
     Check(!gate.Install(&method, &method, 0).ok(),
           "nor does a pair with nowhere to put the number back");
@@ -1139,8 +1140,7 @@ void UnbindableCallersStayQuiet() {
 void ControlFieldsRoundTrip() {
     // The exact escaping `encodeURIComponent` produces, because the runtime
     // decodes with `decodeURIComponent` and anything else would not survive.
-    Check(brownie::overlay::EncodeField("Warn below (% health)") ==
-              "Warn%20below%20(%25%20health)",
+    Check(brownie::overlay::EncodeField("Warn below (% health)") == "Warn%20below%20(%25%20health)",
           "a label encodes the way the runtime decodes");
     Check(brownie::overlay::EncodeField("a|b") == "a%7Cb", "a separator cannot escape its field");
 
@@ -1296,9 +1296,9 @@ void SelectOptionsAndVisibilityAreRead() {
     brownie::overlay::ControlMirror mirror;
     Check(!mirror.Apply("sync-begin"), "open");
     Check(!mirror.Apply("plugin|a|A|utility|1|enabled|"), "a plugin");
-    Check(!mirror.Apply(
-              "setting|a|mode|Mode|select|s|fast|0|0|0|0|0|0|Fast%3Dfast%3BSlow%3Dslow||"),
-          "a select");
+    Check(
+        !mirror.Apply("setting|a|mode|Mode|select|s|fast|0|0|0|0|0|0|Fast%3Dfast%3BSlow%3Dslow||"),
+        "a select");
     // Trailing empties are the options and the group, which this one does not
     // use: `visibleWhen` is the last field and is read by position, not by
     // being last.
@@ -1332,6 +1332,87 @@ void MultiSelectIsReadAsAChecklist() {
     Check(row.value == "b", "with its chosen keys as the value");
     Check(row.options.size() == 2 && row.options[1].label == "B" && row.options[1].value == "b",
           "and every option to tick");
+}
+
+void AssetMultiSelectIsReadWithItsSprites() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|a|A|items|1|enabled|"), "a plugin");
+    Check(!mirror.Apply("sprites|C%3A%2Fwherever%2Fsprites.bin"), "the sprite file, by path");
+    // The picture multi-select: a multi-select with one appended field — the
+    // sprite key of each option, `;`-joined and in the options' own order. An
+    // older record without it still parses; every sprite is simply empty.
+    Check(!mirror.Apply("setting|a|take|Take|assetMultiSelect|s|1803|0|0|0|0|0|0|"
+                        "Key%20A%3D1803%3BKey%20B%3D1804%3BPlain%3D9|||%3B1804%3B"),
+          "a picture multi-select");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    Check(mirror.sprites_path() == "C:/wherever/sprites.bin",
+          "the sprite file is part of the committed sync");
+
+    const auto& row = mirror.plugins().front().settings.front();
+    Check(row.kind == brownie::overlay::SettingKind::kAssetMultiSelect,
+          "kept as a picture multi-select");
+    Check(row.options.size() == 3, "every option");
+    Check(row.options[0].sprite.empty(), "one with no sprite of its own");
+    Check(row.options[1].sprite == "1804", "one that names another object's art");
+    Check(row.options[2].sprite.empty(), "and one that falls back to its own value");
+
+    // A sync that names no sprite file says so by silence, and the old path is
+    // gone — anything a sync does not mention is.
+    Check(!mirror.Apply("sync-begin"), "open again");
+    Check(mirror.Apply("sync-end"), "and commit nothing");
+    Check(mirror.sprites_path().empty(), "the sprite file left with the sync that named it");
+}
+
+void AssetSpritesAreAlignedToTheirOptions() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|a|A|items|1|enabled|"), "a plugin");
+    // More sprite keys than options: the surplus is dropped, because there is
+    // nothing left to stamp it on — the sprite is decoration, and refusing the
+    // whole control over it would trade a picture for a setting.
+    Check(!mirror.Apply("setting|a|take|Take|assetMultiSelect|s||0|0|0|0|0|0|A%3Da|||%3Bb%3Bc"),
+          "a misaligned sprite list");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    const auto& row = mirror.plugins().front().settings.front();
+    Check(row.options.size() == 1, "the one option");
+    Check(row.options[0].sprite == "", "takes the first key, and the rest are dropped");
+}
+
+void LongOptionListsArriveInPieces() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|a|A|items|1|enabled|"), "a plugin");
+    // A setting whose option list is too long for one frame arrives with an
+    // empty options field, followed by `options` pieces inside the same sync
+    // bracket. Each piece carries its own sprite keys, aligned to its own
+    // cells - the pieces are self-contained, and the list is whole exactly
+    // when the sync commits.
+    Check(!mirror.Apply(
+              "setting|a|take|Take|assetMultiSelect|s|1803|0|0|0|0|0|0||group||"),
+          "a setting with an overlong list");
+    Check(!mirror.Apply("options|a|take|0|2|Key%20A%3D1803%3BKey%20B%3D1804|77%3B88"),
+          "the first piece");
+    Check(!mirror.Apply("options|a|take|1|2|Plain%3D9|"), "the second");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    const auto& row = mirror.plugins().front().settings.front();
+    Check(row.options.size() == 3, "the pieces make the whole list");
+    Check(row.options[0].label == "Key A" && row.options[0].sprite == "77",
+          "the first option with its own sprite");
+    Check(row.options[1].label == "Key B" && row.options[1].sprite == "88",
+          "the second with its own");
+    Check(row.options[2].label == "Plain" && row.options[2].sprite.empty(),
+          "and one that carries none");
+
+    // A piece whose setting never arrived is dropped, not invented onto.
+    Check(!mirror.Apply("sync-begin"), "open again");
+    Check(!mirror.Apply("plugin|a|A|items|1|enabled|"), "a plugin");
+    Check(!mirror.Apply("options|a|missing|0|1|A%3Da|"), "a piece with no setting");
+    Check(mirror.Apply("sync-end"), "commits");
+    Check(mirror.plugins().front().settings.empty(), "nothing was invented");
 }
 
 void AChordNamesAKeyByWhereItIsRatherThanByWhatItTypes() {
@@ -1402,8 +1483,7 @@ void ABindRecordIsWhatOffersAKey() {
     Check(!short_record.Apply("plugin|auto-aim|Auto%20Aim|combat|0|loaded||1"), "a plugin");
     Check(!short_record.Apply("bind|auto-aim|hold"), "a bind missing its key");
     Check(short_record.Apply("sync-end"), "commits");
-    Check(short_record.plugins().front().binds.empty(),
-          "which is refused rather than half-read");
+    Check(short_record.plugins().front().binds.empty(), "which is refused rather than half-read");
 }
 
 /// A keyboard the self-check can press, since it has no real one to.
@@ -1464,9 +1544,8 @@ struct HotkeyLog {
 void AKeyIsReportedOnItsEdgeAndNeverOnItsState() {
     FakeKeyboard keyboard;
     HotkeyLog log;
-    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
-        return keyboard.Held(chord);
-    }};
+    brownie::app::HotkeyWatch watch{
+        [&keyboard](const brownie::core::KeyChord& chord) { return keyboard.Held(chord); }};
 
     watch.Watch({Bind("auto-aim", false, "F5")}, log.Sink());
     Check(watch.watching(), "a bound key is watched");
@@ -1495,9 +1574,8 @@ void AKeyIsReportedOnItsEdgeAndNeverOnItsState() {
 void ABindNeverFiresOnAKeyThatWasAlreadyDown() {
     FakeKeyboard keyboard;
     HotkeyLog log;
-    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
-        return keyboard.Held(chord);
-    }};
+    brownie::app::HotkeyWatch watch{
+        [&keyboard](const brownie::core::KeyChord& chord) { return keyboard.Held(chord); }};
 
     // The player is holding the key at the moment it becomes theirs — which is
     // what rebinding to a key you are holding looks like, and what a runtime
@@ -1517,9 +1595,8 @@ void ABindNeverFiresOnAKeyThatWasAlreadyDown() {
 void AHoldEndsWhateverStopsIt() {
     FakeKeyboard keyboard;
     HotkeyLog log;
-    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
-        return keyboard.Held(chord);
-    }};
+    brownie::app::HotkeyWatch watch{
+        [&keyboard](const brownie::core::KeyChord& chord) { return keyboard.Held(chord); }};
 
     watch.Watch({Bind("auto-dodge", true, "Mouse5")}, log.Sink());
     keyboard.Press("Mouse5");
@@ -1568,9 +1645,8 @@ void AHoldEndsWhateverStopsIt() {
 void TwoKeysOnOnePluginAreTwoBinds() {
     FakeKeyboard keyboard;
     HotkeyLog log;
-    brownie::app::HotkeyWatch watch{[&keyboard](const brownie::core::KeyChord& chord) {
-        return keyboard.Held(chord);
-    }};
+    brownie::app::HotkeyWatch watch{
+        [&keyboard](const brownie::core::KeyChord& chord) { return keyboard.Held(chord); }};
 
     watch.Watch({Bind("auto-dodge", false, "F5"), Bind("auto-dodge", true, "Mouse4", "anchor")},
                 log.Sink());
@@ -2110,7 +2186,8 @@ void AColourSettingIsDrawnAsOneAndAnUnknownKindIsNot() {
     // A kind this build predates. Text is the fallback because every setting
     // has a value that can be shown and edited as one, so an overlay older than
     // the runtime is usable rather than blind.
-    Check(!mirror.Apply("setting|glow|later|Later|gradient|s|x|0|0|0|0|0|0||"), "and one from the future");
+    Check(!mirror.Apply("setting|glow|later|Later|gradient|s|x|0|0|0|0|0|0||"),
+          "and one from the future");
     Check(mirror.Apply("sync-end"), "committed");
 
     const auto& settings = mirror.plugins().front().settings;
@@ -2359,8 +2436,8 @@ void AClassIsDescribedByWhatItTouches() {
     Check(detail.members[0].offset == "0x0040", "an instance field carries its offset");
     Check(detail.members[3].is_static && detail.members[3].offset.empty(),
           "a static field has no offset to show");
-    Check(detail.members[4].is_method && detail.members[4].detail.starts_with(
-              "DecaGames.RotMG.Objects.Player (System.Int32)"),
+    Check(detail.members[4].is_method &&
+              detail.members[4].detail.starts_with("DecaGames.RotMG.Objects.Player (System.Int32)"),
           "a method is shown as its signature");
 
     // The whole point of the panel: the name is noise, so what it stores and
@@ -2387,8 +2464,7 @@ void AnAbsentClassSaysSoRatherThanLookingEmpty() {
 void ASweepSkipsWhatMustNotBeWalked() {
     FakeMetadata metadata;
     metadata.Add(ObfuscatedClass());
-    metadata.Add(FakeMetadata::Class{.name_space = "System.Collections.Generic",
-                                     .name = "List`1"});
+    metadata.Add(FakeMetadata::Class{.name_space = "System.Collections.Generic", .name = "List`1"});
     metadata.Add(FakeMetadata::Class{.name = "Player[]"});
     metadata.Add(FakeMetadata::Class{.name = "<>c"});
     metadata.Add(FakeMetadata::Class{.name = "NotBuiltYet", .prepared = false});
@@ -2687,8 +2763,8 @@ void AddPlayerClasses(FakeMetadata& metadata,
         // Non-zero and distinct, so a check on the offset says more than a
         // check on "resolved" alone.
         const auto offset = static_cast<std::uint32_t>(0x40 + 8 * klass->fields.size());
-        klass->fields.push_back({std::string{entry.query.name},
-                                 std::string{entry.query.type_name}, offset, false});
+        klass->fields.push_back(
+            {std::string{entry.query.name}, std::string{entry.query.type_name}, offset, false});
     }
     for (auto& klass : classes) {
         metadata.Add(std::move(klass));
@@ -2740,8 +2816,7 @@ void PlayerSkinUsesTheActiveOverride() {
 
     FakeMetadata metadata;
     FakeMetadata::Class local_player{.name = "FKALGHJIADI"};
-    local_player.methods.push_back(
-        {"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
+    local_player.methods.push_back({"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
     metadata.Add(std::move(local_player));
 
     brownie::game::OffsetTable table{metadata};
@@ -2757,8 +2832,7 @@ void TheGlowSetterIsNotTheSkinSetter() {
     // together is the check that each is found by its own name.
     FakeMetadata metadata;
     FakeMetadata::Class local_player{.name = "FKALGHJIADI"};
-    local_player.methods.push_back(
-        {"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
+    local_player.methods.push_back({"MBKGLHCJBCD", "System.Void", {"System.Int32"}, kEntryPoint});
     local_player.methods.push_back(
         {"JEDNHGGONPP", "System.Void", {"System.Int32"}, kOtherEntryPoint});
     metadata.Add(std::move(local_player));
@@ -2799,8 +2873,7 @@ void ArcaneStylesMatchTheLiveLibrary() {
           "an exact Arcane Style id matches");
     Check(MatchesArcaneStyle("Brown Hologram Style Stone", "Brown Hologram Style"),
           "a player Arcane Style matches its live library entry");
-    Check(!MatchesArcaneStyle("Brown Hologram Style Stone Stone",
-                              "Brown Hologram Style Stone"),
+    Check(!MatchesArcaneStyle("Brown Hologram Style Stone Stone", "Brown Hologram Style Stone"),
           "an existing Stone suffix is not appended twice");
     Check(!MatchesArcaneStyle("Brown Hologram Style Stone", "Brown Hologram"),
           "a partial Arcane Style id does not match");
@@ -2886,6 +2959,9 @@ int main() {
     AControlRecordThatSaysTooLittleIsRefused();
     SelectOptionsAndVisibilityAreRead();
     MultiSelectIsReadAsAChecklist();
+    AssetMultiSelectIsReadWithItsSprites();
+    AssetSpritesAreAlignedToTheirOptions();
+    LongOptionListsArriveInPieces();
     AChordNamesAKeyByWhereItIsRatherThanByWhatItTypes();
     ABindRecordIsWhatOffersAKey();
     AKeyIsReportedOnItsEdgeAndNeverOnItsState();

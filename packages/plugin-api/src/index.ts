@@ -19,6 +19,8 @@ export {
   humaniseKey,
   MULTI_SELECT_DELIMITER,
   normaliseColour,
+  type AssetMultiSelectSettingOptions,
+  type AssetOption,
   type BooleanSettingOptions,
   type ButtonOptions,
   type ColourSettingOptions,

@@ -8,7 +8,8 @@ import {
 } from '../src/gamedata/GameCatalogs.js';
 import { EquippedWeapon } from '../src/gamedata/EquippedWeapon.js';
 import { reachTiles, type ProjectileDefinition } from '../src/gamedata/projectiles.js';
-import { PotionKind } from '../src/gamedata/items.js';
+import { GearFamily, PotionKind, gearFamilyOf } from '../src/gamedata/items.js';
+import { readSpriteTypes } from '../src/gamedata/spriteIndex.js';
 import {
   GameDataError,
   attribute,
@@ -67,8 +68,30 @@ const OBJECTS = `<?xml version="1.0" encoding="utf-8"?>
   <Object type="0xc85" id="Common Feline Egg">
     <Class>Equipment</Class>
     <Item />
+    <SlotType>26</SlotType>
   </Object>
   <Object type="0x1234" id="Rock &amp; Roll" />
+  <Object type="0x70b" id="Snake Pit Key">
+    <Class>Equipment</Class>
+    <Item />
+    <Key />
+    <Activate id="Snake Pit Portal">CreatePortal</Activate>
+  </Object>
+  <Object type="0x71a" id="Wine Cellar Incantation">
+    <Class>Equipment</Class>
+    <Item />
+    <Activate id="Wine Cellar Portal">CreatePortal</Activate>
+  </Object>
+  <Object type="0x71b" id="Alice Blue Clothing Dye">
+    <Class>Equipment</Class>
+    <Item />
+    <SlotType>10</SlotType>
+  </Object>
+  <Object type="0x5c6" id="Snake Pit Portal">
+    <Class>Portal</Class>
+    <DungeonPortal />
+    <DungeonName>Snake Pit</DungeonName>
+  </Object>
 </Objects>`;
 
 const TILES = `<?xml version="1.0" encoding="utf-8"?>
@@ -89,7 +112,7 @@ const TILES = `<?xml version="1.0" encoding="utf-8"?>
 describe('scanElements', () => {
   it('yields each element, including a self-closing one', async () => {
     const elements = await collect(OBJECTS, 'Object');
-    expect(elements).toHaveLength(5);
+    expect(elements).toHaveLength(9);
     expect(elements[4]).toBe('<Object type="0x1234" id="Rock &amp; Roll" />');
   });
 
@@ -151,11 +174,63 @@ describe('element readers', () => {
   });
 });
 
+describe('the sprite index', () => {
+  /** The extraction's file: magic, version, atlas size, entries, pixels. */
+  function spritesFile(types: readonly number[]): Buffer {
+    const out = Buffer.alloc(24 + types.length * 20 + 2 * 1 * 4);
+    out.write('BROWNSPR', 0, 'ascii');
+    out.writeUInt32LE(1, 8);
+    out.writeUInt32LE(2, 12);
+    out.writeUInt32LE(1, 16);
+    out.writeUInt32LE(types.length, 20);
+    types.forEach((type, i) => out.writeUInt32LE(type, 24 + i * 20));
+    return out;
+  }
+
+  it('reads which object types the file carries', () => {
+    expect(readSpriteTypes(spritesFile([0x70b, 0x703]))).toEqual(new Set([0x70b, 0x703]));
+  });
+
+  it('refuses a file that is not a sprite index, rather than guessing', () => {
+    expect(readSpriteTypes(Buffer.alloc(64))).toBeUndefined();
+    expect(readSpriteTypes(spritesFile([1]).subarray(0, 10))).toBeUndefined();
+    // A length that disagrees with the entry count is a corrupt file.
+    const truncated = spritesFile([1, 2]).subarray(0, 24 + 20);
+    expect(readSpriteTypes(truncated)).toBeUndefined();
+  });
+});
+
 describe('object catalog', () => {
+  it('pairs each dungeon portal with the key that opens it', async () => {
+    const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
+
+    const portals = catalog.dungeonPortals();
+    expect(portals).toEqual([
+      {
+        type: 0x5c6,
+        name: 'Snake Pit Portal',
+        dungeonName: 'Snake Pit',
+        keyType: 0x70b,
+      },
+    ]);
+  });
+
+  it('lists the loot a bag can drop, and nothing cosmetic', async () => {
+    const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
+
+    // The egg drops and the key drops; the incantation and the dye are
+    // slot-10 consumables with no loot marker, and a chooser of loot leaves
+    // them out.
+    expect(catalog.items()).toEqual([
+      { type: 0xc85, name: 'Common Feline Egg' },
+      { type: 0x70b, name: 'Snake Pit Key' },
+    ]);
+  });
+
   it('classifies players and enemies from what the game says, not from id ranges', async () => {
     const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
 
-    expect(catalog.size).toBe(5);
+    expect(catalog.size).toBe(9);
     expect(catalog.isPlayer(0x30e)).toBe(true);
     expect(catalog.isEnemy(0x30e)).toBe(false);
     expect(catalog.isEnemy(0x0d59)).toBe(true);
@@ -586,6 +661,7 @@ describe('what the catalog says about items', () => {
     <Activate amount="100">Heal</Activate>
     <Consumable />
     <Potion />
+    <feedPower>5</feedPower>
     <QuickslotAllowed maxstack="6" />
     <Labels>EQUIPMENT,CONSUMABLE,TIERED,LOOTABLE,T1,TRADEABLE</Labels>
   </Object>`;
@@ -637,6 +713,7 @@ describe('what the catalog says about items', () => {
     <Item />
     <SlotType>3</SlotType>
     <Tier>12</Tier>
+    <feedPower>450</feedPower>
     <Labels>EQUIPMENT,WEAPON,BOW,TIERED,LOOTABLE,T12,T12_WEAPON</Labels>
   </Object>`;
 
@@ -757,6 +834,25 @@ describe('what the catalog says about items', () => {
     // Everything the belt refuses says so by carrying no marker at all.
     expect(objects.item(0xa1f)?.beltStack).toBe(0);
     expect(objects.item(0xb02)?.beltStack).toBe(0);
+  });
+
+  it('reads what feeding an item to a pet is worth', async () => {
+    const objects = await catalog();
+    expect(objects.item(0xb02)?.feedPower).toBe(450);
+    expect(objects.item(0xa22)?.feedPower).toBe(5);
+    // An item that states no value at all is worth nothing, not a guess.
+    expect(objects.item(0x2301)?.feedPower).toBe(0);
+  });
+
+  it('files slot types into gear families, leaving potions and eggs out', () => {
+    expect(gearFamilyOf(3)).toBe(GearFamily.Weapon);
+    expect(gearFamilyOf(11)).toBe(GearFamily.Ability);
+    expect(gearFamilyOf(14)).toBe(GearFamily.Armor);
+    expect(gearFamilyOf(9)).toBe(GearFamily.Ring);
+    // Slot 10 is every potion, dye and consumable; 26 is pet eggs. Neither is
+    // gear, and both have their own rules wherever they are read.
+    expect(gearFamilyOf(10)).toBeUndefined();
+    expect(gearFamilyOf(26)).toBeUndefined();
   });
 
   it('says nothing about an object that is not an item', async () => {

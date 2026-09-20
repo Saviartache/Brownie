@@ -6,36 +6,12 @@
  * against a table of items with no session, no bag and no packet.
  */
 
-import { PotionKind, type ItemFacts } from '../../gamedata/items.js';
+import { PotionKind, gearFamilyOf, GearFamily, type ItemFacts } from '../../gamedata/items.js';
 
 /** Which bucket a gear slot falls in, for the per-bucket tier thresholds. */
-export const GearCategory = {
-  Weapon: 'weapon',
-  Ability: 'ability',
-  Armor: 'armor',
-  Ring: 'ring',
-} as const;
+export const GearCategory = GearFamily;
 
-export type GearCategory = (typeof GearCategory)[keyof typeof GearCategory];
-
-/**
- * Slot type → bucket.
- *
- * The game's own numbering, and it is checked against the data file rather than
- * assumed: every slot type below holds items the file labels with the matching
- * category, and the two it leaves out are 10 — every potion, dye and consumable
- * the game has — and 26, which is pet eggs. Both have their own rules.
- */
-const CATEGORY_BY_SLOT_TYPE: ReadonlyMap<number, GearCategory> = new Map([
-  ...([1, 2, 3, 8, 17, 24] as const).map(
-    (slot) => [slot, GearCategory.Weapon] as [number, GearCategory],
-  ),
-  ...([4, 5, 11, 12, 13, 15, 16, 18, 19, 20, 21, 22, 23, 25, 27, 28, 29, 30, 31] as const).map(
-    (slot) => [slot, GearCategory.Ability] as [number, GearCategory],
-  ),
-  ...([6, 7, 14] as const).map((slot) => [slot, GearCategory.Armor] as [number, GearCategory]),
-  ...([9] as const).map((slot) => [slot, GearCategory.Ring] as [number, GearCategory]),
-]);
+export type GearCategory = GearFamily;
 
 /** Every potion, dye and consumable shares this slot. */
 const CONSUMABLE_SLOT_TYPE = 10;
@@ -79,7 +55,7 @@ export interface LootCandidate {
 }
 
 export function gearCategoryOf(slotType: number): GearCategory | undefined {
-  return CATEGORY_BY_SLOT_TYPE.get(slotType);
+  return gearFamilyOf(slotType);
 }
 
 /**

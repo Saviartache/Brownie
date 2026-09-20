@@ -10,7 +10,7 @@
  *
  * **A preset owns the numbers that say "how cautious", and nothing else.** How
  * long a command lives, how much of the character's speed to use, how far off a
- * wall to plan, whether the hop is allowed at all — those are properties of a
+ * wall to plan — those are properties of a
  * machine, a connection or a preference, and a preset that quietly rewrote them
  * would be a preset that undoes somebody's setup every time they try another
  * one.

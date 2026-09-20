@@ -4,8 +4,8 @@
  * **The whole feature in one sentence.** Look at what the player is already
  * doing; if it survives the next fraction of a second with room to spare, say
  * nothing. Otherwise roll a few dozen futures forward a second apiece and
- * command the first move of the cheapest one — which is very often a twentieth
- * of a tile, and very often nothing at all.
+ * command the first move of the cheapest one — which is very often a short
+ * step, and very often nothing at all.
  *
  * **The pipeline, stated once.** The world hands over the shots, the map and the
  * bodies; `ShotField` predicts where every shot that could reach us will be;
@@ -25,7 +25,7 @@
  * of lookahead fixes it. Charging for *distance from the anchor, per tick spent
  * there* replaces all of it, and a step charge for leaving the ring the
  * character can actually fight from is what turns "a tile and back" into "a
- * twentieth of a tile and back". See `TrajectoryScore`.
+ * short step and back". See `TrajectoryScore`.
  *
  * **The anchor is a DPS position.** Where they were, the line they are walking,
  * or a place they named with a key — all three are the same idea, which is
@@ -55,7 +55,6 @@ import type { AttackPatterns } from './AttackPatterns.js';
 import { Blasts, type BlastView } from './Blasts.js';
 import { DangerField, NO_DANGER_TILES } from './DangerField.js';
 import type { DodgeGround } from './DodgeGround.js';
-import { MAX_HOP_TILES } from './Hop.js';
 import { PocketLock } from './PocketLock.js';
 import { MAX_FIELD_SLICES, ShotField, type DodgeShot } from './ShotField.js';
 import {
@@ -106,7 +105,7 @@ export interface DodgeSettings {
    * evaluated at every tick, so halving it doubles both the number of ticks and
    * the number of danger-field queries. Unlike the previous generation's lattice
    * it is *not* the smallest movement the planner can describe — the first move
-   * is sampled at its own resolution, down to a twentieth of a tile.
+   * is sampled at its own resolution, well under a tile.
    */
   readonly tickMs: number;
   /**
@@ -165,7 +164,7 @@ export interface DodgeSettings {
    * **What makes "practically never leave the DPS spot" a rule rather than a
    * hope.** Inside it nothing is lost but the distance; the first tick outside
    * it is charged a flat price the distance term can never pay back, so a
-   * twentieth of a tile that stays inside beats half a tile that does not,
+   * short step that stays inside beats half a tile that does not,
    * however much safer the further one looks.
    */
   readonly dpsRadiusTiles: number;
@@ -177,12 +176,6 @@ export interface DodgeSettings {
    * clean way through, which is exactly when a plan must still arrive on time.
    */
   readonly budget: number;
-  /** Whether the instant sidestep is allowed at all. */
-  readonly hopEnabled: boolean;
-  /** How far one hop carries, capped at what the module can actually do. */
-  readonly hopTiles: number;
-  /** The least time between two hops. */
-  readonly hopCooldownMs: number;
 }
 
 export interface DodgeSituation {
@@ -194,7 +187,7 @@ export interface DodgeSituation {
   readonly speedTilesPerSecond: number;
   /** The clock shot predictions are relative to. */
   readonly gameTimeMs: number;
-  /** Wall-clock, for the hop's cooldown and the commitment. */
+  /** Wall-clock, for the commitment. */
   readonly nowMs: number;
   /**
    * Whether the player is standing on ground that is costing them health.
@@ -265,13 +258,6 @@ export interface DodgePlan {
    * to hold.
    */
   readonly stepTiles: number;
-  /**
-   * Whether to spend it as one frame of movement rather than as a walk.
-   *
-   * Only ever set with a distance the module can carry in a single frame — see
-   * {@link MAX_HOP_TILES}. Everything else about the command is the same.
-   */
-  readonly hop: boolean;
   /** When the chosen trajectory is first hit, from now, or `Infinity`. */
   readonly impactMs: number;
   /** The least room it ever has, over the whole horizon. */
@@ -422,18 +408,9 @@ const HAZARD_PER_TILE = 60;
 const DPS_TICK_AS_TILES = 0.6;
 
 /**
- * What spending the hop costs, in the cost model's own units.
- *
- * Below a tile of walking, because the ladder puts movement distance above an
- * unnecessary hop — so a hop that travels less than a walk still wins, and what
- * this buys is only the tie.
- */
-const HOP_PER_USE = 0.25;
-
-/**
  * What a complete reversal of the held direction costs.
  *
- * The smallest term in the model, below the hop, because that is where the
+ * The smallest term in the model, because that is where the
  * ladder puts it. It exists to settle two candidates the field cannot tell
  * apart, and to be outvoted the moment one of them is genuinely better.
  */
@@ -456,17 +433,6 @@ export class DodgePlanner {
   #holdDirX = 0;
   #holdDirY = 0;
   #holdAtMs = 0;
-  /**
-   * When the hop becomes available again.
-   *
-   * **Sized by what the last one actually spent**, because that is what the rule
-   * is really about: the server takes back ground covered faster than a
-   * character can walk, and a hop of a twentieth of a tile is a fourteenth of one
-   * frame's allowance rather than a sprint. A flat cooldown priced the micro-
-   * dodge — which is most of what this planner does — as though it were the
-   * emergency leap, and then had nothing left when the leap was wanted.
-   */
-  #hopReadyAtMs = 0;
 
   /**
    * The ground the planner took the player off, and whether it is still holding
@@ -503,7 +469,6 @@ export class DodgePlanner {
     dpsRadiusTiles: 0,
     dpsPerTick: 0,
     travelPerTile: TRAVEL_PER_TILE,
-    hopPerUse: HOP_PER_USE,
     turnPerReversal: TURN_PER_REVERSAL,
     safeClearanceTiles: 0,
     riskPerTile: RISK_PER_TILE,
@@ -524,7 +489,6 @@ export class DodgePlanner {
     orbitY: 0,
     orbitTiles: 0,
     stepTiles: 0,
-    hopTiles: 0,
     ticks: 1,
     tickMs: 100,
     leadMs: 0,
@@ -545,7 +509,6 @@ export class DodgePlanner {
     dirX: 0,
     dirY: 0,
     stepTiles: 0,
-    hop: false,
     impactMs: Infinity,
     clearanceTiles: NO_DANGER_TILES,
     crowded: false,
@@ -565,7 +528,6 @@ export class DodgePlanner {
     this.#holdDirX = 0;
     this.#holdDirY = 0;
     this.#holdAtMs = 0;
-    this.#hopReadyAtMs = 0;
     this.#anchorHeld = false;
     this.#anchorAtMs = 0;
     this.#orbitTiles = 0;
@@ -639,7 +601,6 @@ export class DodgePlanner {
     plan.trackedBlasts = this.#blasts.count;
     plan.crowded = crowding > 0;
     plan.evaluated = 0;
-    plan.hop = false;
     plan.ridingPattern = false;
 
     const steering = situation.intentX !== 0 || situation.intentY !== 0;
@@ -719,7 +680,6 @@ export class DodgePlanner {
     plan.dirX = trajectory.dirX;
     plan.dirY = trajectory.dirY;
     plan.stepTiles = trajectory.stepTiles;
-    plan.hop = trajectory.hop;
     plan.ridingPattern = trajectory.ridingPocket && this.#pockets.locked;
     // Standing still is a real answer, and under fire it is usually because
     // nowhere in reach is better. It is still worth commanding while the player
@@ -728,10 +688,6 @@ export class DodgePlanner {
     plan.verdict = verdictFor(situation, plan, trajectory);
 
     if (trajectory.stepTiles > 0) {
-      if (trajectory.hop) {
-        this.#hopReadyAtMs =
-          situation.nowMs + (settings.hopCooldownMs * trajectory.stepTiles) / MAX_HOP_TILES;
-      }
       this.#commit(trajectory.dirX, trajectory.dirY, situation.nowMs);
       // The ground under the character stops being the ground it is aiming for
       // the moment it moves them off it, and stays that way until they are back.
@@ -788,15 +744,6 @@ export class DodgePlanner {
     request.orbitY = this.#anchorY;
     request.orbitTiles = this.#orbitTiles;
     request.stepTiles = stepTiles;
-    // **The cooldown is expressed by withdrawing the action, not by a special
-    // case.** A hop that is not available is simply not a candidate, so nothing
-    // downstream needs a rule about when one may be chosen — and a plan made
-    // during the cooldown is an ordinary plan rather than one with a branch in
-    // it.
-    request.hopTiles =
-      settings.hopEnabled && situation.nowMs >= this.#hopReadyAtMs
-        ? Math.min(MAX_HOP_TILES, Math.max(0, settings.hopTiles))
-        : 0;
     request.ticks = ticks;
     request.tickMs = tickMs;
     request.leadMs = settings.leadMs;
@@ -995,12 +942,10 @@ export class DodgePlanner {
 /**
  * Why the planner is about to move, once it has decided that it is.
  *
- * **Why, not how.** Whether the move is a walk or a hop is `DodgePlan.hop`, and
- * it is a separate question at every rung of this ladder: the fast way out of a
- * pool is an escape spent as a hop, and a shove away from a body is spacing
- * spent as one. Folding the two together — which an older generation did,
- * because the hop was then an emergency rather than an action — meant the
- * picture could not say what the planner was actually answering.
+ * **Why, not how.** The reason for a move is a separate question at every rung
+ * of this ladder: the fast way out of a pool is an escape, and a shove away
+ * from a body is spacing. Folding them together meant the picture could not
+ * say what the planner was actually answering.
  */
 function verdictFor(
   situation: DodgeSituation,

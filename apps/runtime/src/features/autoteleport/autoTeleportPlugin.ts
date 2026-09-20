@@ -23,6 +23,7 @@
 
 import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
 import { isSafeZone } from '../../constants/SafeZones.js';
+import { bareName } from '../../state/playerName.js';
 import { ARRIVE_TILES, CONFIRM_MS, MAX_FAILURES, TELEPORT_INTERVAL_MS } from './constants.js';
 import { nearestApproacher, nearestBoss, tilesBetween, type BossLookup } from './bossApproach.js';
 
@@ -119,9 +120,9 @@ export function createAutoTeleportPlugin(inputs: AutoTeleportInputs): Plugin {
             state.failures = 0;
             if (engageFollowSetting.get()) {
               inputs.requestFollow(target.objectId);
-              say(session, `Teleported to ${target.name || 'teammate'} — following.`);
+              say(session, `Teleported to ${bareName(target.name) || 'teammate'} — following.`);
             } else {
-              say(session, `Teleported to ${target.name || 'teammate'}.`);
+              say(session, `Teleported to ${bareName(target.name) || 'teammate'}.`);
             }
           } else if (nowMs - state.pending.sentAtMs > CONFIRM_MS) {
             state.pending = undefined;

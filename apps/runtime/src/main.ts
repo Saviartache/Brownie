@@ -82,6 +82,10 @@ async function main(): Promise<void> {
     // And what this runtime measured blasts at, which is the same kind of thing
     // again: read off the game, stale on a patch, and free to delete.
     blastRadiiPath: join(process.cwd(), GAME_DATA_DIR, 'blast-radii.json'),
+    // And which enemy types blast themselves without warning, which is the
+    // same kind of thing again: read off the game, stale on a patch, and free
+    // to delete.
+    selfBlastsPath: join(process.cwd(), GAME_DATA_DIR, 'self-blasts.json'),
     // The one file this runtime writes on the user's behalf rather than for a
     // reader: every switch and knob they set, so a restart is not a re-setup.
     preferencesPath: PREFERENCES_PATH,

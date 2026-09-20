@@ -1,6 +1,7 @@
 /**
- * Auto-ability: casts the support half of the ability slot, and points the
- * other half at an enemy instead of at the mouse.
+ * Auto-ability: casts the support half of the ability slot, points the other
+ * half at an enemy instead of at the mouse, and — where the player asked for
+ * it — fires that half at a boss.
  *
  * **What the ability does is read from the ability, not from the class.** The
  * implementation this came from kept two hand-written sets of class ids — the
@@ -31,13 +32,18 @@
  * and fires a shot — and letting the rider decide is how a 180-mana heal went
  * off every 700 ms for as long as anything was on screen.
  *
- * **An attack ability is never cast here, only pointed.** A quiver, a spell, a
- * trap and a scepter give nothing this build can name, so there is no moment
- * that makes one worth firing — only a player who decided to fire it. Those
- * wait for the key press, and all this does with it is rewrite the one field
+ * **An attack ability is cast at a boss, and at nothing else, and only because
+ * the player switched that on.** A quiver, a spell, a trap and a scepter give
+ * nothing this build can name, so there is no bar to read and no buff to renew
+ * — no moment that makes one worth firing on this plugin's own judgement. The
+ * one decision a player can hand over whole is "a boss is in range", because a
+ * boss is what the mana is unambiguously for; that is the switch, off until
+ * they say otherwise. With it off — or with no boss in range — the ability
+ * waits for the key press, and all this does with it is rewrite the one field
  * the client fills from the mouse, so the ability lands on the enemy rather
- * than wherever the cursor happened to be. When to spend the mana stays the
- * player's decision; the only thing taken off them is the aiming.
+ * than wherever the cursor happened to be. When to spend the mana on everything
+ * else stays the player's decision; the only thing taken off them is the
+ * aiming.
  *
  * **The target is picked the way auto-aim picks one**, out of the same two
  * modules rather than out of a second opinion — see the import below. It is not
@@ -76,8 +82,10 @@ import {
   PluginCategory,
   definePlugin,
   type EntityView,
+  type ItemSlotView,
   type Plugin,
   type Position,
+  type SelfView,
   type SessionView,
   type SettingHandle,
   type SettingValue,
@@ -169,11 +177,17 @@ const SHOOTABLE: Omit<ShootableRules, 'isObstacle' | 'isInvincible'> = {
   skipObstacles: true,
 };
 
+/** Section headings on the tab, in the order the settings below declare them. */
+const ATTACKS_GROUP = 'Attack abilities';
+const SUPPORT_GROUP = 'Support abilities';
+const TARGETING_GROUP = 'Targeting';
+const LIMITS_GROUP = 'Limits';
+
 /**
  * Every setting, folded into one record when one of them moves.
  *
  * Read rather than looked up, which is the same reason Oryx's Sanctuary folds
- * its switches: a handle's `get` is a map lookup, there are eight of them on
+ * its switches: a handle's `get` is a map lookup, there are a dozen of them on
  * this path, and none of the answers changed between one server tick and the
  * next. It extends {@link CastPreferences} so the three the decision wants can
  * be handed straight to it instead of built into a fresh object per tick.
@@ -181,6 +195,8 @@ const SHOOTABLE: Omit<ShootableRules, 'isObstacle' | 'isInvincible'> = {
 interface Tuning extends CastPreferences {
   /** Point an attack ability the player fires, rather than leave it on the mouse. */
   readonly aimAttacks: boolean;
+  /** Fire an attack ability at a boss without waiting for the key press. */
+  readonly autoCastAttacks: boolean;
   readonly support: boolean;
   readonly rangeTiles: number;
   /** Which enemy out of the ones in range, in auto-aim's own terms. */
@@ -218,20 +234,57 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       id: 'auto-ability',
       name: 'Auto Ability',
       category: PluginCategory.Combat,
-      description: 'Casts your support ability when it is worth it, and aims the attacks you fire.',
+      description:
+        'Casts support abilities when they are worth it, aims the attacks you fire, and can fire those at a boss for you.',
     },
 
     setup(context) {
       // The two halves of the feature, and they are not the same offer: one
       // decides when to spend the mana, the other only decides where what the
-      // player already spent lands.
+      // player already spent lands. The third is the one decision the player
+      // can hand over whole — spend it on the boss, now, without me.
       const aimAttacks = context.settings.boolean('aimAttacks', {
         label: 'Aim the attack abilities you use — quivers, spells, traps, scepters',
         default: true,
+        group: ATTACKS_GROUP,
+      });
+      const autoCastAttacks = context.settings.boolean('autoCastAttacks', {
+        label: 'Auto-cast attack abilities at bosses — never at anything else',
+        default: false,
+        group: ATTACKS_GROUP,
       });
       const castSupport = context.settings.boolean('castSelf', {
         label: 'Use support abilities — heals, buffs, auras, cleanses',
         default: true,
+        group: SUPPORT_GROUP,
+      });
+      // The two thresholds that are the player's to set, and the only ones:
+      // whether a berserk aura needs an enemy nearby is not a preference, it is
+      // what a berserk aura is, and the data file already says so.
+      const healthPercent = context.settings.range('healthPercent', {
+        label: 'Cast healing abilities at or below (% health)',
+        default: 80,
+        min: 10,
+        max: 100,
+        step: 5,
+        group: SUPPORT_GROUP,
+      });
+      const utilityOutOfCombat = context.settings.boolean('utilityOutOfCombat', {
+        label: 'Keep speed and stealth up outside combat',
+        default: false,
+        group: SUPPORT_GROUP,
+      });
+      // Mana abilities are the rare item — a handful of tomes — and the
+      // threshold is settled once and left alone, so it is out of the everyday
+      // half of the tab rather than in the way of the health bar next to it.
+      const manaPercent = context.settings.range('manaPercent', {
+        label: 'Cast mana abilities at or below (% mana)',
+        default: 50,
+        min: 10,
+        max: 100,
+        step: 5,
+        group: SUPPORT_GROUP,
+        advanced: true,
       });
       // **Auto-aim's own question, asked in auto-aim's own words**, because the
       // complaint that produced it was that the two disagreed: a player aiming
@@ -243,6 +296,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       const priority = context.settings.select<TargetPriority>('priority', {
         label: 'Aim at',
         default: TargetPriority.Closest,
+        group: TARGETING_GROUP,
         options: [
           [TargetPriority.Closest, 'The closest enemy'],
           [TargetPriority.LowestHp, 'The weakest enemy'],
@@ -257,6 +311,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         max: 15,
         step: 0.5,
         visibleWhen: { key: 'priority', equals: [TargetPriority.ClosestToCursor] },
+        group: TARGETING_GROUP,
       });
       // **A tier over the priority above, not another entry in it.** The two
       // answer different questions — which class of enemy is worth the mana,
@@ -264,10 +319,12 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       // this plugin looks for an enemy for: where the ability the player fires
       // lands, and whether a combat aura is worth putting up at all. Somebody
       // who set "only bosses" and then watched their seal go up for two bats is
-      // owed the reading of the words.
+      // owed the reading of the words. The auto-cast above is bosses by
+      // definition and does not read this one.
       const bosses = context.settings.select<BossRule>('bosses', {
         label: 'Bosses',
         default: BossRule.Any,
+        group: TARGETING_GROUP,
         options: [
           [BossRule.Any, 'Treat like any other enemy'],
           [BossRule.Prefer, 'Prefer bosses'],
@@ -280,38 +337,21 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         min: 3,
         max: 20,
         step: 1,
+        group: TARGETING_GROUP,
       });
-      // The two thresholds that are the player's to set, and the only ones:
-      // whether a berserk aura needs an enemy nearby is not a preference, it is
-      // what a berserk aura is, and the data file already says so.
-      const healthPercent = context.settings.range('healthPercent', {
-        label: 'Cast healing abilities at or below (% health)',
-        default: 80,
-        min: 10,
-        max: 100,
-        step: 5,
-      });
-      const manaPercent = context.settings.range('manaPercent', {
-        label: 'Cast mana abilities at or below (% mana)',
-        default: 50,
-        min: 10,
-        max: 100,
-        step: 5,
-      });
-      const utilityOutOfCombat = context.settings.boolean('utilityOutOfCombat', {
-        label: 'Keep speed and stealth up outside combat',
-        default: false,
-      });
+      // The two limits that hold every cast back whatever half made it, and
+      // neither is an everyday knob: the reserve is set once around a class's
+      // mana pool, and the interval is a floor under pacing the data file
+      // already does — what an ability costs and how long it lasts.
       const mpReservePercent = context.settings.range('mpReservePercent', {
         label: 'Keep at least (% mana)',
         default: 0,
         min: 0,
         max: 90,
         step: 5,
+        group: LIMITS_GROUP,
+        advanced: true,
       });
-      // A floor under everything the data file says, not the interval itself:
-      // what an ability costs and how long it lasts already pace it. This is
-      // what stops a free, instant ability from being sent on every tick.
       const minIntervalMs = context.settings.number('minIntervalMs', {
         label: 'Wait between casts (ms)',
         advanced: true,
@@ -319,12 +359,14 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         min: 250,
         max: 5000,
         step: 50,
+        group: LIMITS_GROUP,
       });
 
       const isBoss = (enemy: EntityView): boolean => inputs.isBoss(enemy.objectType);
 
       const readTuning = (): Tuning => ({
         aimAttacks: aimAttacks.get(),
+        autoCastAttacks: autoCastAttacks.get(),
         support: castSupport.get(),
         rangeTiles: rangeTiles.get(),
         priority: priority.get(),
@@ -345,14 +387,15 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       };
       for (const handle of [
         aimAttacks,
+        autoCastAttacks,
         castSupport,
+        healthPercent,
+        utilityOutOfCombat,
+        manaPercent,
         rangeTiles,
         priority,
         cursorRadius,
         bosses,
-        healthPercent,
-        manaPercent,
-        utilityOutOfCombat,
         mpReservePercent,
         minIntervalMs,
       ] as readonly SettingHandle<SettingValue>[]) {
@@ -411,8 +454,15 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
        * The cursor is read here rather than passed in because a search can
        * happen between two ticks — the player's own key press is one — and a
        * cursor that has moved since the last tick has moved.
+       *
+       * `preference` defaults to the panel's boss rule, because every search
+       * shares it but one: the attack half, whose rule is bosses by definition.
        */
-      const search = (session: SessionView, priority: TargetPriority): EntityView | undefined =>
+      const search = (
+        session: SessionView,
+        priority: TargetPriority,
+        preference: BossPreference = tuning.bosses,
+      ): EntityView | undefined =>
         selectTarget(session.world.enemies(), {
           shooterX: session.self.x,
           shooterY: session.self.y,
@@ -421,7 +471,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
           cursorPoint:
             priority === TargetPriority.ClosestToCursor ? inputs.cursorPoint() : undefined,
           cursorRadiusTiles: tuning.cursorRadiusTiles,
-          bosses: tuning.bosses,
+          bosses: preference,
           accept: worthCastingAt,
         });
 
@@ -442,49 +492,57 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       const enemyToFight = (session: SessionView): EntityView | undefined =>
         search(session, TargetPriority.Closest);
 
-      // Cheapest test first, and each one is a test the next would have been
-      // wasted work without. Nothing on this path allocates until a cast is
-      // actually going out, bar the reading below under the one priority that
-      // asks for it.
-      context.packets.on('NEWTICK', (_packet, session) => {
-        // **Asked for and thrown away, ahead of every reason to stop below.**
-        // The module measures the cursor only while somebody keeps asking, and
-        // the search that wants it runs elsewhere: the player's key press lands
-        // between ticks, and an attack ability never reaches the cast path here
-        // at all. Waiting to ask until a search needs one would mean the first
-        // search after a quiet spell — which is the key press — got no reading.
-        if (tuning.priority === TargetPriority.ClosestToCursor) inputs.cursorPoint();
+      /**
+       * Sends one ability use, exactly as the client does for a key press.
+       *
+       * **The client's clock, not the one this plugin schedules against.** The
+       * server checks this field against the time the game client has been
+       * stamping its own packets with, and throws the packet away when it does
+       * not match — no error, no effect, and the ability sound the player hears
+       * is the client reacting to a use it never made. It cost a session of a
+       * priest's tome firing every 700 ms and healing nothing. `gameTimeMs`
+       * elsewhere is a different quantity for a different job: a monotonic
+       * proxy-side clock to measure intervals with.
+       */
+      const sendCast = (
+        session: SessionView,
+        self: SelfView,
+        slot: ItemSlotView,
+        at: Position,
+      ): void => {
+        session.sendToServer('USEITEM', {
+          time: Math.trunc(session.world.clientTimeMs),
+          slotObject: {
+            objectId: self.objectId,
+            slotId: ABILITY_SLOT,
+            objectType: slot.objectType,
+          },
+          itemUsePos: { x: at.x, y: at.y },
+          useType: USE_TYPE_SELF,
+          unknownInt: 0,
+        });
+      };
 
-        const self = session.self;
-        if (!self.alive) return;
-
-        const state = stateFor(session);
-        if (state.safeZone) return;
-
-        const nowMs = session.world.gameTimeMs;
-        if (nowMs < state.nextAtMs) return;
-
-        const slot = self.inventory.at(ABILITY_SLOT);
-        if (slot === undefined || slot.objectType <= 0) return;
-
-        const ability = inputs.ability(slot.objectType);
-        if (ability === undefined || ability.use === AbilityUse.Never) return;
-
-        // **Only what an ability *gives* is ever cast from here.** An attack
-        // ability gives nothing this build can name, and there is no moment
-        // that makes one worth firing — only a player who decided to fire it.
-        // Those are handled on the way past in the `USEITEM` handler below.
-        if (!tuning.support || ability.benefits.length === 0) return;
+      /**
+       * The support half: cast only when what the ability gives is worth
+       * having right now.
+       *
+       * Everything both halves share — the gates, the cost, the reserve — is
+       * settled before this is reached, so all that is left is the question
+       * this half exists to ask.
+       */
+      const castIfWorthHaving = (
+        session: SessionView,
+        self: SelfView,
+        slot: ItemSlotView,
+        ability: AbilityFacts,
+        state: SessionState,
+        nowMs: number,
+      ): void => {
+        if (!tuning.support) return;
 
         // Whether it is also pointed at something, which a tome can be.
         const aimed = ability.use === AbilityUse.Aimed;
-
-        // The cost first, then the reserve on top of it: a cast that leaves the
-        // bar under what the player asked to keep is one they did not want, and
-        // a cast the server refuses for want of mana is a packet sent for
-        // nothing. An unstated maximum reserves nothing rather than everything.
-        const reserve = self.maxMp > 0 ? self.maxMp * tuning.manaReserve : 0;
-        if (self.mp < ability.mpCost + reserve) return;
 
         // Looked up at most once per tick, and often not at all: a pass over
         // every visible enemy is by far the most expensive thing here, and a
@@ -536,26 +594,91 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // both — `pD Tome` and its handful of neighbours.
         const at: Position = aimed ? (targetEnemy(session) ?? self) : self;
 
-        session.sendToServer('USEITEM', {
-          // **The client's clock, not the one this plugin schedules against.**
-          // The server checks this field against the time the game client has
-          // been stamping its own packets with, and throws the packet away when
-          // it does not match — no error, no effect, and the ability sound the
-          // player hears is the client reacting to a use it never made. It cost
-          // a session of a priest's tome firing every 700 ms and healing
-          // nothing. `gameTimeMs` below is a different quantity for a different
-          // job: a monotonic proxy-side clock to measure intervals with.
-          time: Math.trunc(session.world.clientTimeMs),
-          slotObject: {
-            objectId: self.objectId,
-            slotId: ABILITY_SLOT,
-            objectType: slot.objectType,
-          },
-          itemUsePos: { x: at.x, y: at.y },
-          useType: USE_TYPE_SELF,
-          unknownInt: 0,
-        });
+        sendCast(session, self, slot, at);
         state.nextAtMs = nowMs + intervalOf(ability, aimed);
+      };
+
+      /**
+       * The attack half: fire at a boss, and only at a boss, and only when the
+       * player switched that on.
+       *
+       * **The boss rule here is not the setting — it is the feature.** The
+       * `Bosses` choice on the tab says what the *aiming* prefers; this half
+       * has no preference to state, because "attack abilities fire at bosses"
+       * is the whole of what was asked for, and a minion nearer than the boss
+       * is the exact thing it exists to ignore. The priority still decides
+       * among bosses, out of the same setting the aimed half reads, so "aim at"
+       * keeps one meaning wherever it appears.
+       *
+       * **And a hybrid never comes here.** A tome that heals and shoots has
+       * benefits, so it took the support branch, and the shot on it is still a
+       * rider: casting one at full health because a boss walked in is the
+       * 700 ms spam the split exists to prevent.
+       */
+      const castIfBossInReach = (
+        session: SessionView,
+        self: SelfView,
+        slot: ItemSlotView,
+        ability: AbilityFacts,
+        state: SessionState,
+        nowMs: number,
+      ): void => {
+        if (!tuning.autoCastAttacks) return;
+        const boss = search(session, tuning.priority, { rule: BossRule.Only, isBoss });
+        if (boss === undefined) return;
+        sendCast(session, self, slot, boss);
+        state.nextAtMs = nowMs + intervalOf(ability, true);
+      };
+
+      // Cheapest test first, and each one is a test the next would have been
+      // wasted work without. Nothing on this path allocates until a cast is
+      // actually going out, bar the reading below under the one priority that
+      // asks for it.
+      context.packets.on('NEWTICK', (_packet, session) => {
+        // **Asked for and thrown away, ahead of every reason to stop below.**
+        // The module measures the cursor only while somebody keeps asking, and
+        // the search that wants it runs elsewhere: the player's key press lands
+        // between ticks, and an attack ability reaches the cast path here only
+        // when the boss switch is on. Waiting to ask until a search needs one
+        // would mean the first search after a quiet spell — which is the key
+        // press — got no reading.
+        if (tuning.priority === TargetPriority.ClosestToCursor) inputs.cursorPoint();
+
+        const self = session.self;
+        if (!self.alive) return;
+
+        const state = stateFor(session);
+        if (state.safeZone) return;
+
+        const nowMs = session.world.gameTimeMs;
+        if (nowMs < state.nextAtMs) return;
+
+        const slot = self.inventory.at(ABILITY_SLOT);
+        if (slot === undefined || slot.objectType <= 0) return;
+
+        const ability = inputs.ability(slot.objectType);
+        if (ability === undefined || ability.use === AbilityUse.Never) return;
+
+        // The cost first, then the reserve on top of it: a cast that leaves the
+        // bar under what the player asked to keep is one they did not want, and
+        // a cast the server refuses for want of mana is a packet sent for
+        // nothing. An unstated maximum reserves nothing rather than everything.
+        const reserve = self.maxMp > 0 ? self.maxMp * tuning.manaReserve : 0;
+        if (self.mp < ability.mpCost + reserve) return;
+
+        // **The slot holds one item, and an item is one of two halves.** What
+        // it gives the character is the support half, aimed or not; what it
+        // does to an enemy and gives nothing back is the attack half. The two
+        // are decided by different questions — "is any of this worth having"
+        // against "is there a boss to spend it on" — so they part here and
+        // share everything above it.
+        if (ability.benefits.length > 0) {
+          castIfWorthHaving(session, self, slot, ability, state, nowMs);
+          return;
+        }
+        if (ability.use === AbilityUse.Aimed) {
+          castIfBossInReach(session, self, slot, ability, state, nowMs);
+        }
       });
 
       // `USEITEM` only ever flows from the client, and our own casts are

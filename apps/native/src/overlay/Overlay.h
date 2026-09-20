@@ -73,13 +73,9 @@ class Overlay {
     ///
     /// When false the game sees every message. When true, ImGui gets first
     /// refusal and anything it wants is swallowed.
-    void SetVisible(bool visible) noexcept {
-        visible_.store(visible, std::memory_order_release);
-    }
+    void SetVisible(bool visible) noexcept { visible_.store(visible, std::memory_order_release); }
 
-    [[nodiscard]] bool visible() const noexcept {
-        return visible_.load(std::memory_order_acquire);
-    }
+    [[nodiscard]] bool visible() const noexcept { return visible_.load(std::memory_order_acquire); }
 
     /// The key that shows and hides the overlay, as a virtual-key code.
     ///

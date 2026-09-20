@@ -62,7 +62,9 @@ function facts(over: Partial<ItemFacts> = {}): ItemFacts {
     untiered: false,
     setItem: false,
     beltStack: 0,
+    feedPower: 0,
     potion: undefined,
+    key: false,
     ability: undefined,
     ...over,
   };
@@ -107,6 +109,8 @@ const INPUTS = {
   container: (objectType: number): ContainerFacts | undefined => CONTAINERS.get(objectType),
   statMaxima: (): undefined => undefined,
   displayName: (objectType: number): string | undefined => NAMES.get(objectType),
+  items: (): { type: number; name: string }[] =>
+    [...NAMES.entries()].map(([type, name]) => ({ type, name })),
 };
 
 const DEFAULTS: LootPreferences = {

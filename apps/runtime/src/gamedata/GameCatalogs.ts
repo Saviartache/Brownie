@@ -1,7 +1,13 @@
 import { createReadStream } from 'node:fs';
-import type { DungeonPortal, ObjectCatalog } from '../state/ObjectCatalog.js';
+import type { DungeonPortal, ItemChoice, ObjectCatalog } from '../state/ObjectCatalog.js';
 import type { TileCatalog } from '../state/TileMap.js';
-import { readContainerFacts, readItemFacts, type ContainerFacts, type ItemFacts } from './items.js';
+import {
+  gearFamilyOf,
+  readContainerFacts,
+  readItemFacts,
+  type ContainerFacts,
+  type ItemFacts,
+} from './items.js';
 import { readPermanentStatMaxima, type PermanentStatMaxima } from './playerClasses.js';
 import { readProjectiles, type ProjectileDefinition } from './projectiles.js';
 import {
@@ -17,6 +23,7 @@ import {
 import {
   attribute,
   childText,
+  elementText,
   hasChild,
   parseGameNumber,
   scanElements,
@@ -69,6 +76,15 @@ export interface ObjectDefinition {
   readonly appearance: AppearanceDefinition | undefined;
   /** Shader id for an Arcane Style item, absent for everything else. */
   readonly arcaneStyle: string | undefined;
+  /**
+   * The `objects.xml` id of the portal this key opens, or nothing for anything
+   * that opens none.
+   *
+   * `<Activate id="…">CreatePortal</Activate>` is how the file ties a key to
+   * its portal, and it is the only place it does — see
+   * {@link DungeonPortal.keyType} for why anything wants the pairing.
+   */
+  readonly opensPortalId: string | undefined;
 }
 
 /** What the runtime keeps about one ground type. */
@@ -92,6 +108,8 @@ export class GameObjectCatalog implements ObjectCatalog {
   readonly #byType: ReadonlyMap<number, ObjectDefinition>;
   /** Built once: the option list a portal chooser needs is a fixed catalog fact. */
   readonly #dungeonPortals: readonly DungeonPortal[];
+  /** The same, for the item choosers — every item, in the file's own order. */
+  readonly #items: readonly ItemChoice[];
   readonly #skinsByClass: ReadonlyMap<number, readonly PlayerSkin[]>;
   readonly #mainAppearances: readonly AppearanceChoice[];
   readonly #accessoryAppearances: readonly AppearanceChoice[];
@@ -101,13 +119,27 @@ export class GameObjectCatalog implements ObjectCatalog {
     const byType = new Map<number, ObjectDefinition>();
     for (const definition of definitions) byType.set(definition.type, definition);
     this.#byType = byType;
+    // Which key opens which portal, in the one pass both ends are in hand: the
+    // keys name portals by the portal's own id, so resolving that needs the
+    // id→type map of the portals, and building the portals' chooser wants the
+    // answer back. A portal with no key in the file simply carries none.
+    const keyOfPortal = new Map<string, number>();
+    for (const definition of byType.values()) {
+      if (definition.opensPortalId !== undefined && !keyOfPortal.has(definition.opensPortalId)) {
+        keyOfPortal.set(definition.opensPortalId, definition.type);
+      }
+    }
     this.#dungeonPortals = [...byType.values()]
       .filter((definition) => definition.isDungeonPortal)
       .map((definition) => ({
         type: definition.type,
         name: definition.id,
         dungeonName: definition.dungeonName ?? definition.id,
+        keyType: keyOfPortal.get(definition.id),
       }));
+    this.#items = [...byType.values()]
+      .filter((definition) => definition.item !== undefined && isLoot(definition.item))
+      .map((definition) => ({ type: definition.type, name: definition.id }));
     const skinsByClass = new Map<number, PlayerSkin[]>();
     for (const definition of byType.values()) {
       const skin = definition.skin;
@@ -181,6 +213,10 @@ export class GameObjectCatalog implements ObjectCatalog {
     return this.#dungeonPortals;
   }
 
+  items(): readonly ItemChoice[] {
+    return this.#items;
+  }
+
   bodyTiles(objectType: number): number | undefined {
     return this.#byType.get(objectType)?.bodyTiles;
   }
@@ -225,6 +261,29 @@ export class GameObjectCatalog implements ObjectCatalog {
   arcaneStyles(): readonly string[] {
     return this.#arcaneStyles;
   }
+}
+
+/** The slot type every pet egg shares - gear is by family, potions and keys by flag. */
+const EGG_SLOT_TYPE = 26;
+
+/**
+ * Whether an item is something a bag can drop: gear (any of the four
+ * families), a potion, a key or a pet egg.
+ *
+ * The choosers are for picking loot by eye, and the item population is three
+ * quarters things a bag never holds — a thousand dyes, as many arcane styles,
+ * a stack-size variant of every shard — each of which would bury the item
+ * somebody is actually looking for. The egg is the one non-gear, non-potion
+ * category worth a picture: it drops, it is picked up by hand, and the belt
+ * refuses it.
+ */
+function isLoot(facts: ItemFacts): boolean {
+  return (
+    gearFamilyOf(facts.slotType) !== undefined ||
+    facts.potion !== undefined ||
+    facts.key ||
+    facts.slotType === EGG_SLOT_TYPE
+  );
 }
 
 function appearanceChoices(
@@ -363,6 +422,22 @@ function killsAsStructure(element: string): boolean {
 }
 
 /**
+ * The portal object id a key's `CreatePortal` names, or nothing.
+ *
+ * Only `CreatePortal` counts: the file puts other `Activate`s on keys too, and
+ * a key may carry more than one, so this walks all of them and keeps the one
+ * whose text is the portal-opening effect.
+ */
+function readOpensPortalId(element: string): string | undefined {
+  for (const activate of scanElementsIn(element, 'Activate')) {
+    if (elementText(activate) !== 'CreatePortal') continue;
+    const portalId = attribute(activate, 'id');
+    if (portalId !== undefined && portalId !== '') return portalId;
+  }
+  return undefined;
+}
+
+/**
  * Reads `objects.xml`.
  *
  * An entry without a usable type or id is skipped rather than failing the load:
@@ -442,6 +517,7 @@ export async function readObjectDefinitions(
       skin: readSkin(element, type, id, objectClass),
       appearance: readAppearance(element, id, objectClass),
       arcaneStyle: readArcaneStyle(element, id, objectClass),
+      opensPortalId: readOpensPortalId(element),
     });
   }
   return definitions;

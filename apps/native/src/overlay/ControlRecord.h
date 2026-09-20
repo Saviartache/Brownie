@@ -94,6 +94,15 @@ class ControlMirror {
     /// The committed list, grouped by category and stable within each group.
     [[nodiscard]] const std::vector<PluginRow>& plugins() const noexcept { return plugins_; }
 
+    /// The sprite file the last sync named, or empty when it named none.
+    ///
+    /// The path is all the wire carries: the file itself is read off the disk
+    /// this process shares with the runtime, which is where megabytes of pixels
+    /// belong — not in a pipe meant for hundred-byte records. Empty covers both
+    /// "the runtime has no game data" and "the sync said nothing", because
+    /// anything a sync does not mention is gone.
+    [[nodiscard]] const std::string& sprites_path() const noexcept { return sprites_path_; }
+
     /// How many syncs have been committed.
     ///
     /// The overlay uses this to know when an interaction it sent has been
@@ -105,6 +114,9 @@ class ControlMirror {
     /// The sync being built. Kept apart from `plugins_` so a commit is a move.
     std::vector<PluginRow> staging_;
     bool syncing_ = false;
+    /// The path the sync being built names; committed at `sync-end`.
+    std::string staging_sprites_;
+    std::string sprites_path_;
     std::uint64_t version_ = 0;
 };
 

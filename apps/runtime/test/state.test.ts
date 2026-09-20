@@ -30,6 +30,7 @@ import {
 import { StatType } from '../src/constants/StatType.js';
 import type { TileCatalog } from '../src/state/TileMap.js';
 import { WorldState } from '../src/state/WorldState.js';
+import { bareName } from '../src/state/playerName.js';
 
 const registry: PacketRegistry = createBundledRegistry();
 
@@ -65,6 +66,21 @@ function harness(catalog?: ObjectCatalog): { world: WorldState; feed: typeof fee
   }
   return { world, feed };
 }
+
+describe('bareName', () => {
+  it('drops the token the server appends to a name after a comma', () => {
+    expect(bareName('Ally,9a16')).toBe('Ally');
+  });
+
+  it('leaves a plain name alone', () => {
+    expect(bareName('Ally')).toBe('Ally');
+  });
+
+  it('is empty for a name that is only a tail, and for no name at all', () => {
+    expect(bareName(',9a16')).toBe('');
+    expect(bareName('')).toBe('');
+  });
+});
 
 describe('StateStage', () => {
   it('binds the local player when the server names it', () => {
@@ -413,6 +429,7 @@ describe('StateStage', () => {
         isPortal: () => false,
         isDungeonPortal: () => false,
         dungeonPortals: () => [],
+        items: () => [],
         bodyTiles: () => undefined,
         displayName: () => undefined,
         projectile: () => definition,
@@ -601,6 +618,7 @@ describe('classification', () => {
       isPortal: () => false,
       isDungeonPortal: () => false,
       dungeonPortals: () => [],
+      items: () => [],
       bodyTiles: () => undefined,
       displayName: () => undefined,
       projectile: () => undefined,
@@ -830,6 +848,7 @@ describe('blasts on their way down', () => {
     isPortal: () => false,
     isDungeonPortal: () => false,
     dungeonPortals: () => [],
+    items: () => [],
     bodyTiles: () => undefined,
     displayName: () => undefined,
     projectile: () => undefined,

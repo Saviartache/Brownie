@@ -40,6 +40,7 @@ import {
   type SessionView,
 } from '@brownie/plugin-api';
 import { StatType } from '../../constants/StatType.js';
+import { bareName } from '../../state/playerName.js';
 import { findStatus } from '../../state/StatOverrides.js';
 import { IdentityDisguise, type StatValue } from './IdentityDisguise.js';
 import { namePattern } from './namePattern.js';
@@ -158,7 +159,9 @@ export function createStreamerModePlugin(): Plugin {
 
         const shown = alias.get().trim();
         if (shown === '') return;
-        const real = session.self.name.trim();
+        // Bare: a pattern built from a name with a trailing token on it matches
+        // nothing a chat line ever says, so the real name would go out in full.
+        const real = bareName(session.self.name);
         // Nothing to hide before the server has named the character, and
         // nothing to do for a player whose name the alias already is.
         if (real === '' || real === shown) return;

@@ -261,9 +261,8 @@ constexpr float kSquareCorner = 0.01F;
     if (!(half_tiles > 0.0F)) {
         return 0;
     }
-    const float corner = corner_tiles < 0.0F
-                             ? 0.0F
-                             : (corner_tiles > half_tiles ? half_tiles : corner_tiles);
+    const float corner =
+        corner_tiles < 0.0F ? 0.0F : (corner_tiles > half_tiles ? half_tiles : corner_tiles);
     const float flat = half_tiles - corner;
 
     const auto add = [&](float x, float y) {
@@ -337,6 +336,10 @@ Status Engine::Start() {
 void Engine::Stop() noexcept {
     stopping_.store(true, std::memory_order_release);
 
+    // The picture atlas goes back before the overlay it is drawn in, on the
+    // same principle as everything below: nothing of a frame outlives the frame.
+    frame_ui_.atlas.Shutdown();
+
     // The overlay goes first: it removes the detour, so no further frame can
     // reach into this object while the rest is being taken apart.
     overlay_.Shutdown();
@@ -386,8 +389,8 @@ void Engine::AcceptRecord(std::string_view record) {
         // Queued, not shown: showing calls into the game, and this is not the
         // thread that may. The scene pass picks it up on the next frame.
         patches_.ShowText(text.text, game::PackColor32(static_cast<std::uint8_t>(text.red),
-                                                      static_cast<std::uint8_t>(text.green),
-                                                      static_cast<std::uint8_t>(text.blue)));
+                                                       static_cast<std::uint8_t>(text.green),
+                                                       static_cast<std::uint8_t>(text.blue)));
         return;
     }
     // Before the plugin mirror, and only because it is cheaper to ask: a set of
@@ -423,8 +426,7 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
         return;
     }
     if (key == kCursorTrackFeature) {
-        cursor_track_until_ms_.store(on ? now + kCursorTrackLeaseMs : 0,
-                                     std::memory_order_relaxed);
+        cursor_track_until_ms_.store(on ? now + kCursorTrackLeaseMs : 0, std::memory_order_relaxed);
         return;
     }
     if (key == kColliderFeature) {
@@ -481,8 +483,7 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     if (key == kSkinFeature) {
         const auto skin = FeatureSkin(value);
         skin_.store(skin.value_or(0), std::memory_order_relaxed);
-        skin_until_ms_.store(skin.has_value() ? now + kSkinLeaseMs : 0,
-                             std::memory_order_relaxed);
+        skin_until_ms_.store(skin.has_value() ? now + kSkinLeaseMs : 0, std::memory_order_relaxed);
         return;
     }
     if (key == kGlowColourFeature) {
@@ -745,12 +746,12 @@ void Engine::TryRedirect() {
     // A failed send is dropped rather than retried: the runtime refuses the
     // session it could not place, which is visible, and stalling the game to
     // fix that would be worse than the session being refused.
-    auto installed = redirect_.Install(redirect, [this](const std::string& host,
-                                                        std::uint16_t port) {
-        if (session_.ready()) {
-            (void)session_.SendServerTarget(host, port);
-        }
-    });
+    auto installed =
+        redirect_.Install(redirect, [this](const std::string& host, std::uint16_t port) {
+            if (session_.ready()) {
+                (void)session_.SendServerTarget(host, port);
+            }
+        });
 
     // `ws2_32.dll` may not be loaded this early. Failing is the ordinary case
     // at startup and the loop is the retry; anything else is permanent and
@@ -776,6 +777,10 @@ void Engine::LetGo() noexcept {
     // The scene pass first: it calls into managed code, and the frame that
     // would run it is about to be taken away.
     patches_.Release();
+
+    // The picture atlas, for the same reason as in `Stop`: nothing of a frame
+    // outlives the frame.
+    frame_ui_.atlas.Shutdown();
 
     // Then the overlay, which is what stops frames happening at all. Removing
     // the detour fixes up any thread standing inside the code it replaced, so
@@ -865,8 +870,8 @@ std::optional<Engine::FrameScreen> Engine::MeasureScreen() const {
                                 static_cast<float>(client.bottom - client.top),
                                 static_cast<float>(overlay_.render_width()),
                                 static_cast<float>(overlay_.render_height())};
-    const auto basis = projection_.Measure(game::WorldPoint{screen.player.x, screen.player.y},
-                                           sizes);
+    const auto basis =
+        projection_.Measure(game::WorldPoint{screen.player.x, screen.player.y}, sizes);
     if (!basis.has_value()) {
         return std::nullopt;
     }
@@ -882,8 +887,8 @@ std::optional<game::WorldPoint> Engine::CursorTarget(const FrameScreen& screen) 
         return std::nullopt;
     }
 
-    const game::WorldPoint point = game::ToWorld(screen.basis, static_cast<float>(cursor.x),
-                                                 static_cast<float>(cursor.y));
+    const game::WorldPoint point =
+        game::ToWorld(screen.basis, static_cast<float>(cursor.x), static_cast<float>(cursor.y));
     if (std::hypot(point.x - screen.player.x, point.y - screen.player.y) > kMaxCursorWalkTiles) {
         return std::nullopt;
     }
@@ -971,8 +976,7 @@ void Engine::ObserveSteer(bool steering, float right, float up,
     actions_.Push(overlay::BuildAction(kSteerAction, {"1", milli_x, milli_y}));
 }
 
-void Engine::SendCursorPoint(std::uint64_t now_ms,
-                             const std::optional<game::WorldPoint>& pointed) {
+void Engine::SendCursorPoint(std::uint64_t now_ms, const std::optional<game::WorldPoint>& pointed) {
     if (!pointed.has_value()) {
         return;
     }
@@ -1056,7 +1060,7 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
     const std::uint64_t since_ms = now_ms > stated_ms ? now_ms - stated_ms : 0;
     const float carried_seconds =
         static_cast<float>(since_ms > overlay::kMaxMarkCarryMs ? overlay::kMaxMarkCarryMs
-                                                              : since_ms) /
+                                                               : since_ms) /
         1000.0F;
 
     for (const overlay::ShotTrail& trail : picture_.trails()) {
@@ -1084,8 +1088,7 @@ int Engine::DrawDodgePicture(std::uint64_t now_ms, const std::optional<FrameScre
                                      {head_x - half, head_y + half}};
         for (const auto& corner : corners) {
             overlay::ScreenPoint on_screen;
-            game::ToScreen(basis, game::WorldPoint{corner[0], corner[1]}, on_screen.x,
-                           on_screen.y);
+            game::ToScreen(basis, game::WorldPoint{corner[0], corner[1]}, on_screen.x, on_screen.y);
             trail_heads_.push_back(on_screen);
         }
     }
@@ -1247,8 +1250,8 @@ void Engine::DumpPlayerObject() {
     // What the server says, first, so the numbers below have something to be
     // read against. Finding a value in an object is only useful when you know
     // which value you are looking for.
-    Say("server says hp " + std::to_string(world_.hp) + " maxHp " +
-        std::to_string(world_.max_hp) + " defense " +
+    Say("server says hp " + std::to_string(world_.hp) + " maxHp " + std::to_string(world_.max_hp) +
+        " defense " +
         (world_.defense_known ? std::to_string(world_.defense) : std::string{"unknown"}));
 
     DumpObject(bytes, [this](std::string_view line) { Say(line); });
@@ -1351,8 +1354,8 @@ bool Engine::AnswerLocally(const std::string& action) {
         next->classes = binding_.runtime()->ClassNames();
         next->selected = {};
     } else {
-        next->selected = Describe(*binding_.runtime(), fields.size() > 1 ? fields[1]
-                                                                         : std::string{});
+        next->selected =
+            Describe(*binding_.runtime(), fields.size() > 1 ? fields[1] : std::string{});
     }
 
     inspector_report_ = std::move(next);
@@ -1388,6 +1391,7 @@ void Engine::PublishModel() {
     model.weapon = weapon_;
     model.memory = binding_.reading();
     model.plugins = controls_.plugins();
+    model.sprites_path = controls_.sprites_path();
     model.controls_version = controls_.version();
     model.link_connected = connected;
     model.game_bound = bound;
@@ -1445,20 +1449,19 @@ void Engine::DrawFrame() {
     float key_right = 0.0F;
     float key_up = 0.0F;
     const bool steering = !overlay_.visible() && MovementKeysHeld(key_right, key_up);
-    const bool steer_due =
-        steering && (!frame_steer_ || key_right != frame_key_right_ ||
-                     key_up != frame_key_up_ || steer_.Due(now));
+    const bool steer_due = steering && (!frame_steer_ || key_right != frame_key_right_ ||
+                                        key_up != frame_key_up_ || steer_.Due(now));
 
     // Where the cursor is, for whoever asked: the chord walks there, and cursor
     // aim ranks enemies by how close they are to it. Both are off by default,
     // and the answer costs three calls into managed code — so nothing is
     // measured until one of them, the markers, or a steering record wants it.
     const bool tracking = chord || pick || CursorTrackWanted(now);
-    const std::optional<FrameScreen> screen =
-        tracking || steer_due || frame_ui_.movement_markers || frame_ui_.aim_markers ||
-                frame_ui_.dodge_markers
-            ? MeasureScreen()
-            : std::nullopt;
+    const std::optional<FrameScreen> screen = tracking || steer_due || frame_ui_.movement_markers ||
+                                                      frame_ui_.aim_markers ||
+                                                      frame_ui_.dodge_markers
+                                                  ? MeasureScreen()
+                                                  : std::nullopt;
     const std::optional<game::WorldPoint> pointed =
         tracking && screen.has_value() ? CursorTarget(*screen) : std::nullopt;
     SendCursorPoint(now, pointed);

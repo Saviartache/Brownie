@@ -187,8 +187,9 @@ describe('the streamer mode plugin', () => {
     onDisconnected: () => () => undefined,
   };
 
-  const session = (): SessionView =>
-    ({ id: 's1', self: { objectId: SELF_ID, name: REAL } }) as unknown as SessionView;
+  /** `name` is the name stat as the server spelled it, tail and all. */
+  const session = (name: string = REAL): SessionView =>
+    ({ id: 's1', self: { objectId: SELF_ID, name } }) as unknown as SessionView;
 
   function loadEnabled(): { host: PluginHost; settings: SettingsRegistry } {
     const host = new PluginHost({ log: testLogger(), native: NATIVE, sessions: SESSIONS });
@@ -345,6 +346,15 @@ describe('the streamer mode plugin', () => {
     host.dispatchPacket(packet, session());
     expect(packet.string('text')).toBe(`nice cloak ${ALIAS}!`);
     expect(packet.string('cleanText')).toBe(`nice cloak ${ALIAS}!`);
+  });
+
+  it('hides the name when the name stat carries a trailing token', () => {
+    // The stat is `Sammy,9a16` and the chat line says `Sammy`. A pattern built
+    // from the stat as it stands matches neither, and the real name goes out.
+    const { host } = loadEnabled();
+    const packet = chat({ name: 'Friend', text: `nice cloak ${REAL}!` });
+    host.dispatchPacket(packet, session(`${REAL},9a16`));
+    expect(packet.string('text')).toBe(`nice cloak ${ALIAS}!`);
   });
 
   it('leaves a line that never says the name as it arrived', () => {

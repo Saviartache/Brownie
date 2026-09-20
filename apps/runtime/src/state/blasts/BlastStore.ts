@@ -234,12 +234,16 @@ export class BlastStore {
    * are learned only from a detonation that matched a prediction, because the
    * flight time only exists as the gap between the two and because a key learned
    * from an unmatched landing is a key nothing would ever look up.
+   *
+   * @returns whether the detonation matched a prediction this store was
+   *   holding, so the caller can tell a self blast from fire that was warned
+   *   about. See `SelfBlastTable`.
    */
-  landed(gameTimeMs: number, landing: BlastLanding): void {
-    if (!Number.isFinite(landing.x) || !Number.isFinite(landing.y)) return;
+  landed(gameTimeMs: number, landing: BlastLanding): boolean {
+    if (!Number.isFinite(landing.x) || !Number.isFinite(landing.y)) return false;
     // Nothing to dodge, nothing to confirm, nothing to learn. Not counted as
     // unmatched either: it is not a missed prediction, it is not a blast.
-    if (!landing.harmful) return;
+    if (!landing.harmful) return false;
 
     for (const blast of this.#blasts) {
       if (blast.confirmed) continue;
@@ -261,9 +265,28 @@ export class BlastStore {
         blast.radiusTiles = landing.radiusTiles;
       }
       this.confirmed += 1;
-      return;
+      return true;
     }
     this.unmatched += 1;
+    return false;
+  }
+
+  /**
+   * Whether a telegraph still on its way down lands near a place.
+   *
+   * **For the self-blast classifier, which rejects fire it was warned about.**
+   * A detonation that matched no prediction can still have been a thrown bomb
+   * whose telegraph drifted past the confirm radius, and counting one of those
+   * as a self blast teaches a keep-out for an enemy whose blasts are perfectly
+   * dodgeable. Anything this store is still holding near the place says the
+   * player was warned, whatever the matching made of it.
+   */
+  announcedNear(x: number, y: number, withinTiles: number): boolean {
+    for (const blast of this.#blasts) {
+      if (blast.confirmed) continue;
+      if (Math.hypot(blast.x - x, blast.y - y) <= withinTiles) return true;
+    }
+    return false;
   }
 
   /**

@@ -6,7 +6,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-
+#include <fstream>
 #include <imgui.h>
 
 #include "core/Colour.h"
@@ -52,8 +52,7 @@ void DrawOffsets(const std::vector<OffsetRow>& offsets) {
     // it resolved, and a summary of what the rows underneath it say is a second
     // thing to keep in step with the first.
     constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                       ImGuiTableFlags_SizingStretchProp |
-                                       ImGuiTableFlags_ScrollY;
+                                       ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
     // Height for about ten rows; the rest scrolls rather than growing a window
     // over the game.
     const ImVec2 size{0.0F, ImGui::GetTextLineHeightWithSpacing() * 10.0F};
@@ -137,8 +136,9 @@ void CopyStateAsJson(const OverlayModel& model) {
         // because there is no world right now" are different reports.
         append("{ \"trouble\": \"%s\" }", model.memory.trouble.c_str());
     } else {
-        append("{ \"x\": %.2f, \"y\": %.2f, \"calibrated\": %s", static_cast<double>(model.memory.x),
-               static_cast<double>(model.memory.y), model.memory.calibrated ? "true" : "false");
+        append("{ \"x\": %.2f, \"y\": %.2f, \"calibrated\": %s",
+               static_cast<double>(model.memory.x), static_cast<double>(model.memory.y),
+               model.memory.calibrated ? "true" : "false");
         if (model.memory.calibrated) {
             append(", \"hp\": %d, \"maxHp\": %d, \"statShift\": %u", model.memory.hp,
                    model.memory.max_hp, model.memory.shift);
@@ -162,7 +162,8 @@ void CopyStateAsJson(const OverlayModel& model) {
     // facts are read together or not at all.
     out.append(",\n  \"scene\": ");
     append(
-        "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsWritten\": %u,"
+        "{ \"tintInstalled\": %s, \"tinted\": %u, \"collisionBound\": %s, \"collisionsWritten\": "
+        "%u,"
         " \"shotNoclipInstalled\": %s, \"shotsPassed\": %u, \"noclipWanted\": %s,"
         " \"walkGates\": %d, \"walksAllowed\": %u, \"walkSpeedHeld\": %s,"
         " \"walkSpeedsDenied\": %u,"
@@ -223,8 +224,8 @@ constexpr const char* kNoclipStatus = "Player noclip";
 constexpr const char* kTextStatus = "Floating text";
 
 constexpr const char* kVisualisationStatuses[] = {
-    kTintStatus,        kColliderStatus, kShotWallStatus, kMarkerStatus,
-    kAimMarkerStatus,   kDodgeMarkerStatus, kNoclipStatus, kTextStatus};
+    kTintStatus,      kColliderStatus,    kShotWallStatus, kMarkerStatus,
+    kAimMarkerStatus, kDodgeMarkerStatus, kNoclipStatus,   kTextStatus};
 
 /// Where the value column starts: past the longest label there is, and a
 /// couple of characters clear of it.
@@ -346,7 +347,8 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
     } else if (!model.aim_installed) {
         // A crosshair over an aim nothing acts on. Worth its own line: the
         // drawing looks identical to the working case.
-        StatusLine(column, kAimMarkerStatus, "aiming, but no detour is in - shots go their own way");
+        StatusLine(column, kAimMarkerStatus,
+                   "aiming, but no detour is in - shots go their own way");
     } else {
         StatusLine(column, kAimMarkerStatus, "over the map, %u shot(s) pointed",
                    model.aim_redirected);
@@ -385,9 +387,8 @@ void DrawVisualisation(const OverlayModel& model, UiState& state) {
                    model.walks_allowed, static_cast<int>(model.walk_gates));
     } else {
         StatusLine(column, kNoclipStatus,
-                   "%u answer(s) forced across %d gate(s), %u speed(s) denied",
-                   model.walks_allowed, static_cast<int>(model.walk_gates),
-                   model.walk_speeds_denied);
+                   "%u answer(s) forced across %d gate(s), %u speed(s) denied", model.walks_allowed,
+                   static_cast<int>(model.walk_gates), model.walk_speeds_denied);
     }
 
     if (!model.text_installed) {
@@ -560,8 +561,9 @@ constexpr std::string_view kEnabledKey{};
 /// take, and a setting key is written in source code. The bind's own slot is
 /// appended, because a plugin can offer more than one key and two rows held
 /// under one name would be one row showing the other's pending value.
-constexpr std::string_view kBindEditKey{"\x01"
-                                        "bind"};
+constexpr std::string_view kBindEditKey{
+    "\x01"
+    "bind"};
 
 [[nodiscard]] std::string BindEditKey(std::string_view slot) {
     std::string key{kBindEditKey};
@@ -757,13 +759,44 @@ std::vector<std::string> SplitChosen(const std::string& value) {
 /// the box is clutter; the dungeon chooser is well above it.
 constexpr std::size_t kSearchableFrom = 8;
 
-/// A many-of-N choice, drawn as a list of checkboxes.
+/// The value of a multi-shaped choice with one option flipped.
 ///
 /// The value is the chosen keys joined by commas, and the runtime treats one
 /// spelling as canonical: the keys in the order the options were declared. So a
 /// toggle rebuilds the string by walking `row.options` in order and keeping the
-/// ones now chosen — the same order this list is drawn in — rather than by
+/// ones now chosen — the same order every chooser draws them in — rather than by
 /// editing the string in place.
+[[nodiscard]] std::string ToggleChosen(const SettingRow& row,
+                                       const std::vector<std::string>& chosen,
+                                       const std::string& value, bool on) {
+    const auto is_chosen = [&chosen](const std::string& candidate) {
+        return std::find(chosen.begin(), chosen.end(), candidate) != chosen.end();
+    };
+    std::string joined;
+    for (const SettingOption& candidate : row.options) {
+        const bool keep = candidate.value == value ? on : is_chosen(candidate.value);
+        if (!keep) continue;
+        if (!joined.empty()) joined.push_back(',');
+        joined += candidate.value;
+    }
+    return joined;
+}
+
+/// The search box a long chooser gets. Returns the live filter text.
+std::string DrawFilterBox(const PluginRow& plugin, const SettingRow& row,
+                          MultiSelectFilters& filters) {
+    std::string& held = filters[FilterKey(plugin, row)];
+    std::array<char, 64> buffer{};
+    const std::size_t length = std::min(held.size(), buffer.size() - 1);
+    std::memcpy(buffer.data(), held.data(), length);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::InputTextWithHint("##search", "search", buffer.data(), buffer.size())) {
+        held.assign(buffer.data());
+    }
+    return held;
+}
+
+/// A many-of-N choice, drawn as a list of checkboxes.
 ///
 /// A long list gets a search box that filters which options are *shown*. The
 /// filter never touches the value: a toggle still walks every option, so a
@@ -781,15 +814,7 @@ void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64
 
     std::string filter;
     if (row.options.size() > kSearchableFrom) {
-        std::string& held = filters[FilterKey(plugin, row)];
-        std::array<char, 64> buffer{};
-        const std::size_t length = std::min(held.size(), buffer.size() - 1);
-        std::memcpy(buffer.data(), held.data(), length);
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        if (ImGui::InputTextWithHint("##search", "search", buffer.data(), buffer.size())) {
-            held.assign(buffer.data());
-        }
-        filter = held;
+        filter = DrawFilterBox(plugin, row, filters);
     }
 
     // A bounded, scrolling box so a long dungeon list does not push everything
@@ -812,19 +837,201 @@ void DrawMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64
             ImGui::PopID();
             if (!clicked) continue;
 
-            std::string joined;
-            for (const SettingOption& candidate : row.options) {
-                const bool keep = candidate.value == option.value ? on : is_chosen(candidate.value);
-                if (!keep) continue;
-                if (!joined.empty()) joined.push_back(',');
-                joined += candidate.value;
-            }
+            const std::string joined = ToggleChosen(row, chosen, option.value, on);
             edit.Hold(plugin.id, row.key);
             edit.SetText(joined);
             SendSetting(plugin, row, joined, emit);
             edit.Sent(version);
         }
         if (!any) ImGui::TextDisabled("no match");
+    }
+    ImGui::EndChild();
+}
+
+/// How wide and tall one tile of the picture grid is.
+float AssetTileSize() {
+    // Four text lines: an 8-pixel sprite scaled up five times fills it with
+    // room for the selection border, and a 16-pixel one still fits whole.
+    return ImGui::GetTextLineHeight() * 4.0F;
+}
+
+/// One clickable picture of the grid.
+///
+/// The sprite is drawn to fit the tile at its own aspect, centred; an option
+/// with no sprite shows its label clipped into the tile instead. Chosen is said
+/// with a fill and a border in theme colours, and the unchosen pictures are
+/// dimmed with the theme's disabled-text colour — every colour here comes from
+/// the active theme, like everywhere else the overlay draws. The tooltip is the
+/// option's label: the picture is what a choice looks like, the label is what
+/// it *is*.
+void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                   PendingEdit& edit, const ActionSink& emit, const SpriteAtlas& atlas,
+                   const std::vector<std::string>& chosen, std::size_t option_index, float cell) {
+    const SettingOption& option = row.options[option_index];
+    const bool on = std::find(chosen.begin(), chosen.end(), option.value) != chosen.end();
+
+    // The option's own index, so the tile keeps its identity however the filter
+    // narrows the grid.
+    ImGui::PushID(static_cast<int>(option_index));
+    const bool clicked = ImGui::InvisibleButton("tile", ImVec2{cell, cell});
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    const ImVec2 origin = ImGui::GetItemRectMin();
+    ImDrawList* const draws = ImGui::GetWindowDrawList();
+    const ImVec2 size(cell, cell);
+
+    // ImVec2 has no arithmetic operators outside imgui's internal headers,
+    // which this file deliberately does not include - so the corners are
+    // spelled out instead.
+    const ImVec2 corner(origin.x + cell, origin.y + cell);
+    if (on) {
+        draws->AddRectFilled(origin, corner, ImGui::GetColorU32(ImGuiCol_FrameBgHovered));
+    }
+    if (hovered) {
+        draws->AddRect(origin, corner, ImGui::GetColorU32(ImGuiCol_ButtonHovered), 0.0F, 0, 1.5F);
+    }
+
+    // The sprite the option names, or its own value when it names none - an
+    // item chooser's options are their own sprite keys.
+    //
+    // The sprite is drawn one filled rectangle per source pixel, fitted to the
+    // tile at its own aspect and centred. That is the whole point of this
+    // widget: the renderer's one sampler is linear, and pixel art scaled
+    // through it turns to smudge - rectangle-per-pixel is crisp at any size,
+    // costs nothing but the rows on screen (the grid clips), and needs no
+    // texture upload at all. The unchosen pictures are dimmed by multiplying
+    // each pixel with the theme's disabled-text colour, so what reads as "off"
+    // stays a theme colour rather than a constant someone picked.
+    const SpriteRect* const rect = atlas.find(option.sprite.empty() ? option.value : option.sprite);
+    if (rect != nullptr) {
+        // An integer pixel size wherever one fits, so the art keeps its own
+        // proportions rather than being stretched to the last sliver of tile -
+        // the same rule every pixel-art game draws by.
+        const float inner = cell - ImGui::GetStyle().FramePadding.x * 2.0F - 2.0F;
+        const float step = std::max(
+            1.0F, std::floor(std::min(inner / rect->width, inner / rect->height)));
+        const float at_x = origin.x + (cell - rect->width * step) * 0.5F;
+        const float at_y = origin.y + (cell - rect->height * step) * 0.5F;
+
+        const ImVec4 dim = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+        const float tint_r = on ? 1.0F : dim.x;
+        const float tint_g = on ? 1.0F : dim.y;
+        const float tint_b = on ? 1.0F : dim.z;
+        const float tint_a = on ? 1.0F : (dim.w * 0.5F + 0.5F);
+
+        const std::uint8_t* const pixels = atlas.pixels();
+        const std::uint32_t atlas_width = atlas.width();
+        for (std::uint16_t py = 0; py < rect->height; ++py) {
+            for (std::uint16_t px = 0; px < rect->width; ++px) {
+                const std::uint8_t* const pixel =
+                    pixels + ((rect->y + py) * atlas_width + rect->x + px) * 4;
+                if (pixel[3] == 0) continue;
+                const auto channel = [pixel](std::size_t at, float tint) {
+                    return static_cast<int>(static_cast<float>(pixel[at]) * tint);
+                };
+                const ImU32 colour =
+                    IM_COL32(channel(0, tint_r), channel(1, tint_g), channel(2, tint_b),
+                             static_cast<int>(static_cast<float>(pixel[3]) * tint_a));
+                const float x0 = at_x + px * step;
+                const float y0 = at_y + py * step;
+                draws->AddRectFilled(ImVec2{x0, y0}, ImVec2{x0 + step, y0 + step}, colour);
+            }
+        }
+    } else {
+        // No picture: the label, clipped to the tile, so the choice is still
+        // told apart from its neighbours.
+        const ImVec4 clip(origin.x, origin.y, origin.x + cell, origin.y + cell);
+        const ImVec2 text_at(origin.x + ImGui::GetStyle().FramePadding.x,
+                             origin.y + ImGui::GetStyle().FramePadding.y);
+        draws->AddText(ImGui::GetFont(), ImGui::GetFontSize(), text_at,
+                       ImGui::GetColorU32(ImGuiCol_Text), option.label.c_str(), nullptr, cell,
+                       &clip);
+    }
+
+    if (on) {
+        // The fill above is translucent; the border is what the eye reads at a
+        // glance across a whole grid.
+        draws->AddRect(origin, corner, ImGui::GetColorU32(ImGuiCol_CheckMark), 0.0F, 0, 2.0F);
+    }
+    if (hovered) {
+        ImGui::SetTooltip("%s", option.label.c_str());
+    }
+
+    if (!clicked) return;
+    const std::string joined = ToggleChosen(row, chosen, option.value, !on);
+    edit.Hold(plugin.id, row.key);
+    edit.SetText(joined);
+    SendSetting(plugin, row, joined, emit);
+    edit.Sent(version);
+}
+
+/// A many-of-N choice, drawn as a grid of the options' own pictures.
+///
+/// The same value as the checkbox list - one canonical string of chosen keys -
+/// and the same search box; the grid is only how it reads. Rows are clipped, so
+/// four thousand items draw four thousand tiles' worth of choice but only the
+/// rows on screen. Without sprites it is the checkbox list, which is the honest
+/// control when there is nothing to show a picture of.
+void DrawAssetMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                          PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
+                          const SpriteAtlas& atlas, std::vector<std::size_t>& matches) {
+    if (!atlas.ready()) {
+        if (atlas.failed()) {
+            ImGui::TextDisabled("sprites could not be read - a list instead");
+        }
+        DrawMultiSelect(plugin, row, version, edit, filters, emit);
+        return;
+    }
+
+    const std::string current =
+        edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
+    std::vector<std::string> chosen = SplitChosen(current);
+
+    ImGui::TextUnformatted(row.label.c_str());
+
+    std::string filter;
+    if (row.options.size() > kSearchableFrom) {
+        filter = DrawFilterBox(plugin, row, filters);
+    }
+
+    // The options that pass the filter, collected once: the clipper below
+    // counts rows, and a row needs to know which options it holds.
+    matches.clear();
+    for (std::size_t i = 0; i < row.options.size(); ++i) {
+        if (ContainsIgnoreCase(row.options[i].label, filter)) matches.push_back(i);
+    }
+    if (matches.empty()) {
+        ImGui::TextDisabled("no match");
+        return;
+    }
+
+    const float cell = AssetTileSize();
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const int columns = std::max(
+        1, static_cast<int>((ImGui::GetContentRegionAvail().x + spacing) / (cell + spacing)));
+    const auto rows = static_cast<int>((matches.size() + static_cast<std::size_t>(columns) - 1) /
+                                       static_cast<std::size_t>(columns));
+
+    // A bounded, scrolling grid: five rows tall, whatever is in it.
+    const float gridHeight =
+        static_cast<float>(std::min(rows, 5)) * (cell + spacing) + ImGui::GetStyle().FramePadding.y;
+    if (ImGui::BeginChild("grid", ImVec2{0.0F, gridHeight}, true)) {
+        ImGuiListClipper clipper;
+        clipper.Begin(rows, cell + spacing);
+        while (clipper.Step()) {
+            for (int line = clipper.DisplayStart; line < clipper.DisplayEnd; ++line) {
+                for (int column = 0; column < columns; ++column) {
+                    const std::size_t at =
+                        static_cast<std::size_t>(line) * static_cast<std::size_t>(columns) +
+                        static_cast<std::size_t>(column);
+                    if (at >= matches.size()) break;
+                    if (column != 0) ImGui::SameLine();
+                    DrawAssetTile(plugin, row, version, edit, emit, atlas, chosen, matches[at],
+                                  cell);
+                }
+            }
+        }
     }
     ImGui::EndChild();
 }
@@ -887,7 +1094,8 @@ void DrawColour(const PluginRow& plugin, const SettingRow& row, std::uint64_t ve
 }
 
 void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
-                 PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit) {
+                 PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
+                 const SpriteAtlas& atlas, std::vector<std::size_t>& asset_matches) {
     ImGui::PushID(row.key.c_str());
     switch (row.kind) {
         case SettingKind::kBoolean:
@@ -904,6 +1112,9 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
             break;
         case SettingKind::kMultiSelect:
             DrawMultiSelect(plugin, row, version, edit, filters, emit);
+            break;
+        case SettingKind::kAssetMultiSelect:
+            DrawAssetMultiSelect(plugin, row, version, edit, filters, emit, atlas, asset_matches);
             break;
         case SettingKind::kText:
             DrawText(plugin, row, version, edit, emit);
@@ -922,7 +1133,8 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
 
 /// Draws one plugin's settings, either the everyday ones or the advanced ones.
 void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version, PendingEdit& edit,
-                  MultiSelectFilters& filters, const ActionSink& emit) {
+                  MultiSelectFilters& filters, const ActionSink& emit, const SpriteAtlas& atlas,
+                  std::vector<std::size_t>& asset_matches) {
     std::string group;
 
     for (const SettingRow& row : plugin.settings) {
@@ -931,7 +1143,7 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
             group = row.group;
             if (!group.empty()) ImGui::SeparatorText(group.c_str());
         }
-        DrawSetting(plugin, row, version, edit, filters, emit);
+        DrawSetting(plugin, row, version, edit, filters, emit, atlas, asset_matches);
     }
 }
 
@@ -944,8 +1156,7 @@ void DrawSettings(const PluginRow& plugin, bool advanced, std::uint64_t version,
 /// `%00oggle`, the runtime refused a mode it could not read, and the sync came
 /// back saying the plugin was still unbound.
 void SendBind(const PluginRow& plugin, std::string_view slot, std::string_view mode,
-              std::string_view key, UiState& state, std::uint64_t version,
-              const ActionSink& emit) {
+              std::string_view key, UiState& state, std::uint64_t version, const ActionSink& emit) {
     const std::string sent_slot{slot};
     const std::string sent_mode{mode};
     const std::string sent_key{key};
@@ -994,9 +1205,9 @@ void DrawBind(const PluginRow& plugin, const BindRow& bind, std::uint64_t versio
     // key does not make ImGui treat it as a different button each time.
     char label[96]{};
     std::snprintf(label, sizeof(label), "%s###bindkey",
-                  waiting        ? "press a key, Esc to cancel"
-                  : key.empty()  ? "not bound"
-                                 : key.c_str());
+                  waiting       ? "press a key, Esc to cancel"
+                  : key.empty() ? "not bound"
+                                : key.c_str());
     if (ImGui::Button(label, ImVec2{210.0F, 0.0F})) {
         if (waiting) {
             state.capture.Clear();
@@ -1107,16 +1318,15 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, UiState& state,
     // asked, and half the list is like that. Drawn as a leaf so that the name
     // still lines up with the ones that do open.
     if (!HasBody(plugin)) {
-        ImGui::TreeNodeEx("##body",
-                          ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen, "%s",
-                          plugin.name.c_str());
+        ImGui::TreeNodeEx("##body", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen,
+                          "%s", plugin.name.c_str());
         return;
     }
 
     // Closed until asked for, like everything else here: a plugin's settings
     // are read when they are being changed, which is rarely.
-    const bool open = ImGui::TreeNodeEx("##body", ImGuiTreeNodeFlags_None, "%s",
-                                        plugin.name.c_str());
+    const bool open =
+        ImGui::TreeNodeEx("##body", ImGuiTreeNodeFlags_None, "%s", plugin.name.c_str());
     if (!open) return;
 
     if (!plugin.error.empty()) {
@@ -1128,7 +1338,8 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, UiState& state,
     for (const BindRow& bind : plugin.binds) {
         DrawBind(plugin, bind, version, state, emit);
     }
-    DrawSettings(plugin, false, version, edit, state.multi_filters, emit);
+    DrawSettings(plugin, false, version, edit, state.multi_filters, emit, state.atlas,
+                 state.asset_matches);
 
     // Visible ones only, by the same rule as the node above: a section that
     // opens onto nothing is worse than no section.
@@ -1143,7 +1354,8 @@ void DrawPlugin(const PluginRow& plugin, std::uint64_t version, UiState& state,
         // happened to finish above it rather than as the section it is.
         ImGui::Spacing();
         if (ImGui::TreeNode("Advanced")) {
-            DrawSettings(plugin, true, version, edit, state.multi_filters, emit);
+            DrawSettings(plugin, true, version, edit, state.multi_filters, emit, state.atlas,
+                         state.asset_matches);
             ImGui::TreePop();
         }
         // And below it, so the section is set apart from what follows as well
@@ -1218,8 +1430,7 @@ void DrawTouches(const ClassDetail& detail) {
 
 void DrawMembers(const ClassDetail& detail) {
     constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                       ImGuiTableFlags_SizingStretchProp |
-                                       ImGuiTableFlags_ScrollY;
+                                       ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
     // Whatever is left of the window, so the members are the part that grows.
     const ImVec2 size{0.0F, ImGui::GetContentRegionAvail().y};
     if (!ImGui::BeginTable("members", 3, kFlags, size)) {
@@ -1434,9 +1645,116 @@ void PendingEdit::Clear() noexcept {
     sent = false;
 }
 
+void SpriteAtlas::Refresh(std::string_view path) {
+    if (path.empty()) {
+        // No file named is not a failure - it is a runtime with no game data,
+        // and the picture controls are simply not on offer. Nothing is said on
+        // screen, where a file that exists but cannot be read is.
+        Shutdown();
+        return;
+    }
+    if (path_ == path && (!pixels_.empty() || failed_)) {
+        // Already holding this file's answer, whichever way it went. A retry
+        // per frame would be a megabyte read for a file that will not have
+        // changed since the last one failed.
+        return;
+    }
+    *this = SpriteAtlas{};
+    path_.assign(path);
+
+    // `sprites.bin`, as the extraction writes it: magic, version, atlas size,
+    // entries, then the pixels. Read whole rather than streamed - it is a few
+    // megabytes once per session.
+    std::ifstream file{path_, std::ios::binary | std::ios::ate};
+    if (!file) {
+        failed_ = true;
+        return;
+    }
+    const std::streamsize size = file.tellg();
+    file.seekg(0);
+    if (size < 24) {
+        failed_ = true;
+        return;
+    }
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    file.read(bytes.data(), size);
+    if (!file) {
+        failed_ = true;
+        return;
+    }
+
+    const auto u32 = [&bytes](std::size_t at) {
+        return static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at])) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + 1])) << 8U) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + 2])) << 16U) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + 3])) << 24U);
+    };
+    if (bytes.compare(0, 8, "BROWNSPR") != 0 || u32(8) != 1 || u32(12) == 0 || u32(16) == 0) {
+        failed_ = true;
+        return;
+    }
+    const std::uint32_t width = u32(12);
+    const std::uint32_t height = u32(16);
+    const std::uint32_t count = u32(20);
+    const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height * 4;
+    const std::uint64_t header = 24 + static_cast<std::uint64_t>(count) * 20;
+    if (header + pixels != static_cast<std::uint64_t>(size) ||
+        count > (static_cast<std::uint64_t>(size) - 24) / 20) {
+        failed_ = true;
+        return;
+    }
+
+    rects_.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::size_t at = 24 + static_cast<std::size_t>(i) * 20;
+        const std::uint32_t type = u32(at);
+        SpriteRect rect;
+        rect.x = u32(at + 4);
+        rect.y = u32(at + 8);
+        rect.width = static_cast<std::uint16_t>(u32(at + 12));
+        rect.height = static_cast<std::uint16_t>(u32(at + 16));
+        if (rect.width == 0 || rect.height == 0 || rect.x + rect.width > width ||
+            rect.y + rect.height > height) {
+            // One bad entry is dropped rather than the file: the rest of the
+            // grid still draws, and a chooser that lost a picture says so in
+            // the one tile that has none.
+            continue;
+        }
+        rects_[type] = rect;
+    }
+
+    // The pixel tail moves into the atlas itself; the header's bytes go with
+    // the read that produced them.
+    pixels_.assign(bytes, static_cast<std::size_t>(header), static_cast<std::size_t>(pixels));
+    width_ = width;
+}
+
+void SpriteAtlas::Shutdown() noexcept {
+    *this = SpriteAtlas{};
+    *this = SpriteAtlas{};
+}
+
+const SpriteRect* SpriteAtlas::find(std::string_view key) const {
+    // The keys are the runtime's decimal object types; anything else is not one
+    // of ours, and answering null is the widget's cue to draw the label.
+    if (key.empty() || key.size() > 10) return nullptr;
+    std::uint32_t value = 0;
+    for (const char digit : key) {
+        if (digit < '0' || digit > '9') return nullptr;
+        value = value * 10U + static_cast<std::uint32_t>(digit - '0');
+    }
+    const auto found = rects_.find(value);
+    return found == rects_.end() ? nullptr : &found->second;
+}
+
 void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport>& report,
           UiState& state, const ActionSink& emit) {
     PendingEdit& edit = state.edit;
+
+    // Before anything is drawn: the picture choosers read the atlas this frame,
+    // and a file that has to be read wants reading before the first tile, not
+    // between two of them.
+    state.atlas.Refresh(model.sprites_path);
 
     // An interaction is held until the runtime has published a sync newer than
     // the one it was sent against — that sync is the answer, whatever it says.
@@ -1471,8 +1789,7 @@ void Draw(const OverlayModel& model, const std::shared_ptr<const InspectorReport
     if (model.dropped_input != 0) {
         // Only shown when it happened. A permanent "dropped: 0" trains the eye
         // to skip the line that matters.
-        ImGui::Text("%u input message(s) dropped; the render thread stalled.",
-                    model.dropped_input);
+        ImGui::Text("%u input message(s) dropped; the render thread stalled.", model.dropped_input);
     }
     if (model.dropped_actions != 0) {
         ImGui::Text("%u interaction(s) dropped; the runtime stopped reading.",

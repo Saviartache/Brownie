@@ -310,6 +310,23 @@ could hurt anybody, and one that could not is a heal or a buff landing on the
 party. Counting one as a detonation confirms — and so cancels — whatever real
 prediction it happens to land near.
 
+**A detonation nothing warned about is the only witness there will ever be to an
+enemy that blasts itself.** Some enemies damage with an area effect centred on
+*themselves*, with no throw and no landing circle: the danger becomes visible
+the same instant it lands, and no planner can react to that after the fact. The
+only defence is not standing there, so a harmful `AOE` that matched no telegraph
+and had none live nearby is checked against the enemies on the field — and when
+a living enemy of the packet's own `originType` stands within a tile of the
+centre, the type is taught a keep-out of the observed radius
+(`state/blasts/SelfBlastTable.ts`). The other data source is the shot itself: a
+projectile that declares no speed never moves, so an `ENEMYSHOOT` of that kind
+sitting on its owner is a standing damage field, and its collision square —
+circumscribed — teaches the same table. The dodge holds every living enemy of a
+learned type at that radius, as ground that hurts, and the table is cached
+between runs beside the measured blast radii (`game-data/self-blasts.json`):
+what an enemy does to its neighbours is a property of the game, not of a
+connection.
+
 ## Cross-checked against RealmShark
 
 `references/RealmShark` is an independent Java implementation of this protocol

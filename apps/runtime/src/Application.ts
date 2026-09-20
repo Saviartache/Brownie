@@ -4,6 +4,7 @@ import { createBundledRegistry } from '@brownie/protocol/bundled';
 import type { PacketRegistry } from '@brownie/protocol';
 import { checkStaleness, findGameInstall, readManifest } from '@brownie/gamedata-tool';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { RuntimeConfig } from './core/config/Config.js';
 import { createAntiDebuffPlugin } from './features/antidebuff/antiDebuffPlugin.js';
@@ -33,7 +34,9 @@ import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
 import { createServerSwitchPlugin } from './features/serverswitch/serverSwitchPlugin.js';
 import { createSkinChangerPlugin } from './features/skinchanger/skinChangerPlugin.js';
 import { createStreamerModePlugin } from './features/streamermode/streamerModePlugin.js';
+import { createVaultSortPlugin } from './features/vaultsort/vaultSortPlugin.js';
 import { loadObjectCatalog, loadTileCatalog } from './gamedata/GameCatalogs.js';
+import { readSpriteTypes } from './gamedata/spriteIndex.js';
 import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
 import { EquippedWeapon } from './gamedata/EquippedWeapon.js';
 import { Logger, type LogSink } from './core/logging/Logger.js';
@@ -58,6 +61,7 @@ import { PluginHotkeys } from './plugins/PluginHotkeys.js';
 import { PluginLoader } from './plugins/PluginLoader.js';
 import { PreferencesFile } from './plugins/PreferencesFile.js';
 import { BlastRadiusTable } from './state/blasts/BlastRadiusTable.js';
+import { SelfBlastTable } from './state/blasts/SelfBlastTable.js';
 import { AllowlistTargets } from './proxy/AllowlistTargets.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './state/ObjectCatalog.js';
 import { EMPTY_TILE_CATALOG, type TileCatalog } from './state/TileMap.js';
@@ -104,6 +108,8 @@ export interface ApplicationOptions {
    * Omitted means the table lives and dies with the run.
    */
   readonly blastRadiiPath?: string;
+  /** The same, for which enemy types blast themselves. See {@link blastRadiiPath}. */
+  readonly selfBlastsPath?: string;
 }
 
 /** What a `move` record's two numbers are measured from. See `docs/ipc.md`. */
@@ -136,16 +142,6 @@ const CURSOR_CLAIM_INTERVAL_MS = 1000;
  */
 const PICK_FRESH_MS = 500;
 
-/**
- * Whether a target is spent by the first frame that steps towards it.
- *
- * An ordinary walk is carried for as long as its hold lasts; the dodge's hop is
- * one frame's worth of movement and no more. See `dodge/Hop.ts` and
- * `overlay::MoveCommand::once`.
- */
-const KEEP = 0;
-const SPEND_ONCE = 1;
-
 /** One walk command, in the hundredths of a tile everything on this link uses. */
 function moveRecord(
   x: number,
@@ -153,7 +149,6 @@ function moveRecord(
   speedTilesPerSecond: number,
   holdMs: number,
   measuredFrom: typeof FROM_MAP | typeof FROM_PLAYER,
-  lifetime: typeof KEEP | typeof SPEND_ONCE = KEEP,
 ): string {
   return [
     'move',
@@ -162,7 +157,6 @@ function moveRecord(
     Math.round(speedTilesPerSecond * 100),
     Math.round(holdMs),
     measuredFrom,
-    lifetime,
   ].join('|');
 }
 
@@ -201,6 +195,13 @@ export class Application {
   readonly #blastRadii = new BlastRadiusTable();
   /** Where that table is cached, or `undefined` to keep it to this run. */
   readonly #blastRadiiPath: string | undefined;
+  /**
+   * Which enemy types blast themselves without warning, from the detonations
+   * this runtime watched. The same kind of knowledge as the radii above, and it
+   * goes stale on the same event: a game patch.
+   */
+  readonly #selfBlasts = new SelfBlastTable();
+  readonly #selfBlastsPath: string | undefined;
   readonly #secret: Buffer;
   /** Set only when this run minted the key, so only it removes the file. */
   readonly #publishedKeyPath: string | undefined;
@@ -281,6 +282,15 @@ export class Application {
   // Replaced once the game's data files are read. Until then every question
   // about an object or a tile is answered "I do not know".
   #objects: ObjectCatalog & CosmeticCatalog = { ...EMPTY_CATALOG, ...EMPTY_COSMETIC_CATALOG };
+  /**
+   * The sprite file the game data carried, for the overlay's picture
+   * choosers. Read through a getter by the control plane, which is why it is a
+   * field rather than an argument — the game data loads before the plane
+   * publishes, but the plane is constructed first.
+   */
+  #spritesPath: string | undefined;
+  /** Which object types that file carries a picture of, for the choosers' fallbacks. */
+  #spriteTypes: ReadonlySet<number> | undefined;
   #tiles: TileCatalog = EMPTY_TILE_CATALOG;
   /**
    * The weapon slot's own data, resolved once per item.
@@ -300,6 +310,7 @@ export class Application {
     this.#censusPath = options.censusPath;
     this.#dumpPath = options.classDumpPath;
     this.#blastRadiiPath = options.blastRadiiPath;
+    this.#selfBlastsPath = options.selfBlastsPath;
     if (this.#census.sampling) {
       // Said out loud, every run: the file then contains bytes from a real
       // session, and somebody who forgot they turned this on should not learn
@@ -436,6 +447,7 @@ export class Application {
           isPortal: (type) => this.#objects.isPortal(type),
           isDungeonPortal: (type) => this.#objects.isDungeonPortal(type),
           dungeonPortals: () => this.#objects.dungeonPortals(),
+          items: () => this.#objects.items(),
           bodyTiles: (type) => this.#objects.bodyTiles(type),
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
@@ -452,6 +464,7 @@ export class Application {
         // One table across every session, so a bomb measured in one realm is
         // dodged at its real size in the next.
         blastRadii: this.#blastRadii,
+        selfBlasts: this.#selfBlasts,
       },
       buildStages: (session: SessionView, world: WorldState) => [
         // The census is first, so a packet a later stage drops is still
@@ -500,6 +513,7 @@ export class Application {
       host: this.#plugins,
       native: this.#native,
       log: this.#log,
+      sprites: () => this.#spritesPath,
     });
     overlayHolder.plane = this.#overlay;
 
@@ -601,6 +615,7 @@ export class Application {
 
     await this.#loadGameData();
     await this.#readBlastRadii();
+    await this.#readSelfBlasts();
 
     // Before a single plugin is loaded, and deliberately: a plugin reads its
     // persisted values while it is *declaring* them, so the file has to be in
@@ -624,16 +639,6 @@ export class Application {
           moveBy: (offsetX, offsetY, speedTilesPerSecond, holdMs) => {
             this.#native.publishRecord(
               moveRecord(offsetX, offsetY, speedTilesPerSecond, holdMs, FROM_PLAYER),
-            );
-          },
-          // **The same record, spent by the frame that acts on it.** An offset
-          // is resolved from wherever the player is on the frame it lands, so
-          // one left standing is carried again on the next frame and every
-          // frame of the hold after it — which is a sprint the server takes
-          // back, not the single step the dodge asked for. See `dodge/Hop.ts`.
-          hopBy: (offsetX, offsetY, speedTilesPerSecond, holdMs) => {
-            this.#native.publishRecord(
-              moveRecord(offsetX, offsetY, speedTilesPerSecond, holdMs, FROM_PLAYER, SPEND_ONCE),
             );
           },
           // Bracketed, so a set half-received is never drawn: the module stages
@@ -1006,6 +1011,21 @@ export class Application {
         container: (objectType) => this.#objects.container(objectType),
         statMaxima: (objectType) => this.#objects.statMaxima(objectType),
         displayName: (objectType) => this.#objects.displayName(objectType),
+        items: () => this.#objects.items(),
+      }),
+    );
+
+    // Auto-loot's other half in spirit: that one moves items the player is
+    // standing on, this one rearranges the vault chest they are standing at.
+    // Built here for the same reason — what an item *is* (its family, its
+    // tier, what feeding it to a pet is worth) is in `objects.xml` and
+    // nowhere on the wire. Needs nothing else: the chest's contents arrive in
+    // a packet, and the rearranging is swaps through the public
+    // `sendToServer` path.
+    this.#plugins.load(
+      createVaultSortPlugin({
+        item: (objectType) => this.#objects.item(objectType),
+        displayName: (objectType) => this.#objects.displayName(objectType),
       }),
     );
 
@@ -1028,6 +1048,7 @@ export class Application {
         isDungeonPortal: (objectType) => this.#objects.isDungeonPortal(objectType),
         displayName: (objectType) => this.#objects.displayName(objectType),
         dungeonPortals: () => this.#objects.dungeonPortals(),
+        spriteAvailable: (objectType) => this.#spriteTypes?.has(objectType) ?? false,
         steer: { direction: () => this.#steer.direction() },
       }),
     );
@@ -1146,6 +1167,24 @@ export class Application {
       const objects = await loadObjectCatalog(join(directory, 'objects.xml'));
       const tiles = await loadTileCatalog(join(directory, 'tiles.xml'));
       this.#objects = objects;
+      // The picture choosers' art, when the extraction produced it. Absent is
+      // not an error — a machine whose data predates the feature simply draws
+      // the same settings as checkbox lists.
+      const sprites = join(directory, 'sprites.bin');
+      if (existsSync(sprites)) {
+        this.#spritesPath = sprites;
+        // Which pictures exist is read here once: a chooser that falls back
+        // from a missing sprite wants the answer from data, not a guess. An
+        // unreadable index leaves the path unset, which draws checkbox lists
+        // rather than empty tiles.
+        const types = readSpriteTypes(await readFile(sprites));
+        if (types === undefined) {
+          this.#log.warn('the sprite index in the game data cannot be read; choosers draw lists');
+          this.#spritesPath = undefined;
+        } else {
+          this.#spriteTypes = types;
+        }
+      }
       this.#tiles = tiles;
       // Anything resolved against the empty catalog before this point is an
       // answer from a different catalog, and there is no reason to keep it.
@@ -1228,12 +1267,33 @@ export class Application {
    * a cache this process wrote itself would be absurd.
    */
   async #readBlastRadii(): Promise<void> {
-    const path = this.#blastRadiiPath;
-    if (path === undefined) return;
+    if (this.#blastRadiiPath === undefined) return;
+    const parsed = await this.#readCache(this.#blastRadiiPath);
+    if (parsed !== undefined) this.#blastRadii.restore(parsed);
+  }
 
-    let parsed: unknown;
+  /**
+   * The same for the self-blast keep-outs, which are learned the same way —
+   * from detonations this runtime watched — and go stale on the same event.
+   */
+  async #readSelfBlasts(): Promise<void> {
+    if (this.#selfBlastsPath === undefined) return;
+    const parsed = await this.#readCache(this.#selfBlastsPath);
+    if (parsed !== undefined) this.#selfBlasts.restore(parsed);
+  }
+
+  /**
+   * One cache file's contents, or nothing when it cannot be read.
+   *
+   * **Every failure is one line and no more.** A missing file is the first run,
+   * an unreadable one is a file somebody edited, and a stale one is a game
+   * patch — and all three mean the same thing to whatever reads the cache:
+   * learn it again. Refusing to start over a file this process wrote itself
+   * would be absurd.
+   */
+  async #readCache(path: string): Promise<unknown> {
     try {
-      parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+      return JSON.parse(await readFile(path, 'utf8')) as unknown;
     } catch (cause) {
       // A missing file is the first run, and the normal case.
       const missing =
@@ -1243,10 +1303,8 @@ export class Application {
           `could not read ${path}: ${cause instanceof Error ? cause.message : 'unknown'}`,
         );
       }
-      return;
+      return undefined;
     }
-
-    this.#blastRadii.restore(parsed);
   }
 
   /**
@@ -1257,16 +1315,33 @@ export class Application {
    * syscall in the middle of a boss fight.
    */
   async #writeBlastRadii(): Promise<void> {
-    const path = this.#blastRadiiPath;
-    if (path === undefined || this.#blastRadii.size === 0) return;
+    await this.#writeCache(this.#blastRadiiPath, 'measured blast radii', () =>
+      this.#blastRadii.size === 0 ? undefined : this.#blastRadii.serialise(),
+    );
+  }
+
+  async #writeSelfBlasts(): Promise<void> {
+    await this.#writeCache(this.#selfBlastsPath, 'learned self-blast keep-outs', () =>
+      this.#selfBlasts.size === 0 ? undefined : this.#selfBlasts.serialise(),
+    );
+  }
+
+  /** One cache file written back, when there is anything to say and anywhere to say it. */
+  async #writeCache(
+    path: string | undefined,
+    what: string,
+    documentOf: () => unknown,
+  ): Promise<void> {
+    if (path === undefined) return;
+    const document = documentOf();
+    if (document === undefined) return;
 
     try {
       await mkdir(dirname(path), { recursive: true });
-      const document = JSON.stringify(this.#blastRadii.serialise(), undefined, 2);
-      await writeFile(path, `${document}\n`, 'utf8');
+      await writeFile(path, `${JSON.stringify(document, undefined, 2)}\n`, 'utf8');
     } catch (cause) {
       this.#log.warn(
-        `could not write the measured blast radii: ${cause instanceof Error ? cause.message : 'unknown'}`,
+        `could not write the ${what}: ${cause instanceof Error ? cause.message : 'unknown'}`,
       );
     }
   }
@@ -1299,6 +1374,7 @@ export class Application {
     // Beside it, and for the same reason: what this run learned about the game
     // is only in memory until it is written.
     await this.#writeBlastRadii();
+    await this.#writeSelfBlasts();
 
     await this.#proxy.close();
     this.#loader.stop();

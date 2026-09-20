@@ -24,6 +24,14 @@ export interface OverlayControlPlaneOptions {
   readonly native: OverlayTransport;
   readonly log: Logger;
   /**
+   * Where the game data's sprite file is, or nothing when there is none.
+   *
+   * Read per publish rather than passed as a value because it can appear after
+   * the plane starts — the game data loads in its own time — and a picture
+   * chooser is drawn the moment both the file and the link are there.
+   */
+  readonly sprites: () => string | undefined;
+  /**
    * Runs a coalesced publish. Injected so a test can flush deterministically
    * instead of racing a timer.
    */
@@ -37,6 +45,7 @@ const WIRE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   range: 'range',
   select: 'select',
   multiSelect: 'multiSelect',
+  assetMultiSelect: 'assetMultiSelect',
   text: 'text',
   colour: 'colour',
   button: 'button',
@@ -49,6 +58,7 @@ const VALUE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   select: 's',
   // A set of keys, carried as one delimited string — see MULTI_SELECT_DELIMITER.
   multiSelect: 's',
+  assetMultiSelect: 's',
   text: 's',
   // `#rrggbbaa`, which is a string like any other on the wire — the overlay is
   // where it becomes four bars, and it comes back in the same spelling.
@@ -72,6 +82,7 @@ export class OverlayControlPlane {
   readonly #host: PluginHost;
   readonly #native: OverlayTransport;
   readonly #log: Logger;
+  readonly #sprites: () => string | undefined;
   readonly #schedule: (flush: () => void) => void;
 
   readonly #subscriptions: Unsubscribe[] = [];
@@ -94,6 +105,7 @@ export class OverlayControlPlane {
     this.#host = options.host;
     this.#native = options.native;
     this.#log = options.log.child('overlay');
+    this.#sprites = options.sprites;
     this.#schedule =
       options.schedule ??
       ((flush): void => {
@@ -139,6 +151,17 @@ export class OverlayControlPlane {
     if (!this.#native.connected) return;
 
     const records: string[] = [buildRecord('sync-begin')];
+
+    // Before the plugins, because it is what some of their controls are drawn
+    // from: the sprite file's path, which the module reads straight off the
+    // disk it shares with this process. One field, and absent rather than empty
+    // when there is no file — an empty path is a file that failed to open, and
+    // the overlay is meant to tell those two apart.
+    const sprites = this.#sprites();
+    if (sprites !== undefined) {
+      records.push(buildRecord('sprites', sprites));
+    }
+
     for (const status of this.#host.statuses()) {
       const { meta } = status;
       records.push(
@@ -177,7 +200,7 @@ export class OverlayControlPlane {
       const values = settings.values();
       for (const descriptor of settings.descriptors()) {
         if (descriptor.hidden === true) continue;
-        records.push(settingRecord(meta.id, descriptor, values[descriptor.key]));
+        records.push(...settingRecords(meta.id, descriptor, values[descriptor.key]));
       }
     }
     // Anything the overlay still holds that this sync did not mention is gone.
@@ -263,18 +286,61 @@ function sameRecords(previous: readonly string[] | undefined, next: readonly str
   return true;
 }
 
-function settingRecord(pluginId: string, descriptor: SettingDescriptor, value: unknown): string {
+/**
+ * How many bytes of option list a single record will carry, before encoding.
+ *
+ * A record rides one frame, and a frame is capped at a quarter megabyte — a
+ * picker over every item in the game has hundreds of kilobytes of choices,
+ * which is why the list is split across `options` records rather than poured
+ * into the setting's own field. The budget is counted before the record's
+ * percent-encoding, which can inflate a label by up to three times (a space
+ * becomes `%20`), so it is set to keep the worst case well inside the cap
+ * rather than the typical one barely inside it.
+ */
+const OPTIONS_CHUNK_BYTES = 48 * 1024;
+
+/**
+ * The records that describe one setting: its own record, and — when its option
+ * list is too long for one frame — the `options` records that carry the rest.
+ *
+ * The chunks travel inside the same sync bracket, after the setting they belong
+ * to, so the mirror's commit at `sync-end` is as atomic as it ever was: a link
+ * that drops mid-sync leaves the overlay with neither the setting nor a
+ * half-list, and a reconnect sends the whole thing again.
+ */
+function settingRecords(
+  pluginId: string,
+  descriptor: SettingDescriptor,
+  value: unknown,
+): readonly string[] {
   const bounds =
     descriptor.kind === 'number' || descriptor.kind === 'range' ? descriptor : undefined;
-  const options =
-    descriptor.kind === 'select' || descriptor.kind === 'multiSelect'
-      ? encodeOptions(descriptor.options.map(([v, label]) => [label, v] as const))
-      : '';
+  const choices =
+    descriptor.kind === 'select' ||
+    descriptor.kind === 'multiSelect' ||
+    descriptor.kind === 'assetMultiSelect'
+      ? descriptor
+      : undefined;
+  const cells =
+    choices !== undefined
+      ? choices.options.map((option) => encodeOptions([[option[1], option[0]] as const]))
+      : [];
+  const whole = cells.join(';');
+
+  // The picture a picture multi-select's options are drawn as, in the options'
+  // own order and joined the way the codec joins a list — one key per option,
+  // and empty for the ones that carry none. Appended after everything an
+  // overlay built before pictures reads, so it is exactly as new as the
+  // feature.
+  const spriteKeys =
+    descriptor.kind === 'assetMultiSelect'
+      ? descriptor.options.map((option) => option[2] ?? '')
+      : [];
   const visible = descriptor.visibleWhen;
 
   // Positional, and new fields are appended: an older overlay that stops early
   // still draws the control, it just does not group or hide it.
-  return buildRecord(
+  const setting = buildRecord(
     'setting',
     pluginId,
     descriptor.key,
@@ -288,10 +354,50 @@ function settingRecord(pluginId: string, descriptor: SettingDescriptor, value: u
     bounds?.max ?? 0,
     bounds?.step ?? 0,
     descriptor.advanced === true,
-    options,
+    whole.length <= OPTIONS_CHUNK_BYTES ? whole : '',
     descriptor.group ?? '',
     visible === undefined ? '' : `${visible.key}=${visible.equals.map(scalar).join('|')}`,
+    whole.length <= OPTIONS_CHUNK_BYTES ? spriteKeys.join(';') : '',
   );
+  if (whole.length <= OPTIONS_CHUNK_BYTES) return [setting];
+
+  // Pack the cells into frame-sized chunks, at cell boundaries so the `;`
+  // structure survives the split. Each chunk carries the sprite keys of its own
+  // cells with it — the piece is self-contained, and nothing has to remember
+  // half a list across records. `index` and `count` are what let a mirror check
+  // it holds the whole list, in order, before it draws.
+  const packed: { cells: string; sprites: string }[] = [];
+  let current: string[] = [];
+  let sprites: string[] = [];
+  let used = 0;
+  cells.forEach((cell, i) => {
+    const separator = current.length === 0 ? 0 : 1;
+    if (used + separator + cell.length > OPTIONS_CHUNK_BYTES && current.length > 0) {
+      packed.push({ cells: current.join(';'), sprites: sprites.join(';') });
+      current = [];
+      sprites = [];
+      used = 0;
+    }
+    used += (current.length === 0 ? 0 : 1) + cell.length;
+    current.push(cell);
+    sprites.push(spriteKeys[i] ?? '');
+  });
+  if (current.length > 0) packed.push({ cells: current.join(';'), sprites: sprites.join(';') });
+
+  return [
+    setting,
+    ...packed.map((chunk, index) =>
+      buildRecord(
+        'options',
+        pluginId,
+        descriptor.key,
+        String(index),
+        String(packed.length),
+        chunk.cells,
+        chunk.sprites,
+      ),
+    ),
+  ];
 }
 
 function scalar(value: unknown): string {

@@ -71,6 +71,8 @@ export interface AutoLootInputs {
   readonly container: (objectType: number) => ContainerFacts | undefined;
   readonly statMaxima: (objectType: number) => PermanentStatMaxima | undefined;
   readonly displayName: (objectType: number) => string | undefined;
+  /** Every item the data describes, for the always/never choosers. */
+  readonly items: () => readonly { type: number; name: string }[];
 }
 
 /**
@@ -180,19 +182,27 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         default: 'none',
         options: ENCHANT_CHOICES,
       });
-      const always = context.settings.text('always', {
-        label: 'Always take (object ids)',
+      // The picture choosers over every item in the data. Value and sprite key
+      // are one and the same - the item's object type - so an option is a plain
+      // pair with the sprite implied. These replaced two free-text fields of
+      // comma-separated object ids: a list a player had to look ids up to fill,
+      // and which a typo left silently shorter than it read.
+      const itemOptions = inputs
+        .items()
+        .map((item): readonly [string, string] => [String(item.type), item.name]);
+      const always = context.settings.assetMultiSelect('always', {
+        label: 'Always take',
         group: taking,
         advanced: true,
-        default: '',
-        maxLength: 4096,
+        default: [],
+        options: itemOptions,
       });
-      const never = context.settings.text('never', {
-        label: 'Never take (object ids)',
+      const never = context.settings.assetMultiSelect('never', {
+        label: 'Never take',
         group: taking,
         advanced: true,
-        default: '',
-        maxLength: 4096,
+        default: [],
+        options: itemOptions,
       });
 
       // On, the backpack is overflow behind the main inventory — both fill, main
@@ -267,8 +277,8 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         eggs: eggs.get(),
         marks: marks.get(),
         minEnchants: ENCHANT_COUNT[minEnchants.get()],
-        always: parseItemList(always.get()),
-        never: parseItemList(never.get()),
+        always: chosenIds(always),
+        never: chosenIds(never),
       });
 
       let preferences = readPreferences();
@@ -615,6 +625,17 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
       });
     },
   });
+}
+
+/**
+ * The chosen object types of an always/never picker, as a set.
+ *
+ * The value is the same comma-joined string of decimal ids the old free-text
+ * field held, so config written before the choosers still loads — and so does
+ * anything a player typed into it, minus the ids that no longer name an item.
+ */
+function chosenIds(setting: { get(): readonly string[] }): ReadonlySet<number> {
+  return parseItemList(setting.get().join(','));
 }
 
 function tierSetting(

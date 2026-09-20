@@ -2,11 +2,29 @@ import type { ContainerFacts, ItemFacts } from '../gamedata/items.js';
 import type { PermanentStatMaxima } from '../gamedata/playerClasses.js';
 import type { ProjectileDefinition } from '../gamedata/projectiles.js';
 
+/** One item of the catalog, for building a chooser. */
+export interface ItemChoice {
+  readonly type: number;
+  /** The `objects.xml` id — the same string {@link ObjectCatalog.displayName} answers with. */
+  readonly name: string;
+}
+
 /** One key-opened dungeon portal, for building a chooser of them. */
 export interface DungeonPortal {
   readonly type: number;
   /** The `objects.xml` id, e.g. "Undead Lair Portal". */
   readonly name: string;
+  /**
+   * The object type of the key that opens this portal, or nothing when the data
+   * names none.
+   *
+   * A key carries `<Activate id="… Portal">CreatePortal</Activate>`, whose `id`
+   * is the portal object's own id — the file having been written for a client
+   * that reads both ends itself. The *picture* of a choice between dungeons is
+   * the key rather than the portal (a row of portals look near-identical; the
+   * keys do not), which is the reason the catalog answers this at all.
+   */
+  readonly keyType: number | undefined;
   /**
    * What the dungeon behind it is called, e.g. "Undead Lair".
    *
@@ -118,6 +136,15 @@ export interface ObjectCatalog {
   /** Every dungeon portal the data file describes, for building a chooser. */
   dungeonPortals(): readonly DungeonPortal[];
   /**
+   * Every item the data file describes, for building a chooser.
+   *
+   * The same `<Class>Equipment</Class>` + `<Item/>` population auto-loot decides
+   * between — the whole list rather than a filtered one, because the question
+   * a chooser answers is "which of these, exactly", and the answer the player
+   * wants to point at is not always the one a rule would have kept.
+   */
+  items(): readonly ItemChoice[];
+  /**
    * How wide one of these is, in tiles.
    *
    * **A monster's body is not one tile, and treating every one as though it
@@ -190,6 +217,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   isPortal: () => false,
   isDungeonPortal: () => false,
   dungeonPortals: () => [],
+  items: () => [],
   bodyTiles: () => undefined,
   displayName: () => undefined,
   projectile: () => undefined,

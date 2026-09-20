@@ -34,7 +34,9 @@ function facts(over: Partial<ItemFacts> = {}): ItemFacts {
     untiered: false,
     setItem: false,
     beltStack: 6,
+    feedPower: 0,
     potion: undefined,
+    key: false,
     ability: undefined,
     ...over,
   };

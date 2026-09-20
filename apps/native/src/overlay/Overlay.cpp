@@ -1,12 +1,11 @@
 #include "overlay/Overlay.h"
 
-#include <utility>
-
-#include <d3d11.h>
-
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
+#include <utility>
+
+#include <d3d11.h>
 
 #include "core/ComHandle.h"
 #include "hooks/SwapChain.h"
@@ -14,8 +13,8 @@
 // The Win32 backend deliberately leaves this out of its header — it is inside an
 // `#if 0` there — so that the header does not drag `<Windows.h>` in. Copying the
 // declaration is what upstream tells callers to do.
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message,
-                                                             WPARAM wparam, LPARAM lparam);
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message, WPARAM wparam,
+                                                             LPARAM lparam);
 
 namespace brownie::overlay {
 
@@ -140,14 +139,12 @@ void Overlay::Shutdown() noexcept {
     // A frame that got past the check before the detour went away is still
     // inside this object. Wait for it, but not forever.
     const DWORD deadline = ::GetTickCount() + kDrainTimeoutMs;
-    while (frames_in_flight_.load(std::memory_order_acquire) != 0 &&
-           ::GetTickCount() < deadline) {
+    while (frames_in_flight_.load(std::memory_order_acquire) != 0 && ::GetTickCount() < deadline) {
         ::Sleep(1);
     }
 
     if (window_ != nullptr && original_wndproc_ != nullptr) {
-        ::SetWindowLongPtrW(window_, GWLP_WNDPROC,
-                            reinterpret_cast<LONG_PTR>(original_wndproc_));
+        ::SetWindowLongPtrW(window_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(original_wndproc_));
         window_ = nullptr;
         original_wndproc_ = nullptr;
         g_original_wndproc = nullptr;

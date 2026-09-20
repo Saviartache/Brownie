@@ -51,7 +51,6 @@ import {
 import { MAX_PATH_POINTS, shotPaths } from '../src/features/dodge/ShotPaths.js';
 import { SteerTracker } from '../src/features/dodge/SteerIntent.js';
 import { GroundCache, type GroundSource } from '../src/features/dodge/GroundCache.js';
-import { HOP_SPEED_TILES_PER_SECOND, MAX_HOP_TILES } from '../src/features/dodge/Hop.js';
 import { walkCommand } from '../src/features/dodge/dodgeCommand.js';
 import { createDodgePlugin } from '../src/features/dodge/dodgePlugin.js';
 import { PICK_MARGIN_TILES, enemyUnderCursor } from '../src/features/dodge/engageRing.js';
@@ -193,9 +192,6 @@ const SETTINGS: DodgeSettings = {
   holdGroundWeight: 1,
   dpsRadiusTiles: 0.2,
   budget: 280,
-  hopEnabled: true,
-  hopTiles: MAX_HOP_TILES,
-  hopCooldownMs: 400,
 };
 
 /** What the character walks at once the panel has taken its margin off. */
@@ -364,17 +360,6 @@ const ACROSS_THE_ROOM = straightShot({ x: 2.3, y: 10 }, 0, 20, 0, 3000);
  */
 const ELSEWHERE = straightShot({ x: 2.3, y: 4 }, 0, 20, 0, 3000);
 
-/**
- * A small, fast shot crossing the character between two ticks.
- *
- * The one case only a hop answers: every walk out of it is swept along ground
- * the shot is about to cross, and a hop is one frame and is measured where it
- * lands. See the planner's own tests for the geometry.
- */
-const CROSSES_NOW = straightShot({ x: 10, y: 6 }, Math.PI / 2, 40, 0, 3000, {
-  collisionHalfTiles: 0.1,
-});
-
 describe('who is driving', () => {
   it('says nothing at all when nothing could reach us', () => {
     const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, []);
@@ -476,13 +461,7 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        // **A hop is spent whole on the frame it lands**, which is exactly what
-        // makes it different from a walk — see `Hop.ts`. Playing one out as a
-        // walk carries the character slowly through ground the planner crossed
-        // in a single frame.
-        const travel = plan.hop
-          ? plan.stepTiles
-          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -532,13 +511,7 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        // **A hop is spent whole on the frame it lands**, which is exactly what
-        // makes it different from a walk — see `Hop.ts`. Playing one out as a
-        // walk carries the character slowly through ground the planner crossed
-        // in a single frame.
-        const travel = plan.hop
-          ? plan.stepTiles
-          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -554,8 +527,10 @@ describe('how far it moves to get out of the way', () => {
     }
 
     // Room to spare rather than a graze, which is the difference between a miss
-    // and a coin flip on the prediction.
-    expect(closest).toBeGreaterThan(0.1);
+    // and a coin flip on the prediction. Not by much: every move here is a
+    // whole walk of at least a quarter of a tile, so where the character ends
+    // up between two frames is as fine as the answer gets.
+    expect(closest).toBeGreaterThan(0.05);
   });
 
   // **And having stepped aside, it walks back.** Without a way home every plan
@@ -632,13 +607,7 @@ describe('how far it moves to get out of the way', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        // **A hop is spent whole on the frame it lands**, which is exactly what
-        // makes it different from a walk — see `Hop.ts`. Playing one out as a
-        // walk carries the character slowly through ground the planner crossed
-        // in a single frame.
-        const travel = plan.hop
-          ? plan.stepTiles
-          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -721,13 +690,7 @@ describe('the ground the player named', () => {
         shots,
       );
       if (plan.steer && plan.stepTiles > 0) {
-        // **A hop is spent whole on the frame it lands**, which is exactly what
-        // makes it different from a walk — see `Hop.ts`. Playing one out as a
-        // walk carries the character slowly through ground the planner crossed
-        // in a single frame.
-        const travel = plan.hop
-          ? plan.stepTiles
-          : Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
         y += plan.dirY * travel;
       }
@@ -993,9 +956,9 @@ describe('where it refuses to go', () => {
     };
   }
 
-  // **Ground that hurts is left the fast way**, because walking out costs a
-  // tick of health per step and a frame of movement costs none.
-  it('hops out of damaging ground it is already standing in', () => {
+  // **Ground that hurts is left at once**, because every tick spent in it is
+  // health with nothing left to dodge.
+  it('walks out of damaging ground it is already standing in', () => {
     const plan = new DodgePlanner().plan(
       situation({ onDamagingGround: true }),
       SETTINGS,
@@ -1003,24 +966,9 @@ describe('where it refuses to go', () => {
       [],
     );
 
-    // The reason is the pool; that it is left with one frame of movement rather
-    // than a walk is the separate question `plan.hop` answers.
+    // The reason is the pool; leaving it at a walk is the only way it is left.
     expect(plan.verdict).toBe('escape');
-    expect(plan.hop).toBe(true);
     expect(plan.steer).toBe(true);
-    expect(plan.dirX).toBeLessThan(0);
-  });
-
-  it('still walks out of it when the emergency step is switched off', () => {
-    const plan = new DodgePlanner().plan(
-      situation({ onDamagingGround: true }),
-      { ...SETTINGS, hopEnabled: false },
-      lavaEastOf(9.8),
-      [],
-    );
-
-    expect(plan.verdict).toBe('escape');
-    expect(plan.hop).toBe(false);
     expect(plan.dirX).toBeLessThan(0);
   });
 
@@ -1165,29 +1113,27 @@ describe('room to dodge in', () => {
   });
 
   // **The other half of the same report.** A monster that is already standing
-  // in the character is too close for any route the lattice can describe: every
-  // walk out of it starts inside it, and a body matching their speed is never
-  // outwalked at all. One frame of movement, at once, is the only answer.
-  it('hops out from under a monster that is standing in the character', () => {
+  // in the character is too close for comfort: every walk out of it starts
+  // inside it, and a body matching their speed is never outwalked at all — so
+  // the shove is charged for and answered with everything the walk has.
+  it('walks out from under a monster that is standing in the character', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 10.3, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
 
     const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
-    // Spacing is the reason and the hop is how: a body already inside the
-    // character has taken the ground every walk out of it would start on.
+    // Spacing is the reason: a body already inside the character has taken the
+    // ground every walk out of it would start on.
     expect(plan.verdict).toBe('spacing');
-    expect(plan.hop).toBe(true);
-    expect(plan.stepTiles).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
+    expect(plan.steer).toBe(true);
   });
 
-  it('walks rather than hopping while the monster is merely near', () => {
+  it('walks while the monster is merely near', () => {
     const bodies = new EnemyBodies();
     bodies.collect([{ x: 11.4, y: 10 } as EntityView], 10, 10, 12, ANY_BODY);
 
     const plan = new DodgePlanner().plan(situation(), SETTINGS, standingOff(bodies, KEEP_AWAY), []);
 
-    expect(plan.hop).toBe(false);
     expect(plan.verdict).toBe('spacing');
   });
 
@@ -1208,82 +1154,15 @@ describe('room to dodge in', () => {
   });
 });
 
-describe('the step that is spent on one frame', () => {
-  /**
-   * A small, fast shot that crosses the player between two ticks.
-   *
-   * **The case only a hop answers, and it is a case about *when* rather than
-   * about how far.** A walk is swept along the ground it covers, and every walk
-   * out of here starts from a place the shot is about to be — so every one of
-   * them is caught somewhere along its own path. A hop is one frame, and the
-   * game tests collision at a position once a frame, so it is measured where it
-   * lands and nowhere in between.
-   */
-  const CROSSING = straightShot({ x: 10, y: 6 }, Math.PI / 2, 40, 0, 3000, {
-    collisionHalfTiles: 0.1,
-  });
-
-  it('spends a frame of movement at once when walking cannot get out of the way', () => {
-    const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, [CROSSING]);
-
-    expect(plan.hop).toBe(true);
-    expect(plan.steer).toBe(true);
-    expect(plan.impactMs).toBe(Infinity);
-    expect(plan.stepTiles).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
-  });
-
-  // **Both actions are ranked on one scale, and the walk is the cheaper of
-  // them.** A hop costs a frame of the character's allowance and a cooldown, so
-  // it is only worth spending where it buys something a walk cannot — and a
-  // displacement a walk can deliver is not that.
-  it('walks when a walk delivers the same displacement', () => {
+describe('the move it cannot deliver as a walk', () => {
+  it('walks out of the way of a shot a single tick of walking clears', () => {
     // Small enough that a tick of walking clears it, and near enough that the
     // tick has to be this one rather than the next.
     const shot = straightShot({ x: 8, y: 10 }, 0, 8, 0, 3000, { collisionHalfTiles: 0.1 });
     const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, [shot]);
 
     expect(plan.steer).toBe(true);
-    expect(plan.hop).toBe(false);
-  });
-
-  // **What stops it becoming a way of walking, and what it is really about.**
-  // The server takes back ground covered faster than a character can walk, so
-  // the thing to ration is the *distance* — a full leap is a whole frame's
-  // allowance and a twentieth of a tile is a fourteenth of one. A flat cooldown
-  // priced the micro-dodge as though it were the leap, and then had nothing
-  // left when the leap was wanted.
-  it('waits in proportion to what the last one spent', () => {
-    const planner = new DodgePlanner();
-    const first = planner.plan(situation(), SETTINGS, OPEN_GROUND, [CROSSING]);
-    expect(first.hop).toBe(true);
-
-    // A hop of about three quarters of the allowance is most of the cooldown.
-    const waited = (SETTINGS.hopCooldownMs * first.stepTiles) / MAX_HOP_TILES;
-    expect(waited).toBeGreaterThan(SETTINGS.hopCooldownMs / 2);
-
-    const soon = planner.plan(situation({ nowMs: 1_000_000 + waited / 2 }), SETTINGS, OPEN_GROUND, [
-      CROSSING,
-    ]);
-    expect(soon.hop).toBe(false);
-
-    const later = planner.plan(
-      situation({ nowMs: 1_000_000 + waited + 1 }),
-      SETTINGS,
-      OPEN_GROUND,
-      [CROSSING],
-    );
-    expect(later.hop).toBe(true);
-  });
-
-  it('does nothing of the sort while it is switched off', () => {
-    const plan = new DodgePlanner().plan(
-      situation(),
-      { ...SETTINGS, hopEnabled: false },
-      OPEN_GROUND,
-      [CROSSING],
-    );
-
-    expect(plan.hop).toBe(false);
+    expect(plan.impactMs).toBe(Infinity);
   });
 
   // Priced rather than forbidden, so a fight with no way out still has a best
@@ -1292,12 +1171,7 @@ describe('the step that is spent on one frame', () => {
     const wall: DodgeShot[] = [];
     for (let y = 4; y <= 16; y += 0.5) wall.push(straightShot({ x: 8.6, y }, 0, 12, 0, 3000));
 
-    const plan = new DodgePlanner().plan(
-      situation(),
-      { ...SETTINGS, hopEnabled: false },
-      OPEN_GROUND,
-      wall,
-    );
+    const plan = new DodgePlanner().plan(situation(), SETTINGS, OPEN_GROUND, wall);
 
     expect(plan.verdict).toBe('unavoidable');
     expect(plan.impactMs).toBeLessThan(Infinity);
@@ -1312,7 +1186,6 @@ describe('what to say to the module', () => {
       dirX: 0,
       dirY: -1,
       stepTiles: 0.55,
-      hop: false,
       impactMs: Infinity,
       clearanceTiles: 1,
       crowded: false,
@@ -1341,7 +1214,6 @@ describe('what to say to the module', () => {
 
     expect(command).toBeDefined();
     expect(Math.hypot(command?.offsetX ?? 0, command?.offsetY ?? 0)).toBeCloseTo(0.55, 6);
-    expect(command?.hop).toBe(false);
   });
 
   // Taking the wheel means cancelling their input rather than adding to it: the
@@ -1385,22 +1257,6 @@ describe('what to say to the module', () => {
   it('spends the whole of the character speed on a shove', () => {
     const command = walkCommand({ ...REQUEST, plan: planOf({ crowded: true }) });
     expect(command?.speedTilesPerSecond).toBeCloseTo(6, 6);
-  });
-
-  // **The hop is not adjusted for what they are pressing.** It is a single
-  // frame, and the module already subtracts their own walking from what it
-  // carries — from the position only it can see.
-  it('passes a hop through exactly, at the speed one frame needs', () => {
-    const intent = { x: 0, y: -1 };
-    const command = walkCommand({
-      ...REQUEST,
-      intent,
-      plan: planOf({ hop: true, dirX: 0, dirY: -1, stepTiles: 0.7 }),
-    });
-
-    expect(command?.hop).toBe(true);
-    expect(command?.offsetY).toBeCloseTo(-0.7, 6);
-    expect(command?.speedTilesPerSecond).toBe(HOP_SPEED_TILES_PER_SECOND);
   });
 });
 
@@ -2077,15 +1933,7 @@ describe('when the plugin decides', () => {
     host: PluginHost;
     /** An offset from wherever the player is, which is what the planner says. */
     moveBy: ReturnType<typeof vi.fn>;
-    /** The same, spent on one frame. See `Hop.ts`. */
-    hopBy: ReturnType<typeof vi.fn>;
-    /**
-     * Every step the module was asked to take, whichever record carried it.
-     *
-     * **A walk and a hop are one decision ranked on one scale**, so a test about
-     * whether the planner took the wheel has to accept either; the one test that
-     * is genuinely about the record asks for `hopBy` by name.
-     */
+    /** Every step the module was asked to take. */
     commands: () => [number, number][];
     plan: () => void;
     /**
@@ -2164,7 +2012,6 @@ describe('when the plugin decides', () => {
     } = {},
   ): Harness {
     const moveBy = vi.fn();
-    const hopBy = vi.fn();
     const showPicture = vi.fn();
     const cursor: { target: Position | undefined; point: Position | undefined } = {
       target: undefined,
@@ -2200,6 +2047,7 @@ describe('when the plugin decides', () => {
         },
         projectiles: () => [shot],
         blasts: () => [],
+        selfBlastKeepoutTiles: (): undefined => undefined,
         enemies: () => enemies,
         entity: (objectId: number) => enemies.find((one) => one.objectId === objectId),
         canStandAt: map.canStandAt ?? ((): boolean => true),
@@ -2226,7 +2074,7 @@ describe('when the plugin decides', () => {
     });
     host.load(
       createDodgePlugin({
-        output: { moveBy, hopBy, showPicture },
+        output: { moveBy, showPicture },
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
         view: { wanted: () => view.on },
@@ -2249,14 +2097,9 @@ describe('when the plugin decides', () => {
 
     /**
      * Every step the module was asked to take, in the order it was asked.
-     *
-     * **Which record carried it is a separate question from whether it was
-     * asked for.** A walk and a hop are both moves the planner ranks on one
-     * scale, so a test about *taking the wheel* has to accept either — and the
-     * one test that is genuinely about the record asks for `hopBy` by name.
      */
     const commands = (): [number, number][] =>
-      [...moveBy.mock.calls, ...hopBy.mock.calls].map((call) => {
+      [...moveBy.mock.calls].map((call) => {
         const [offsetX, offsetY] = call as [number, number];
         return [offsetX, offsetY];
       });
@@ -2264,7 +2107,6 @@ describe('when the plugin decides', () => {
     return {
       host,
       moveBy,
-      hopBy,
       commands,
       showPicture,
       cursor,
@@ -2381,7 +2223,6 @@ describe('when the plugin decides', () => {
     // Shoved three tiles east, with nothing in the air worth answering.
     h.self.x = 13;
     h.moveBy.mockClear();
-    h.hopBy.mockClear();
     h.plan();
 
     const asked = h.commands();
@@ -2553,7 +2394,6 @@ describe('when the plugin decides', () => {
 
     clickAt(h, { x: 12, y: 20 });
     h.moveBy.mockClear();
-    h.hopBy.mockClear();
     h.plan();
 
     expect(h.notices).toContain('Target let go.');
@@ -2567,7 +2407,6 @@ describe('when the plugin decides', () => {
 
     monster.hp = 0;
     h.moveBy.mockClear();
-    h.hopBy.mockClear();
     h.plan();
 
     expect(h.notices).toContain('Target gone.');
@@ -2582,7 +2421,6 @@ describe('when the plugin decides', () => {
 
     h.mapChanged();
     h.moveBy.mockClear();
-    h.hopBy.mockClear();
     h.plan();
 
     expect(wentNowhere(h)).toBe(true);
@@ -2618,7 +2456,6 @@ describe('when the plugin decides', () => {
 
     h.host.settingsOf('auto-dodge')?.apply('engageTargets', false);
     h.moveBy.mockClear();
-    h.hopBy.mockClear();
     h.plan();
 
     expect(wentNowhere(h)).toBe(true);
@@ -2688,13 +2525,7 @@ describe('when the plugin decides', () => {
   // Taking the wheel means cancelling their input rather than adding to it: the
   // command has to *oppose* what they are holding, or the two sum to neither.
   it('cancels the input it is overriding', () => {
-    // **The emergency step is switched off for this one**, because it is the
-    // only move the cancellation does not apply to: a hop is a single frame, so
-    // the ground the player covers under their own power during it is a
-    // fraction of a tile the module already subtracts. What is being checked
-    // here is the walk's arithmetic. See `dodgeCommand`.
-    const { host, moveBy, plan, steer } = underFire(900);
-    host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
+    const { moveBy, plan, steer } = underFire(900);
     const intent = { x: -1, y: 0 };
     steer.direction = intent;
 
@@ -2728,35 +2559,6 @@ describe('when the plugin decides', () => {
     plan();
 
     expect(commands().length).toBeGreaterThan(0);
-  });
-
-  // **A hop is a different record, and it has to be.** An offset is resolved
-  // from wherever the character is on the frame it lands, so one left standing
-  // is carried again on every frame of the hold — which is a sprint, not the
-  // single step the planner chose.
-  it('sends the emergency step as a record the module spends once', () => {
-    const { moveBy, hopBy, plan } = underFire(0, {
-      shot: CROSSES_NOW as unknown as ProjectileView,
-    });
-
-    plan();
-
-    expect(hopBy).toHaveBeenCalledTimes(1);
-    expect(moveBy).not.toHaveBeenCalled();
-    const [offsetX, offsetY, speed] = hopBy.mock.calls[0] as [number, number, number, number];
-    expect(Math.hypot(offsetX, offsetY)).toBeLessThanOrEqual(MAX_HOP_TILES + 1e-9);
-    expect(speed).toBe(HOP_SPEED_TILES_PER_SECOND);
-  });
-
-  it('never hops while the emergency step is switched off', () => {
-    const { host, hopBy, plan } = underFire(0, {
-      shot: CROSSES_NOW as unknown as ProjectileView,
-    });
-    host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
-
-    plan();
-
-    expect(hopBy).not.toHaveBeenCalled();
   });
 
   // Nothing is predicted for a picture nobody is looking at: the switch lives
@@ -3022,27 +2824,13 @@ describe('when the plugin decides', () => {
     expect(asked[0]?.[1]).toBeLessThan(0);
   });
 
-  // **Out the fast way once they are actually in it.** Walking out costs a tick
-  // of health per step, and the record the module spends on one frame costs
-  // none — which is the whole reason a hop is not only about bullets.
-  it('hops them out of it once they are actually in it', () => {
-    const { hopBy, moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
+  // **Out at once once they are actually in it.** Walking out costs a tick of
+  // health per step — which is the whole reason this is not only about bullets.
+  it('walks them out of it once they are actually in it', () => {
+    const { moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
 
     plan();
 
-    expect(hopBy).toHaveBeenCalled();
-    expect(moveBy).not.toHaveBeenCalled();
-    const [offsetX] = hopBy.mock.calls[0] as [number, number];
-    expect(offsetX).toBeLessThan(0);
-  });
-
-  it('walks them out instead when the emergency step is switched off', () => {
-    const { host, hopBy, moveBy, plan } = underFire(0, { damagingAt: (x) => x >= 10 });
-    host.settingsOf('auto-dodge')?.apply('hopEnabled', false);
-
-    plan();
-
-    expect(hopBy).not.toHaveBeenCalled();
     expect(moveBy).toHaveBeenCalled();
     const [offsetX] = moveBy.mock.calls[0] as [number, number];
     expect(offsetX).toBeLessThan(0);
@@ -3074,7 +2862,6 @@ describe('when the plugin decides', () => {
         'anchor',
         'engageTargets',
         'engageRangePercent',
-        'hopEnabled',
       ]);
     });
 
@@ -3329,7 +3116,6 @@ describe('the hit redirect', () => {
       createDodgePlugin({
         output: {
           moveBy: () => undefined,
-          hopBy: () => undefined,
           showPicture: () => undefined,
         },
         cursorWalk: { target: () => undefined },

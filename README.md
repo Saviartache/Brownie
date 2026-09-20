@@ -111,21 +111,29 @@ Handles the ability slot in two halves. Support abilities — heals, buffs,
 auras, cleanses — are cast when what they give is worth having *right now*, not
 when a timer says so: a tome is not fired at full health, and an aura is not
 raised with nothing to use it on. Attack abilities — quivers, spells, traps,
-scepters — are never cast for you, only pointed at an enemy instead of at the
-mouse when you fire them. What an ability does is read from the game's own item
-data, so a new class or a new item is understood without an update.
+scepters — are pointed at an enemy instead of at the mouse when you fire them,
+and can be fired for you at a boss. What an ability does is read from the
+game's own item data, so a new class or a new item is understood without an
+update.
 
-- **Use support abilities** and **aim the attack abilities you use** — the two
-  halves, switched separately.
+- **Aim the attack abilities you use** — where what you fire lands: on the
+  enemy rather than wherever the cursor happened to be.
+- **Auto-cast attack abilities at bosses** — fire them for you while a boss is
+  in range, and at nothing else, ever. With no boss in range it is back to the
+  key press. Off by default.
+- **Use support abilities** — the other half, on its own judgement of what is
+  worth having.
+- **Cast healing abilities at or below (% health)** and **keep speed and
+  stealth up outside combat.**
 - **Aim at** and **cursor radius (tiles)** — the same four choices auto-aim
-  offers, with a radius around the cursor auto-aim itself does without.
-- **Bosses** — treat like any other enemy, prefer them, or only them.
+  offers, with a radius around the cursor auto-aim itself does without. Decides
+  among bosses too, when the switch above is on.
+- **Bosses** — treat like any other enemy, prefer them, or only them, for the
+  aiming and for combat auras. The auto-cast above is bosses by definition and
+  does not read this one.
 - **Look for enemies within (tiles).**
-- **Cast healing abilities at or below (% health)** and **mana abilities at or
-  below (% mana)**.
-- **Keep speed and stealth up outside combat.**
-- **Keep at least (% mana)** — a reserve it will not spend into.
-- *Advanced:* minimum wait between casts (ms).
+- *Advanced:* the mana-ability threshold, a mana reserve it will not spend
+  into, and the minimum wait between casts (ms).
 
 ### Collider Manipulation
 
@@ -655,7 +663,7 @@ npm run gamedata extract
 | Command | What it does |
 |---|---|
 | `npm run gamedata where` | prints where the game was found |
-| `npm run gamedata extract` | writes `objects.xml`, `tiles.xml`, enchantment data and a manifest to `./game-data` |
+| `npm run gamedata extract` | writes `objects.xml`, `tiles.xml`, enchantment data, the item sprite atlas `sprites.bin`, and a manifest to `./game-data` |
 | `npm run gamedata check` | exits non-zero if the extracted data no longer matches the install |
 
 Point the runtime at the result with `gameData.directory` (or

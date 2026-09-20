@@ -60,6 +60,62 @@ describe('finding chosen portals', () => {
   });
   const isDungeon = (type: number): boolean => type === UNDEAD || type === ABYSS;
 
+  it('pictures each choice by the first sprite the file carries', () => {
+    // The chain: the key that opens the dungeon, the portal itself, the
+    // ordinary realm portal. One harness per rung, because the chooser is
+    // built once at setup.
+    type Option =
+      | readonly [value: string, label: string]
+      | readonly [value: string, label: string, sprite: string];
+    const optionsFor = (available: ReadonlySet<number>): readonly Option[] => {
+      const host = new PluginHost({
+        log: testLogger(),
+        native: NATIVE,
+        sessions: SESSIONS,
+        onChanged: () => undefined,
+      });
+      host.load(
+        createAutoPortalPlugin({
+          output: { moveTo: () => undefined, stop: () => undefined },
+          isDungeonPortal: () => true,
+          displayName: () => undefined,
+          dungeonPortals: () => [
+            { type: UNDEAD, name: 'Undead Lair Portal', dungeonName: 'Undead Lair', keyType: 0x71 },
+            { type: ABYSS, name: 'Abyss Portal', dungeonName: 'Abyss', keyType: 0x72 },
+          ],
+          spriteAvailable: (type) => available.has(type),
+          steer: { direction: () => undefined },
+        }),
+      );
+      return host
+        .settingsOf('auto-portal')!
+        .descriptors()
+        .map((d) => (d.kind === 'assetMultiSelect' ? d.options : []))
+        .flat();
+    };
+
+    const STANDARD = 0x0703;
+    // Alphabetical by dungeon: Abyss before Undead Lair, whichever rung of the
+    // chain each picture came from.
+    expect(optionsFor(new Set([0x71, 0x72])).map((o) => o[2])).toEqual([
+      String(0x72),
+      String(0x71),
+    ]);
+    // The Abyss key is missing: its portal stands in. Undead Lair keeps its key.
+    expect(optionsFor(new Set([0x71, ABYSS])).map((o) => o[2])).toEqual([
+      String(ABYSS),
+      String(0x71),
+    ]);
+    // Neither the key nor the portal: the ordinary realm portal stands in.
+    expect(optionsFor(new Set([STANDARD])).map((o) => o[2])).toEqual([
+      String(STANDARD),
+      String(STANDARD),
+    ]);
+    // Nothing at all: the option carries no picture, and the overlay draws the
+    // checkbox list.
+    expect(optionsFor(new Set()).every((o) => o.length === 2)).toBe(true);
+  });
+
   it('keeps only chosen dungeon portals, nearest first', () => {
     const entities = [
       portal(1, ABYSS, { x: 20, y: 0 }),
@@ -135,9 +191,17 @@ describe('the auto-portal plugin', () => {
       isDungeonPortal: (type) => type === UNDEAD || type === ABYSS,
       displayName: (type) => (type === UNDEAD ? 'Undead Lair Portal' : undefined),
       dungeonPortals: () => [
-        { type: UNDEAD, name: 'Undead Lair Portal', dungeonName: 'Undead Lair' },
-        { type: ABYSS, name: 'Abyss of Demons Portal', dungeonName: 'Abyss of Demons' },
+        { type: UNDEAD, name: 'Undead Lair Portal', dungeonName: 'Undead Lair', keyType: 0x71 },
+        {
+          type: ABYSS,
+          name: 'Abyss of Demons Portal',
+          dungeonName: 'Abyss of Demons',
+          keyType: undefined,
+        },
       ],
+      // Everything has a picture in this fixture, so each option falls back as
+      // far as its key.
+      spriteAvailable: () => true,
       steer: { direction: () => state.steer },
     };
 

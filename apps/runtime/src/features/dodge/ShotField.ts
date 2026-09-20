@@ -160,21 +160,6 @@ export class ShotField {
   #debuff = new Float32Array(0);
   /** Who fired each, so a recognised pattern can claim its own shots. */
   #owner = new Int32Array(0);
-  /**
-   * Where each shot is at the moment of planning, before the lead.
-   *
-   * **The one instant the horizon has no sample for, and the one a hop can land
-   * in.** Slice nought sits at `leadMs`, because that is the earliest a decision
-   * can reach the character — but `leadMs` is an upper bound on the round trip
-   * rather than a measurement of it, and a command that arrives sooner than
-   * assumed puts an instant displacement somewhere the shots have not left yet.
-   * A walk is gradual and errs safe under the same mistake; a hop is a whole
-   * frame's travel and does not. See `TrajectoryPlanner`.
-   */
-  #leadX = new Float64Array(0);
-  #leadY = new Float64Array(0);
-  #leadHalf = new Float64Array(0);
-  #hasLead = false;
   #capacity = 0;
 
   #slices = 0;
@@ -196,30 +181,6 @@ export class ShotField {
   /** How many samples each shot has, which is one more than the horizon's steps. */
   get slices(): number {
     return this.#slices;
-  }
-
-  /**
-   * Whether the moment of planning is described as well as the horizon.
-   *
-   * False when the plan takes effect immediately, in which case the lead window
-   * is empty and there is nothing there to be caught by.
-   */
-  get hasLead(): boolean {
-    return this.#hasLead;
-  }
-
-  /** Where `shot` is at the moment of planning. See {@link #leadX}. */
-  leadXOf(shot: number): number {
-    return this.#leadX[shot] ?? 0;
-  }
-
-  leadYOf(shot: number): number {
-    return this.#leadY[shot] ?? 0;
-  }
-
-  /** Its half-extent there, the player's own already folded in. */
-  leadHalfOf(shot: number): number {
-    return this.#leadHalf[shot] ?? 0;
   }
 
   /** Plan-relative milliseconds of sample `slice`. */
@@ -309,7 +270,6 @@ export class ShotField {
     this.#leadMs = options.leadMs;
     this.#count = 0;
     this.#considered = 0;
-    this.#hasLead = options.leadMs > 0;
 
     const horizonMs = options.leadMs + options.ticks * options.tickMs;
     const keepWithin = options.reachTiles + CULL_MARGIN_TILES;
@@ -352,11 +312,6 @@ export class ShotField {
       }
 
       if (this.#count >= this.#capacity) this.#reserve();
-      this.#leadX[this.#count] = now.x;
-      this.#leadY[this.#count] = now.y;
-      // No drift at all, because nothing has been extrapolated yet: this is
-      // where the shot is, not where it is predicted to be.
-      this.#leadHalf[this.#count] = effectiveHalf(own, options.hitScale, options.padTiles);
       if (this.#sample(shot, this.#count, options, slices, keepWithin, own, drift)) {
         this.#count += 1;
       }
@@ -499,15 +454,6 @@ export class ShotField {
     const debuff = new Float32Array(capacity);
     debuff.set(this.#debuff);
     this.#debuff = debuff;
-    const leadX = new Float64Array(capacity);
-    const leadY = new Float64Array(capacity);
-    const leadHalf = new Float64Array(capacity);
-    leadX.set(this.#leadX);
-    leadY.set(this.#leadY);
-    leadHalf.set(this.#leadHalf);
-    this.#leadX = leadX;
-    this.#leadY = leadY;
-    this.#leadHalf = leadHalf;
     const tail = new Float64Array(capacity * TAIL_STRIDE);
     tail.set(this.#tail);
     this.#tail = tail;

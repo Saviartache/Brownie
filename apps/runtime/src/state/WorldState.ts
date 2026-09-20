@@ -8,6 +8,7 @@ import type {
 import { PLAYER_ENVIRONMENT_HALF_TILES } from '../features/dodge/hitbox.js';
 import type { BlastRadiusTable } from './blasts/BlastRadiusTable.js';
 import { BlastStore } from './blasts/BlastStore.js';
+import { SelfBlastTable } from './blasts/SelfBlastTable.js';
 import { EntityStore } from './EntityStore.js';
 import { EMPTY_CATALOG, type ObjectCatalog } from './ObjectCatalog.js';
 import { SelfState } from './SelfState.js';
@@ -35,6 +36,14 @@ export interface WorldStateOptions {
    * is what a test wants.
    */
   readonly blastRadii?: BlastRadiusTable;
+  /**
+   * Which enemy types blast themselves, shared across sessions.
+   *
+   * The same reasoning as {@link blastRadii}: what an enemy does to its
+   * neighbours is a property of the game, not of a connection. Its own when
+   * omitted, which is what a test wants.
+   */
+  readonly selfBlasts?: SelfBlastTable;
   /** Injected so a test can drive time without waiting for it. */
   readonly now?: () => number;
 }
@@ -58,6 +67,14 @@ export class WorldState implements WorldView {
   readonly tileMap: TileMap;
   readonly projectileStore: ProjectileStore;
   readonly blastStore: BlastStore;
+  /**
+   * Enemy types learned to blast themselves without warning.
+   *
+   * Filled by the state stage out of the packets that prove it; read by the
+   * dodge, which holds every living enemy of a learned type at arm's length.
+   * See `SelfBlastTable`.
+   */
+  readonly selfBlasts: SelfBlastTable;
   /** The catalog in use, so the state stage can look a shot up. */
   readonly objects: ObjectCatalog;
 
@@ -88,6 +105,7 @@ export class WorldState implements WorldView {
     // exist.
     this.projectileStore = new ProjectileStore(this.#stopsShots);
     this.blastStore = new BlastStore(options.blastRadii);
+    this.selfBlasts = options.selfBlasts ?? new SelfBlastTable();
     this.#now = options.now ?? Date.now;
   }
 
@@ -253,5 +271,9 @@ export class WorldState implements WorldView {
 
   blasts(): Iterable<BlastView> {
     return this.blastStore.values(this.gameTimeMs);
+  }
+
+  selfBlastKeepoutTiles(objectType: number): number | undefined {
+    return this.selfBlasts.lookUp(objectType)?.radiusTiles;
   }
 }

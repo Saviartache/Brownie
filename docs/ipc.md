@@ -460,6 +460,36 @@ published once for **every key a plugin offers**, and sent back as an action —
 An empty `key` is a key nobody has bound yet; a plugin with no `bind` record at
 all is one that offers none. See [`hotkeyEvent`](#hotkeyevent).
 
+`sprites` is the other one that does not describe a control: `sprites|path`,
+published at most once per sync, naming the file the picture controls draw
+from. The pixels never cross the wire — the module reads the file off the disk
+it shares with the runtime, because megabytes belong on a disk and not in a
+pipe meant for hundred-byte records. The file is `game-data/sprites.bin` as the
+extraction writes it: a `BROWNSPR` magic, a version, the atlas size, one
+`objectType, x, y, w, h` entry per sprite, then the atlas itself as RGBA. A
+sync that names no file is a runtime with no game data, and the picture
+controls fall back to their checkbox lists.
+
+An option list too long for one frame — a picker over every item in the game
+runs to hundreds of kilobytes — does not travel in the setting's own options
+field. The setting goes out with that field empty, and the list follows it as
+`options|pluginId|key|index|count|cells|sprites` records inside the same sync
+bracket: `cells` is a frame-sized piece of the same `Label=value;` list, split
+at cell boundaries so the pieces concatenate in publication order, and
+`sprites` is that piece's own sprite keys, aligned to its own cells. The sync
+commits whole, so a link that drops mid-list leaves the overlay with neither
+the setting nor a half-list.
+
+A setting whose kind is `assetMultiSelect` is a multi-select drawn as a grid of
+the options' own pictures, and carries one more field than the multi-select —
+appended, like every new field: the sprite key of each option, `;`-joined in
+the options' own order and empty for an option that carries none. A key is an
+object type as decimal text, resolved in the sprite file above; an option with
+no key is drawn with its own value as the key, which is how an item chooser
+says "the item is the picture" without sending a field at all. The value on the
+wire is unchanged from a multi-select: the chosen keys, comma-joined, and sent
+back the same way.
+
 `slot` is which of that plugin's switches the key moves: the setting it names,
 or empty for the plugin's own switch. It is the bind's identity — what it is
 stored, published and reported under — so an overlay must send back the one it
@@ -575,29 +605,18 @@ that owes nothing to the runtime's world model.
 **`once` exists because an offset is resolved afresh on every frame**, which is
 exactly what makes an ordinary walk work: the target stays a fixed distance
 ahead and the character keeps walking towards it for as long as the hold lasts.
-The dodge's hop wants the opposite — one frame's worth of movement, at once —
-and leaving the same offset standing carries it again on the next frame, and the
-one after, as many times as fit inside the hold. At a hundred and
-forty frames a second a hold of twenty milliseconds is three of them, which is
-two tiles rather than the two thirds of one the planner chose, and the server
-takes the difference back. So a one-shot target is cleared by the frame that
-steps towards it — **by the frame that steps, not the frame that sees it**: a
-frame with nothing to measure the player's own walking against issues no step at
-all, and consuming the target there would drop the step on the floor. The hold
-still bounds how long it may wait for one. See
-`apps/runtime/src/features/dodge/Hop.ts`, which is also where the distance is
-capped: the module's own per-frame limit is what one of these can carry, and
-asking for more does not move the character further.
+A move that wanted the opposite — one frame's worth of movement, at once — would
+find the same offset standing there on the next frame, and the one after, as
+many times as fit inside the hold, which is a sprint the server takes back
+rather than the single step that was asked for. So a one-shot target is cleared
+by the frame that steps towards it — **by the frame that steps, not the frame
+that sees it**: a frame with nothing to measure the player's own walking against
+issues no step at all, and consuming the target there would drop the step on the
+floor. The hold still bounds how long it may wait for one.
 
-**A hop is also how a displacement smaller than a frame is asked for**, which is
-the other half of what `once` buys and the half the dodge now spends most of its
-time on. An ordinary walk is a heading the frame steps along at whatever budget
-it has, so a walk of a twentieth of a tile is not a distance the module can
-deliver — the offset is under one frame's step and the command degenerates into
-"that way, for a while". A one-shot target carries exactly the offset it is
-given, so it is the only way to move a character a hundredth of a tile on
-purpose. The dodge's optimizer ranks the two actions on one scale for exactly
-that reason; see `apps/runtime/src/features/dodge/TrajectoryPlanner.ts`.
+The dodge no longer sends one — every move it commands is an ordinary walk —
+but the field stays in the record and the module keeps honouring it, because a
+wire format that drops a field is a format two sides disagree about.
 
 `holdMs` is how a target stops mattering. The runtime says *nothing* when it
 decides to stand still or hold fire, so silence has to mean stop on its own —

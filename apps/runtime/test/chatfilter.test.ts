@@ -171,6 +171,7 @@ describe('the spam signals', () => {
     // The same claim in the third spelling of it, so the banner is still
     // recognised once the bot moves off the domain above.
     ['24/7 fast delivery, maxing, buffs', 'shop-word'],
+    ['fast service, message me', 'shop-word'],
     ['cheap fame service, message me', 'shop-word'],
     // Nobody in this game says "stock", so the word alone is enough — in every
     // spelling the compacted form folds together.
@@ -187,6 +188,11 @@ describe('the spam signals', () => {
     ['join us on telegram', 'off-game-platform'],
     ['deals on discord.gg/shop', 'off-game-platform'],
     ['add me Discord: shopbot', 'off-game-platform'],
+    // `dsc.gg` is a Discord invite under another name, and every spelling of it
+    // compacts to the one string `DSC_GG` reads.
+    ['invite: dsc.gg/shop', 'off-game-platform'],
+    ['dsc [dot] gg free keys', 'off-game-platform'],
+    ['d5c.gg fame cheap', 'off-game-platform'],
     ['r.e.a.l.m.s.h.o.p', 'obfuscated-address'],
     ['buy keys realm dot com', 'obfuscated-address'],
     ['WTS pet, 10 def', 'trade-call'],
@@ -243,6 +249,8 @@ describe('the chat filter plugin', () => {
   };
 
   const SELF = 'MyCharacter';
+  /** The name stat as the server spelled it this test, tail and all. */
+  let selfName = SELF;
 
   /** A session api whose connect listeners the test can fire. */
   function sessionApi(): { api: SessionApi; connect: () => void } {
@@ -268,7 +276,7 @@ describe('the chat filter plugin', () => {
   const session = (): SessionView =>
     ({
       id: 's1',
-      self: { name: SELF },
+      self: { name: selfName },
       notify: (text: string) => notified.push(text),
     }) as unknown as SessionView;
 
@@ -289,6 +297,7 @@ describe('the chat filter plugin', () => {
     const settings = host.settingsOf('chat-filter');
     if (settings === undefined) throw new Error('the plugin declared no settings');
     notified.length = 0;
+    selfName = SELF;
     return { host, settings, connect };
   }
 
@@ -340,6 +349,14 @@ describe('the chat filter plugin', () => {
     expect(shown(host, { name: '', text: 'cheap fame, paypal only' })).toBe(true);
     expect(shown(host, { name: '*', text: 'cheap fame, paypal only' })).toBe(true);
     expect(shown(host, { name: 'Oryx', text: 'cheap fame, paypal only', numStars: -1 })).toBe(true);
+  });
+
+  it('knows its own line when the name stat carries a trailing token', () => {
+    const { host } = loadEnabled();
+    selfName = `${SELF},9a16`;
+    // The chat line is spelled with the bare name, the stat is not, and they are
+    // the same player — so this must not be handed to the filter.
+    expect(shown(host, { name: SELF, text: 'cheap fame, paypal only' })).toBe(true);
   });
 
   it('hides a blocked sender whatever they say', () => {

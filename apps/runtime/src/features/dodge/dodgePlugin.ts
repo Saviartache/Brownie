@@ -531,26 +531,11 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         }
 
         commanding = true;
-        // **A hop is the same offset with a different lifetime**, and the module
-        // is the only side that can spend it correctly: an offset is resolved
-        // from wherever the character is on the frame it lands, so one left
-        // standing would be carried again on every frame of the hold. See
-        // `DodgeOutput.hopBy`.
-        //
         // **The hold comes from the command rather than from the setting**, and
         // that is what makes a small dodge small: the module keeps walking
         // towards an offset for as long as the record stands, so how long it
         // stands *is* how far the character goes. The setting is the ceiling; the
         // plan's own distance is what is actually asked for. See `dodgeCommand`.
-        if (command.hop) {
-          inputs.output.hopBy(
-            command.offsetX,
-            command.offsetY,
-            command.speedTilesPerSecond,
-            command.holdMs,
-          );
-          return;
-        }
         inputs.output.moveBy(
           command.offsetX,
           command.offsetY,

@@ -25,19 +25,12 @@
  * walk went as far as the hold allowed whatever distance the planner had chosen,
  * which is the whole of why small dodges were not possible before.
  *
- * **A hop is the same offset with a different lifetime**, and that is the whole
- * of what makes it instant: the module spends its entire per-frame allowance on
- * it and then the target is gone, where an ordinary walk keeps being carried
- * towards for as long as its hold lasts. See `Hop.ts`, and `DodgeOutput.hopBy`
- * for why the difference cannot be expressed as a shorter hold.
- *
  * Pure, and separate from the plugin, because every rule in it is a rule about
  * arithmetic that is worth checking without a session.
  */
 
 import type { Position } from '@brownie/plugin-api';
 import type { DodgePlan } from './DodgePlanner.js';
-import { HOP_SPEED_TILES_PER_SECOND } from './Hop.js';
 
 /**
  * How far ahead the module is pointed at, at least.
@@ -61,18 +54,6 @@ const MIN_TARGET_TILES = 0.3;
  */
 const MIN_WALK_HOLD_MS = 25;
 
-/**
- * How long a hop stands before it lapses unspent.
- *
- * **A deadline, not a duration.** The record is spent by the first frame that
- * actually steps towards it, so this only bounds how long it may wait for one —
- * and a frame with nothing to measure the player's own walking against issues no
- * step at all, which is the ordinary case immediately after a quiet stretch. A
- * few frames of grace; past that the situation it was chosen for has moved on
- * and the next plan will choose again.
- */
-export const HOP_HOLD_MS = 60;
-
 /** Below this the command is not a walk, it is jitter. */
 const MIN_COMMAND_SPEED = 0.2;
 
@@ -83,19 +64,10 @@ export interface WalkCommand {
   /** Tiles per second the step may cover. */
   readonly speedTilesPerSecond: number;
   /**
-   * Whether the module should spend it on one frame and then forget it.
-   *
-   * The exact step. Everything else about the command is the same, and the
-   * module still clamps it to what a single frame may carry — which is why a hop
-   * is the only way to ask for a displacement smaller than a frame of walking.
-   */
-  readonly hop: boolean;
-  /**
    * How long the record stands, in milliseconds.
    *
-   * **For a walk this is the distance**, because the module keeps stepping
-   * towards the offset for as long as the record lives. For a hop it is a
-   * deadline: the first frame that steps spends it. See the file note.
+   * **This is the distance**, because the module keeps stepping
+   * towards the offset for as long as the record lives. See the file note.
    */
   readonly holdMs: number;
 }
@@ -125,21 +97,6 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
   const plan = request.plan;
   if (!plan.steer) return undefined;
 
-  // **The hop is not adjusted for what they are pressing, and does not need to
-  // be.** It is a single frame, so the ground they cover under their own power
-  // during it is a fraction of a tile — and the module already subtracts exactly
-  // that from what it carries, from the position only it can see. Subtracting a
-  // guess about it here as well would take the same ground off twice.
-  if (plan.hop && plan.stepTiles > 0) {
-    return {
-      offsetX: plan.dirX * plan.stepTiles,
-      offsetY: plan.dirY * plan.stepTiles,
-      speedTilesPerSecond: HOP_SPEED_TILES_PER_SECOND,
-      hop: true,
-      holdMs: HOP_HOLD_MS,
-    };
-  }
-
   // At full speed, always: a step that is worth walking is worth arriving at,
   // and how far to go is the plan's own answer rather than something to spend
   // speed on. Crossing a lane of fire slowly is the one way of crossing it that
@@ -165,7 +122,6 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
       offsetX: -intent.x * MIN_TARGET_TILES,
       offsetY: -intent.y * MIN_TARGET_TILES,
       speedTilesPerSecond: request.speedTilesPerSecond,
-      hop: false,
       holdMs: request.holdMs,
     };
   }
@@ -223,7 +179,6 @@ export function walkCommand(request: WalkRequest): WalkCommand | undefined {
     offsetX: (wantX / magnitude) * reach,
     offsetY: (wantY / magnitude) * reach,
     speedTilesPerSecond: commanded,
-    hop: false,
     holdMs,
   };
 }

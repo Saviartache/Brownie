@@ -1,4 +1,5 @@
 import { readTextAssets, type TextAsset } from './unity/SerializedFile.js';
+import { buildSpritesFile, SPRITES_FILE } from './sprites.js';
 
 /**
  * The XML documents the runtime reads, and how to recognise them.
@@ -33,6 +34,13 @@ export interface ExtractionResult {
   readonly files: readonly ExtractedFile[];
   readonly unityVersion: string;
   readonly assetsSeen: number;
+  /**
+   * Why the sprite atlas could not be built, when it could not. The XML
+   * documents are the reason the tool exists and are extracted regardless; the
+   * sprites are a refinement, and the honest outcome of an install unlike any
+   * this tool has met is everything else plus a sentence.
+   */
+  readonly spritesTrouble: string | undefined;
 }
 
 /**
@@ -40,8 +48,8 @@ export interface ExtractionResult {
  *
  * The catalogs arrive **in fragments**: the game splits `<Objects>` across many
  * text assets, and each is a complete little XML document. They are concatenated
- * inside one root element, in the order the file lists them — which is the order
- * the game itself reads them in, and therefore the order in which a later
+ * inside one root element, in the order the file lists them — which is the
+ * order the game itself reads them in, and therefore the order in which a later
  * definition overrides an earlier one.
  */
 export function extractGameData(assets: Buffer): ExtractionResult {
@@ -62,16 +70,34 @@ export function extractGameData(assets: Buffer): ExtractionResult {
   }
 
   const files: ExtractedFile[] = [];
+  let objectsXml: Buffer | undefined;
   for (const { file, rootTag } of XML_DOCUMENTS) {
     const parts = fragments.get(file) ?? [];
     if (parts.length === 0) continue;
-    files.push({ name: file, content: mergeFragments(parts, rootTag), parts: parts.length });
+    const merged = mergeFragments(parts, rootTag);
+    if (file === 'objects.xml') objectsXml = merged;
+    files.push({ name: file, content: merged, parts: parts.length });
   }
   for (const [name, content] of named) {
     files.push({ name: `${name}.xml`, content, parts: 1 });
   }
 
-  return { files, unityVersion, assetsSeen };
+  // The sprites are sliced out of the same buffer the XML came from, against
+  // the object catalog it just produced — the two name the same objects, so
+  // building one from the other is the only way they can stay in step.
+  let spritesTrouble: string | undefined;
+  if (objectsXml !== undefined) {
+    try {
+      const sprites = buildSpritesFile(assets, objectsXml.toString('utf8'));
+      if (sprites !== undefined) {
+        files.push({ name: SPRITES_FILE, content: sprites, parts: 1 });
+      }
+    } catch (cause) {
+      spritesTrouble = cause instanceof Error ? cause.message : 'unknown failure';
+    }
+  }
+
+  return { files, unityVersion, assetsSeen, spritesTrouble };
 }
 
 function collect(

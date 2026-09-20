@@ -117,6 +117,23 @@ export interface MultiSelectSettingOptions<T extends string> extends SettingComm
   readonly options: ReadonlyArray<readonly [T, string]>;
 }
 
+/**
+ * One choice of a picture multi-select: what it is, and the asset it is drawn
+ * as.
+ *
+ * The asset is named by a key the overlay resolves in the sprite file the
+ * runtime's game data carries — an object type as a decimal string. Absent for
+ * a choice with no picture, which the overlay draws with its label alone.
+ */
+export type AssetOption<T extends string> =
+  readonly [value: T, label: string] | readonly [value: T, label: string, sprite: string];
+
+export interface AssetMultiSelectSettingOptions<T extends string> extends SettingCommon {
+  /** The keys chosen by default. Each must be one of {@link options}. */
+  readonly default: readonly T[];
+  readonly options: ReadonlyArray<AssetOption<T>>;
+}
+
 export interface TextSettingOptions extends SettingCommon {
   readonly default: string;
   readonly maxLength?: number;
@@ -154,6 +171,20 @@ export interface SettingsApi {
     key: string,
     options: MultiSelectSettingOptions<T>,
   ): MultiSelectHandle<T>;
+  /**
+   * A many-of-N choice, drawn as a grid of the choices' own pictures.
+   *
+   * The same value, persistence and round-trip as {@link multiSelect} — the
+   * chosen keys as one delimited string — with one addition: each option may
+   * name the sprite it is drawn as, which is how a choice between a hundred
+   * dungeon keys or four thousand items stays readable. The overlay falls back
+   * to the checkbox list when the game data carries no sprites, so a setting
+   * declared here is never less usable than a multi-select.
+   */
+  assetMultiSelect<T extends string>(
+    key: string,
+    options: AssetMultiSelectSettingOptions<T>,
+  ): MultiSelectHandle<T>;
   text(key: string, options: TextSettingOptions): SettingHandle<string>;
   /**
    * A colour, drawn as a picker with a bar for each of red, green, blue and
@@ -175,6 +206,10 @@ export type SettingDescriptor =
   | ({ readonly kind: 'number' | 'range'; readonly key: string } & NumberSettingOptions)
   | ({ readonly kind: 'select'; readonly key: string } & SelectSettingOptions<string>)
   | ({ readonly kind: 'multiSelect'; readonly key: string } & MultiSelectSettingOptions<string>)
+  | ({
+      readonly kind: 'assetMultiSelect';
+      readonly key: string;
+    } & AssetMultiSelectSettingOptions<string>)
   | ({ readonly kind: 'text'; readonly key: string } & TextSettingOptions)
   | ({ readonly kind: 'colour'; readonly key: string } & ColourSettingOptions)
   | ({ readonly kind: 'button'; readonly key: string } & ButtonOptions);

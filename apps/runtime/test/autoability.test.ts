@@ -135,6 +135,7 @@ const HEALING = conditionBitLow(ConditionEffect.Healing);
 const DAMAGING = conditionBitLow(ConditionEffect.Damaging);
 const INVISIBLE = conditionBitLow(ConditionEffect.Invisible);
 const BLEEDING = conditionBitLow(ConditionEffect.Bleeding);
+const INVULNERABLE = conditionBitLow(ConditionEffect.Invulnerable);
 
 function abilityOf(element: string): AbilityFacts {
   const facts = readAbilityFacts(element);
@@ -436,7 +437,12 @@ describe('the auto-ability plugin', () => {
     cursorAsks: () => number;
   }
 
-  function enemyOf(objectId: number, x: number, objectType = ENEMY_TYPE): EntityView {
+  function enemyOf(
+    objectId: number,
+    x: number,
+    objectType = ENEMY_TYPE,
+    conditions = 0,
+  ): EntityView {
     return {
       objectId,
       objectType,
@@ -445,7 +451,7 @@ describe('the auto-ability plugin', () => {
       maxHp: 100,
       isEnemy: true,
       isPlayer: false,
-      conditions: 0,
+      conditions,
       guildName: '',
       stat: () => undefined,
       text: () => undefined,
@@ -516,6 +522,7 @@ describe('the auto-ability plugin', () => {
       canStandAt: () => true,
       projectiles: () => [],
       blasts: () => [],
+      selfBlastKeepoutTiles: (): undefined => undefined,
     };
 
     const casts: Cast[] = [];
@@ -1147,6 +1154,130 @@ describe('the auto-ability plugin', () => {
       for (let at = 0; at <= 3000; at += 500) h.tick(at);
       fired(h);
       expect(h.cursorAsks()).toBe(0);
+    });
+  });
+
+  describe('auto-casting attack abilities at bosses', () => {
+    /** A boss wherever the test wants it, by the marker that makes it one. */
+    const bossOf = (objectId: number, x: number, conditions = 0): EntityView =>
+      enemyOf(objectId, x, BOSS_TYPE, conditions);
+
+    /** A harness holding a quiver and the boss switch on, unless said otherwise. */
+    function armed(enemies: readonly EntityView[], switchOn = true): Harness {
+      const h = harness();
+      h.slot.objectType = QUIVER_TYPE;
+      if (switchOn) h.settings.apply('autoCastAttacks', true);
+      h.enemies.push(...enemies);
+      return h;
+    }
+
+    it('leaves the attack to the key press until the switch is on', () => {
+      const h = armed([bossOf(1, 7)], false);
+      for (let at = 0; at <= 5000; at += 500) h.tick(at);
+      expect(h.casts).toHaveLength(0);
+    });
+
+    it('fires the attack ability at the boss, and paces itself', () => {
+      const h = armed([bossOf(1, 7)]);
+
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 7, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+
+      // Inside the interval floor: one boss, one cast.
+      h.tick(300);
+      expect(h.casts).toHaveLength(1);
+      h.tick(700);
+      expect(h.casts).toHaveLength(2);
+    });
+
+    it('fires at nothing but a boss, however long the minions stand there', () => {
+      const h = armed([enemyOf(1, 2)]);
+      for (let at = 0; at <= 5000; at += 500) h.tick(at);
+      expect(h.casts).toHaveLength(0);
+    });
+
+    it('takes the boss over the minion standing closer', () => {
+      const h = armed([enemyOf(1, 2), bossOf(2, 7)]);
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 7, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+    });
+
+    it('holds its fire while the boss cannot be hurt', () => {
+      const h = armed([bossOf(1, 5, INVULNERABLE)]);
+      h.tick(0);
+      expect(h.casts).toHaveLength(0);
+
+      h.enemies.length = 0;
+      h.enemies.push(bossOf(2, 6));
+      h.tick(1000);
+      expect(h.casts).toHaveLength(1);
+    });
+
+    it('picks between two bosses by the same aim setting', () => {
+      const h = armed([bossOf(1, 7), bossOf(2, 3)]);
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 3, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+    });
+
+    it('ignores the boss rule the aiming half reads', () => {
+      // "Treat bosses like any other enemy" is about what to point at; the
+      // switch says attack abilities fire at bosses, and that is not loosened
+      // by a preference over minions.
+      const h = armed([bossOf(1, 7)]);
+      h.settings.apply('bosses', 'any');
+      h.tick(0);
+      expect(h.casts).toHaveLength(1);
+    });
+
+    it('will not fire into the mana reserve', () => {
+      const h = armed([bossOf(1, 7)]);
+      h.settings.apply('mpReservePercent', 50);
+      h.self.maxMp = 200;
+
+      // The 75 a quiver costs, and then the 100 the player asked to hold.
+      h.self.mp = 150;
+      h.tick(0);
+      expect(h.casts).toHaveLength(0);
+
+      h.self.mp = 180;
+      h.tick(1000);
+      expect(h.casts).toHaveLength(1);
+    });
+
+    it('backs off after the player fires it by hand', () => {
+      const h = armed([bossOf(1, 5)]);
+
+      h.world.gameTimeMs = 0;
+      h.host.dispatchPacket(useItem(ABILITY_SLOT, QUIVER_TYPE), h.session);
+      h.tick(1500);
+      expect(h.casts).toHaveLength(0);
+      h.tick(2000);
+      expect(h.casts).toHaveLength(1);
+    });
+
+    it('never fires a hybrid tome for the shot riding on it', () => {
+      // The tome heals, so it belongs to the support half, and a boss walking
+      // past a priest at full health is not a reason to spend 140 mana.
+      const h = armed([bossOf(1, 4)]);
+      h.slot.objectType = HYBRID_TOME_TYPE;
+      for (let at = 0; at <= 5000; at += 500) h.tick(at);
+      expect(h.casts).toHaveLength(0);
+    });
+
+    it('aims nothing when the aim switch is off, and still fires at the boss', () => {
+      // Two switches, two questions: where the player's own press lands, and
+      // whether the plugin ever presses the key itself.
+      const h = armed([bossOf(1, 5)]);
+      h.settings.apply('aimAttacks', false);
+
+      const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
+      h.host.dispatchPacket(packet, h.session);
+      expect(usePosOf(packet)).toEqual(MOUSE);
+
+      // Past the pause that manual press earned: the two switches are about
+      // different presses, not a shared one.
+      h.tick(2000);
+      expect(h.casts).toEqual([{ x: 5, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
     });
   });
 });

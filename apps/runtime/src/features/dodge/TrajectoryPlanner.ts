@@ -29,18 +29,16 @@
  * needs a second sidestep, and rejecting that is how a planner walks into a wall
  * of fire it could have crossed.
  *
- * **`MOVE` and `HOP` are both candidates, ranked on one scale.** They are
- * genuinely different actions and neither is an emergency version of the other:
- * a walk covers ground over a tick and can be turned part way through; a hop
- * spends one frame's allowance at once and is exact. What decides between them
- * is the same arithmetic that decides everything else — see `TrajectoryScore`.
- * The one asymmetry is at the small end, and it is the module's rather than a
- * preference: a walk is delivered as a heading the frame steps along, so
- * anything under {@link MIN_WALK_TILES} is not a distance a walk can express,
- * and a hop is. Which is why the smallest dodges in this feature are hops.
+ * **The walk is the only action.** A walk covers ground over a tick and can be
+ * turned part way through, and every candidate here is one — a heading and a
+ * distance, ranked by the same arithmetic that decides everything else. See
+ * `TrajectoryScore`. The one limit is at the small end, and it is the module's
+ * rather than a preference: a walk is delivered as a heading the frame steps
+ * along, so anything under {@link MIN_WALK_TILES} is not a distance a walk can
+ * express, and such candidates are simply not offered.
  *
- * **Coarse to fine.** Every heading is tried at a walk and two hops first; the
- * best few headings are then tried at every distance. A saturated screen
+ * **Coarse to fine.** Every heading is tried at a whole tick of walking first;
+ * the best few headings are then tried at every distance. A saturated screen
  * therefore costs about forty rollouts rather than four hundred, and the answer
  * is the same one nearly every time, because the cost surface in the heading is
  * smooth and the one in the distance is not.
@@ -74,9 +72,9 @@ import {
  * offset the frame resolves against the character's live position and steps
  * along at whatever the frame's budget allows; a distance under about a quarter
  * of a tile is inside one frame of that at ordinary speeds, so the command
- * degenerates into "one frame's worth, in this direction" — which is a hop with
- * extra steps and no precision. Below this the planner uses the hop, which
- * carries exactly the offset it is given.
+ * degenerates into "one frame's worth, in this direction" — a whole tick of
+ * travel whatever distance was asked for. Below this no candidate is offered
+ * at all.
  */
 export const MIN_WALK_TILES = 0.25;
 
@@ -97,27 +95,6 @@ const WALK_FRACTIONS = [0.25, 0.45, 0.7, 1] as const;
  * pass, where it is asked of three headings instead of twelve.
  */
 const COARSE_WALK_FRACTIONS = [1] as const;
-
-/**
- * The distances a hop is offered at, as fractions of the hop's own reach.
- *
- * **This is where the twentieth of a tile lives.** A full hop is seven tenths of
- * a tile and can step clean over the only gap there was; the short ones are not
- * caution, they are the whole of the micro-dodge — a hop of a twentieth of a
- * tile is a real, exactly delivered movement, and it is very often all that a
- * spiral or a checkerboard actually asks for.
- */
-const HOP_FRACTIONS = [0.07, 0.15, 0.3, 0.5, 0.75, 1] as const;
-
-/**
- * And the coarse pass's two.
- *
- * Two rather than one because the hop is the action whose *distance* changes the
- * answer at this stage: a nudge that stays inside the ring the character fights
- * from and a leap that clears a line are different decisions, not two amounts of
- * the same one.
- */
-const COARSE_HOP_FRACTIONS = [0.15, 1] as const;
 
 /** How many headings the fine pass refines around. */
 const REFINED_HEADINGS = 3;
@@ -175,8 +152,6 @@ export interface TrajectoryRequest {
   readonly orbitTiles: number;
   /** How far one tick of walking covers, in tiles. */
   readonly stepTiles: number;
-  /** How far one hop carries. Nought when the hop is not available at all. */
-  readonly hopTiles: number;
   readonly ticks: number;
   readonly tickMs: number;
   /** How long before the plan takes effect. Slice nought sits here. */
@@ -207,8 +182,6 @@ export interface DodgeTrajectory {
   readonly dirY: number;
   /** How far that action displaces the character, in tiles. */
   readonly stepTiles: number;
-  /** Whether it is spent as one frame of movement rather than as a walk. */
-  readonly hop: boolean;
   /**
    * Plan-relative milliseconds at which the trajectory is first hit, or
    * `Infinity`.
@@ -258,7 +231,6 @@ export class TrajectoryPlanner {
     dirX: 0,
     dirY: 0,
     stepTiles: 0,
-    hop: false,
     impactMs: Infinity,
     clearanceTiles: NO_DANGER_TILES,
     driftTiles: 0,
@@ -292,7 +264,6 @@ export class TrajectoryPlanner {
     this.#best.dirX = 0;
     this.#best.dirY = 0;
     this.#best.stepTiles = 0;
-    this.#best.hop = false;
     this.#best.ridingPocket = false;
     this.#bestHeading = -1;
     this.#evaluated = 0;
@@ -434,7 +405,7 @@ export class TrajectoryPlanner {
    * the first tick, so the first tick's queries are the same query every time.
    */
   #offerHold(request: TrajectoryRequest): void {
-    this.#consider(request, 0, 0, 0, false, -1);
+    this.#consider(request, 0, 0, 0, -1);
     // Every other heading, because what this is asking is whether *some* escape
     // is still open a tick from now, and half a ring answers that: a direction
     // between two spokes is within fifteen degrees of one of them, which over
@@ -454,13 +425,12 @@ export class TrajectoryPlanner {
   #considerDelayed(request: TrajectoryRequest, carryX: number, carryY: number): void {
     if (this.#evaluated >= request.budget) return;
     this.#evaluated += 1;
-    this.#roll(request, 0, 0, 0, false, Continuation.Carry, carryX, carryY, this.#best.cost);
+    this.#roll(request, 0, 0, 0, Continuation.Carry, carryX, carryY, this.#best.cost);
     if (!(this.#rollCost < this.#best.cost)) return;
     this.#best.cost = this.#rollCost;
     this.#best.dirX = 0;
     this.#best.dirY = 0;
     this.#best.stepTiles = 0;
-    this.#best.hop = false;
     this.#best.impactMs = this.#rollImpactMs;
     this.#best.clearanceTiles = this.#rollRoom;
     this.#best.driftTiles = this.#rollDriftTiles;
@@ -468,7 +438,7 @@ export class TrajectoryPlanner {
   }
 
   /**
-   * Every heading at two distances apiece, walking and hopping.
+   * Every heading at a whole tick of walking.
    *
    * The cost surface in the heading is smooth — two neighbouring directions
    * differ by a few hundredths of a tile of room — so a coarse sweep finds the
@@ -482,11 +452,7 @@ export class TrajectoryPlanner {
       for (const fraction of COARSE_WALK_FRACTIONS) {
         const distance = request.stepTiles * fraction;
         if (distance < MIN_WALK_TILES) continue;
-        this.#consider(request, dirX, dirY, distance, false, i);
-      }
-      if (request.hopTiles <= 0) continue;
-      for (const fraction of COARSE_HOP_FRACTIONS) {
-        this.#consider(request, dirX, dirY, request.hopTiles * fraction, true, i);
+        this.#consider(request, dirX, dirY, distance, i);
       }
     }
   }
@@ -494,7 +460,7 @@ export class TrajectoryPlanner {
   /**
    * Every distance, around the headings the coarse pass liked.
    *
-   * **Where the micro-dodge is actually found.** Between a twentieth of a tile
+   * **Where the micro-dodge is actually found.** Between a quarter of a tile
    * and a whole tick's walk there are half a dozen genuinely different answers,
    * and which of them is right turns on where one arm of a spiral is against
    * where the next one will be — a surface with a step in it, not a slope.
@@ -510,11 +476,7 @@ export class TrajectoryPlanner {
       for (const fraction of WALK_FRACTIONS) {
         const distance = request.stepTiles * fraction;
         if (distance < MIN_WALK_TILES) continue;
-        this.#consider(request, dirX, dirY, distance, false, i);
-      }
-      if (request.hopTiles <= 0) continue;
-      for (const fraction of HOP_FRACTIONS) {
-        this.#consider(request, dirX, dirY, request.hopTiles * fraction, true, i);
+        this.#consider(request, dirX, dirY, distance, i);
       }
     }
   }
@@ -540,14 +502,10 @@ export class TrajectoryPlanner {
     const dirX = toX / distance;
     const dirY = toY / distance;
 
-    // Walked if it is far enough to be a walk, and hopped besides — the pocket
-    // is very often a fraction of a tile away, which is exactly the range only a
-    // hop can deliver.
+    // Walked if it is far enough to be a walk — closer than that is inside one
+    // frame of travel, and the next plan will still be able to answer.
     const walk = Math.min(distance, request.stepTiles);
-    if (walk >= MIN_WALK_TILES) this.#consider(request, dirX, dirY, walk, false, -1);
-    if (request.hopTiles > 0) {
-      this.#consider(request, dirX, dirY, Math.min(distance, request.hopTiles), true, -1);
-    }
+    if (walk >= MIN_WALK_TILES) this.#consider(request, dirX, dirY, walk, -1);
   }
 
   /**
@@ -563,7 +521,6 @@ export class TrajectoryPlanner {
     dirX: number,
     dirY: number,
     distance: number,
-    hop: boolean,
     heading: number,
   ): void {
     if (this.#evaluated >= request.budget) return;
@@ -582,7 +539,7 @@ export class TrajectoryPlanner {
 
     const held = request.holdDirX !== 0 || request.holdDirY !== 0;
     const along = held && distance > 0 ? dirX * request.holdDirX + dirY * request.holdDirY : 1;
-    const decision = decisionCost(request.weights, hop, along);
+    const decision = decisionCost(request.weights, along);
 
     let cost = Infinity;
     let impactMs = Infinity;
@@ -606,7 +563,7 @@ export class TrajectoryPlanner {
       ) {
         continue;
       }
-      this.#roll(request, dirX, dirY, distance, hop, mode, dirX, dirY, cost < bound ? cost : bound);
+      this.#roll(request, dirX, dirY, distance, mode, dirX, dirY, cost < bound ? cost : bound);
       if (this.#rollCost >= cost) continue;
       cost = this.#rollCost;
       impactMs = this.#rollImpactMs;
@@ -620,7 +577,6 @@ export class TrajectoryPlanner {
     this.#best.dirX = distance > 0 ? dirX : 0;
     this.#best.dirY = distance > 0 ? dirY : 0;
     this.#best.stepTiles = distance;
-    this.#best.hop = hop && distance > 0;
     this.#best.impactMs = impactMs;
     this.#best.clearanceTiles = room;
     this.#best.driftTiles = drift;
@@ -632,7 +588,7 @@ export class TrajectoryPlanner {
    * Whether the ground allows the first action at all.
    *
    * **Every place the body passes through, not two of them.** A tick of walking
-   * is most of a tile and a hop is the better part of one, so a wall thinner
+   * is most of a tile, so a wall thinner
    * than the step sits entirely between the two ends of it — and a corner
    * clipped diagonally is thinner still. The samples are spaced under the body's
    * own width, which is what makes "the path is clear" mean the path rather than
@@ -649,10 +605,11 @@ export class TrajectoryPlanner {
     const toY = request.startY + dirY * distance;
     if (!walkableBetween(request.ground, request.startX, request.startY, toX, toY)) return false;
 
-    const gap = request.ground.hazardGapTiles(toX, toY);
+    const gap = request.ground.hazardGapTiles(toX, toY, request.leadMs + request.tickMs);
     const middle = request.ground.hazardGapTiles(
       (request.startX + toX) / 2,
       (request.startY + toY) / 2,
+      request.leadMs + request.tickMs / 2,
     );
     return !entersHazard(this.#startGap, gap, middle, request.weights.hazardClearTiles);
   }
@@ -670,7 +627,6 @@ export class TrajectoryPlanner {
     dirX: number,
     dirY: number,
     distance: number,
-    hop: boolean,
     mode: Continuation,
     carryX: number,
     carryY: number,
@@ -694,7 +650,7 @@ export class TrajectoryPlanner {
       const arriveMs = startsMs + request.tickMs;
       // Tick nought always begins where the plan does, so its answer is the one
       // the run took once. See {@link #startGap}.
-      const fromGap = tick === 0 ? this.#startGap : request.ground.hazardGapTiles(x, y);
+      const fromGap = tick === 0 ? this.#startGap : request.ground.hazardGapTiles(x, y, startsMs);
 
       // Where this tick wants to end up: the candidate's own displacement on the
       // first one, and whatever the continuation asks for after that.
@@ -778,11 +734,11 @@ export class TrajectoryPlanner {
       let travelTiles = reach;
       let gap = fromGap;
       if (travelTiles > 0) {
-        gap = request.ground.hazardGapTiles(toX, toY);
+        gap = request.ground.hazardGapTiles(toX, toY, arriveMs);
         if (tick > 0) {
           const midX = (x + toX) / 2;
           const midY = (y + toY) / 2;
-          const middle = request.ground.hazardGapTiles(midX, midY);
+          const middle = request.ground.hazardGapTiles(midX, midY, (startsMs + arriveMs) / 2);
           if (
             !walkableBetween(request.ground, x, y, toX, toY) ||
             entersHazard(fromGap, gap, middle, weights.hazardClearTiles)
@@ -795,41 +751,9 @@ export class TrajectoryPlanner {
         }
       }
 
-      // **A hop is measured where it lands, and a walk along the way it
-      // went.** The game tests collision at a position once a frame, so a
-      // displacement spent inside one frame does not touch what it crossed —
-      // which is exactly why hopping *through* a line of fire is a real answer
-      // and walking through one is not. Sweeping the travel as well would price
-      // a hop for the shot it is escaping, since every hop starts from a place
-      // the shot is already reaching, and no escape would ever be affordable.
-      //
-      // What it is still measured for is the rest of the tick: the character
-      // stands at the landing place until the next plan, so the arm arriving
-      // there a moment later is the hop's problem and not somebody else's.
-      const instant = tick === 0 && hop && travelTiles > 0;
-      let clearance = instant
-        ? request.danger.clearanceOf(tick, toX, toY, toX, toY)
-        : request.danger.clearanceOf(tick, x, y, toX, toY);
+      const clearance = request.danger.clearanceOf(tick, x, y, toX, toY);
       let hitDamage = request.danger.worstDamage;
       let hitDebuff = request.danger.worstDebuff;
-      // **And a hop's landing is judged from *now*, not from the moment the
-      // model assumes the command arrives.** `leadMs` is an upper bound on the
-      // round trip rather than a measurement of it, so a command that lands
-      // sooner than assumed puts the character somewhere the shots have not
-      // left yet. A walk errs safe under the same mistake — it simply covers
-      // less ground than planned — and a hop covers all of it at once, into a
-      // place chosen for where the shots were going to be.
-      if (instant) {
-        const lead = request.danger.leadSlice;
-        if (lead >= 0) {
-          const arriving = request.danger.clearanceOf(lead, toX, toY, toX, toY);
-          if (arriving < clearance) {
-            clearance = arriving;
-            hitDamage = request.danger.worstDamage;
-            hitDebuff = request.danger.worstDebuff;
-          }
-        }
-      }
       let room = clearance;
       if (request.blasts !== undefined) {
         // Merged rather than reported beside it: "how much room did this tick

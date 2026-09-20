@@ -41,7 +41,6 @@ import {
   type TrajectoryStep,
   type TrajectoryWeights,
 } from '../src/features/dodge/TrajectoryScore.js';
-import { PLAYER_HALF_TILES } from '../src/features/dodge/hitbox.js';
 
 /** A shot travelling in a straight line, which is what most of them do. */
 function straightShot(
@@ -112,7 +111,6 @@ const WEIGHTS: TrajectoryWeights = {
   dpsRadiusTiles: 0.2,
   dpsPerTick: 0.6,
   travelPerTile: 0.4,
-  hopPerUse: 0.25,
   turnPerReversal: 0.18,
   safeClearanceTiles: 0.25,
   riskPerTile: 10,
@@ -136,7 +134,6 @@ function planFor(overrides: Partial<TrajectoryRequest> = {}): TrajectoryRequest 
     orbitY: 0,
     orbitTiles: 0,
     stepTiles: 0.6,
-    hopTiles: 0.7,
     ticks: 8,
     tickMs: 100,
     leadMs: 0,
@@ -453,12 +450,10 @@ describe('what a future is worth', () => {
     expect(DEBUFF_PER_SEVERITY).toBeLessThan(COLLISION_PER_TICK);
   });
 
-  it('ranks a hop below a tile of movement and a reversal below the hop', () => {
-    const hop = decisionCost(WEIGHTS, true, 1);
-    const reversal = decisionCost(WEIGHTS, false, -1);
-    expect(hop).toBeLessThan(WEIGHTS.travelPerTile);
-    expect(reversal).toBeLessThan(hop);
-    expect(decisionCost(WEIGHTS, false, 1)).toBe(0);
+  it('ranks a reversal below a tile of movement', () => {
+    const reversal = decisionCost(WEIGHTS, -1);
+    expect(reversal).toBeLessThan(WEIGHTS.travelPerTile);
+    expect(decisionCost(WEIGHTS, 1)).toBe(0);
   });
 });
 
@@ -731,7 +726,6 @@ describe('the optimizer', () => {
   it('stands still when there is nothing to answer', () => {
     const answer = new TrajectoryPlanner().run(planFor());
     expect(answer.stepTiles).toBe(0);
-    expect(answer.hop).toBe(false);
   });
 
   it('gets out of the way of a shot that would land on them', () => {
@@ -746,39 +740,29 @@ describe('the optimizer', () => {
 
     expect(answer.stepTiles).toBeGreaterThan(0);
     expect(answer.impactMs).toBe(Infinity);
-    // Sideways, because that is the short way out of a line.
-    expect(Math.abs(answer.dirX)).toBeGreaterThan(Math.abs(answer.dirY));
+    // Away along the line, because a walk cannot clear a shot this close
+    // sideways in the time left — the honest walk is the one that outruns it.
+    expect(Math.abs(answer.dirY)).toBeGreaterThan(Math.abs(answer.dirX));
+    expect(answer.dirY).toBeGreaterThan(0);
   });
 
-  it('answers a thin lane with a fraction of a tile, not a step', () => {
+  it('never asks for a walk shorter than the module can deliver', () => {
     // **Two shots and a lane between them, which is what a dense pattern
-    // actually is.** Neither side leaves comfortable room at any offset, so the
-    // best available is the middle of the gap — and the middle is a twentieth
-    // of a tile away. Anything larger gives the room back to the other shot,
-    // and a tick of walking overshoots the lane entirely.
+    // actually is.** The middle of the lane is a fraction of a tile away —
+    // nearer than the least walk the module can express, see
+    // {@link MIN_WALK_TILES} — so the honest answers are a whole walk or none,
+    // never a shuffle the frame would round into a full tick of travel.
     const { danger } = fieldOf([
       straightShot({ x: 9.15, y: 8.8 }, Math.PI / 2, 10, 0, 900),
       straightShot({ x: 10.95, y: 8.8 }, Math.PI / 2, 10, 0, 900),
     ]);
     const answer = new TrajectoryPlanner().run(planFor({ danger }));
 
-    expect(answer.stepTiles).toBeGreaterThan(0);
-    expect(answer.stepTiles).toBeLessThan(MIN_WALK_TILES);
-    // Towards the wider side, which is where the middle of the lane is.
-    expect(answer.dirX).toBeGreaterThan(0);
-    // And only the hop can deliver it — a walk of that length is a walk the
-    // module rounds away. See {@link MIN_WALK_TILES}.
-    expect(answer.hop).toBe(true);
-  });
-
-  it('will not spend a hop it has not been given', () => {
-    const near = PLAYER_HALF_TILES + 0.5 - 0.18;
-    const { danger } = fieldOf([straightShot({ x: 10 - near, y: 8.8 }, Math.PI / 2, 10, 0, 900)]);
-    const answer = new TrajectoryPlanner().run(planFor({ danger, hopTiles: 0 }));
-
-    expect(answer.hop).toBe(false);
-    // And a walk is never asked for at a length the module cannot deliver.
-    if (answer.stepTiles > 0) expect(answer.stepTiles).toBeGreaterThanOrEqual(MIN_WALK_TILES);
+    if (answer.stepTiles > 0) {
+      expect(answer.stepTiles).toBeGreaterThanOrEqual(MIN_WALK_TILES);
+      // Towards the wider side, which is where the middle of the lane is.
+      expect(answer.dirX).toBeGreaterThan(0);
+    }
   });
 
   it('comes back rather than carrying on away', () => {
@@ -1113,9 +1097,11 @@ describe('riding a spiral', () => {
     const atMs = 1200;
     const radius = 4;
     const lag = (radius / SHOT_SPEED) * 1000;
-    // Half a gap behind the middle, so the arm behind is closing on them: the
-    // answer is to move round with the pattern, not outwards through it.
-    const angle = (OMEGA * (atMs - lag)) / 1000 + SPACING * 0.22;
+    // Behind the middle of the gap, so the arm behind is closing on them: the
+    // answer is to move round with the pattern, not outwards through it. Not by
+    // too far — a walk cannot cross the arm's path, only stay ahead of it, so
+    // the case has to be one a whole tick of walking still answers.
+    const angle = (OMEGA * (atMs - lag)) / 1000 + SPACING * 0.35;
     const at = {
       x: ORIGIN.x + Math.cos(angle) * radius,
       y: ORIGIN.y + Math.sin(angle) * radius,
@@ -1160,9 +1146,6 @@ const SPIRAL_SETTINGS: DodgeSettings = {
   ...DODGE_PRESETS.balanced,
   leadMs: 60,
   hazardClearTiles: 0.5,
-  hopEnabled: true,
-  hopTiles: 0.7,
-  hopCooldownMs: 400,
 };
 
 /**
@@ -1297,8 +1280,8 @@ describe('what the ground refuses', () => {
     expect(ground.canStand(at.x, at.y)).toBe(true);
   });
 
-  it('will not hop through a wall it could not walk through', () => {
-    // A hop is one frame of the character's own movement, not a teleport: the
+  it('will not step through a wall it could not walk through', () => {
+    // A step is the character's own movement, not a teleport: the
     // module asks the game to walk there, and the game does not walk through
     // geometry. A landing chosen past a wall is a landing nothing arrives at.
     const ground = pillarAt(10, 10);

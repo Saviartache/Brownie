@@ -613,6 +613,51 @@ describe('settings', () => {
     expect(h.host.status('badmulti')?.state).toBe(PluginState.Failed);
   });
 
+  it('refuses a picture multi-select whose default is not among its options', () => {
+    const h = host();
+    h.host.load(
+      plugin('badassets', (ctx) => {
+        ctx.settings.assetMultiSelect('picks', {
+          default: ['z'],
+          options: [
+            ['a', 'A'],
+            ['b', 'B', '7'],
+          ],
+        });
+      }),
+    );
+    expect(h.host.status('badassets')?.state).toBe(PluginState.Failed);
+  });
+
+  it('holds a picture multi-select to the same value contract as a multi-select', () => {
+    const h = host();
+    let handle: ReturnType<PluginContext['settings']['multiSelect']> | undefined;
+    h.host.load(
+      plugin('assets', (ctx) => {
+        handle = ctx.settings.assetMultiSelect('picks', {
+          default: ['b'],
+          options: [
+            ['a', 'A'],
+            ['b', 'B', '1803'],
+            ['c', 'C'],
+          ],
+        });
+      }),
+    );
+
+    // Reads as the chosen set, whatever order it was set in.
+    handle!.set(['c', 'a']);
+    expect(handle!.get()).toEqual(['a', 'c']);
+    expect(handle!.has('b')).toBe(false);
+
+    // The value the store and the overlay carry is the same canonical string a
+    // multi-select holds, which is what lets the two kinds read each other's
+    // persisted config.
+    expect(h.host.settingsOf('assets')!.value('picks')).toBe('a,c');
+    h.host.settingsOf('assets')!.apply('picks', 'b,z');
+    expect(handle!.get()).toEqual(['b']);
+  });
+
   it('updates a select options list and resets a value that no longer fits', () => {
     const h = host();
     let handle: ReturnType<PluginContext['settings']['select']> | undefined;
