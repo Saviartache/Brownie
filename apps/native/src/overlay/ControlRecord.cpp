@@ -210,6 +210,7 @@ constexpr std::string_view kCategoryOrder[] = {"combat",  "movement", "items",  
     if (name == "select") return SettingKind::kSelect;
     if (name == "multiSelect") return SettingKind::kMultiSelect;
     if (name == "assetMultiSelect") return SettingKind::kAssetMultiSelect;
+    if (name == "assetSelect") return SettingKind::kAssetSelect;
     if (name == "colour") return SettingKind::kColour;
     if (name == "button") return SettingKind::kButton;
     // Text is the fallback for a kind this build predates: every setting has a
@@ -445,7 +446,7 @@ bool ControlMirror::Apply(std::string_view record) {
         (void)Number(Field(fields, kSettingStep), row.step);
         row.advanced = Flag(fields, kSettingAdvanced);
         row.options = ParseOptions(Field(fields, kSettingOptions));
-        if (row.kind == SettingKind::kAssetMultiSelect) {
+        if (row.kind == SettingKind::kAssetMultiSelect || row.kind == SettingKind::kAssetSelect) {
             ApplySpriteKeys(row.options, Field(fields, kSettingSprites));
         }
         row.group = Field(fields, kSettingGroup);

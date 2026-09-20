@@ -32,6 +32,12 @@ export interface SelectHandle<T extends string> extends SettingHandle<T> {
   setOptions(options: ReadonlyArray<readonly [T, string]>): void;
 }
 
+/** A single choice drawn as pictures — see {@link SettingsApi.assetSelect}. */
+export interface AssetSelectHandle<T extends string> extends SettingHandle<T> {
+  /** Replaces the choices, pictures and all. The default must remain available. */
+  setOptions(options: ReadonlyArray<AssetOption<T>>): void;
+}
+
 /**
  * A many-of-N choice — the handle a {@link SettingsApi.multiSelect} returns.
  *
@@ -118,12 +124,15 @@ export interface MultiSelectSettingOptions<T extends string> extends SettingComm
 }
 
 /**
- * One choice of a picture multi-select: what it is, and the asset it is drawn
- * as.
+ * One choice of a picture chooser: what it is, and the asset it is drawn as.
  *
  * The asset is named by a key the overlay resolves in the sprite file the
- * runtime's game data carries — an object type as a decimal string. Absent for
- * a choice with no picture, which the overlay draws with its label alone.
+ * runtime's game data carries — an object type as a decimal string, or the
+ * number a dye's cloth carries, which is filed there the same way. A key of
+ * `#rrggbb` is not a picture but a colour, and fills the tile with it: that is
+ * what a dye that is one flat colour actually looks like, and the game ships no
+ * art for it. Absent for a choice whose own value is its key, which is how an
+ * item chooser says "the item is the picture".
  */
 export type AssetOption<T extends string> =
   readonly [value: T, label: string] | readonly [value: T, label: string, sprite: string];
@@ -131,6 +140,13 @@ export type AssetOption<T extends string> =
 export interface AssetMultiSelectSettingOptions<T extends string> extends SettingCommon {
   /** The keys chosen by default. Each must be one of {@link options}. */
   readonly default: readonly T[];
+  readonly options: ReadonlyArray<AssetOption<T>>;
+}
+
+export interface AssetSelectSettingOptions<T extends string> extends SettingCommon {
+  readonly default: T;
+  /** Persisted values may be accepted before a live option list is supplied. */
+  readonly dynamic?: boolean;
   readonly options: ReadonlyArray<AssetOption<T>>;
 }
 
@@ -185,6 +201,20 @@ export interface SettingsApi {
     key: string,
     options: AssetMultiSelectSettingOptions<T>,
   ): MultiSelectHandle<T>;
+  /**
+   * A one-of-N choice, drawn as that same grid of pictures.
+   *
+   * The same value, persistence and round-trip as {@link select} — one of the
+   * declared keys — and the same live option list, so a chooser whose choices
+   * follow the game (the skins this character can wear) replaces them as it
+   * would on a select. Clicking a tile chooses it; there is no unchoosing, as
+   * there is none on a drop-down. The overlay falls back to the drop-down when
+   * the game data carries no pictures.
+   */
+  assetSelect<T extends string>(
+    key: string,
+    options: AssetSelectSettingOptions<T>,
+  ): AssetSelectHandle<T>;
   text(key: string, options: TextSettingOptions): SettingHandle<string>;
   /**
    * A colour, drawn as a picker with a bar for each of red, green, blue and
@@ -210,6 +240,7 @@ export type SettingDescriptor =
       readonly kind: 'assetMultiSelect';
       readonly key: string;
     } & AssetMultiSelectSettingOptions<string>)
+  | ({ readonly kind: 'assetSelect'; readonly key: string } & AssetSelectSettingOptions<string>)
   | ({ readonly kind: 'text'; readonly key: string } & TextSettingOptions)
   | ({ readonly kind: 'colour'; readonly key: string } & ColourSettingOptions)
   | ({ readonly kind: 'button'; readonly key: string } & ButtonOptions);

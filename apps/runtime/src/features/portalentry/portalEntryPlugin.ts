@@ -30,10 +30,31 @@
  * player types, and never otherwise.
  */
 
-import { PluginCategory, definePlugin, type Plugin } from '@brownie/plugin-api';
+import {
+  PluginCategory,
+  SendPriority,
+  definePlugin,
+  type Plugin,
+  type SendOptions,
+} from '@brownie/plugin-api';
 import { GameId } from '../../constants/GameId.js';
 import { DEFAULT_RETRY_SECONDS, REACH_TILES, RETRY_INTERVAL_MS } from './constants.js';
 import { portalUnder } from './portals.js';
+
+/**
+ * How an entry goes into the session's outbound queue.
+ *
+ * The player typed a command, so it outranks anything the runtime decided on
+ * its own — and it supersedes itself, so a retry that finds the lane busy
+ * replaces the attempt waiting there rather than joining it. Its deadline is
+ * the retry interval: an entry that could not leave before the next one is due
+ * is better replaced by that one, which names the portal as it stands then.
+ */
+const ENTER_OPTIONS: SendOptions = {
+  priority: SendPriority.Requested,
+  key: 'portal-entry:enter',
+  expiresInMs: RETRY_INTERVAL_MS,
+};
 
 /** What the composition root hands over — none of it is on the plugin surface. */
 export interface PortalEntryInputs {
@@ -152,7 +173,7 @@ export function createPortalEntryPlugin(inputs: PortalEntryInputs): Plugin {
           session.notify(
             `Entering ${nameOf(portal.name, inputs.displayName(portal.objectType))}...`,
           );
-          session.sendToServer('USEPORTAL', { objectId: portal.objectId });
+          session.sendToServer('USEPORTAL', { objectId: portal.objectId }, ENTER_OPTIONS);
           // Nothing to keep when the player asked for one attempt: an entry
           // that is already over must not be cancellable a tick later.
           if (retryMs > 0) {
@@ -180,7 +201,7 @@ export function createPortalEntryPlugin(inputs: PortalEntryInputs): Plugin {
         // a dungeon empties, and `/enter` is how they say they are done.
         if (nowMs - attempt.lastSentMs < RETRY_INTERVAL_MS) return;
         attempt.lastSentMs = nowMs;
-        session.sendToServer('USEPORTAL', { objectId: attempt.objectId });
+        session.sendToServer('USEPORTAL', { objectId: attempt.objectId }, ENTER_OPTIONS);
       });
 
       // An object id is unique only within a map, so an attempt made in one is

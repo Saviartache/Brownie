@@ -57,14 +57,24 @@ export interface MoveSource {
   readonly objectType: number;
 }
 
-/** A move that has gone out and not yet been seen to land. */
+/** A move that has been asked for and not yet been seen to land. */
 export interface PendingMove {
   readonly slotId: number;
   /** What the slot's count should read once it lands, for a slot that counts. */
   readonly expectedQuantity: number | undefined;
   /** The bag slot it came out of, which has to be seen to empty. */
   readonly source: MoveSource;
-  readonly sinceMs: number;
+  /**
+   * When it went **out**, not when it was decided.
+   *
+   * Mutable, and that is the point. A move now goes into the session's one
+   * outbound queue and waits there for whatever else the runtime is sending, so
+   * the moment it was asked for says nothing about when the server heard it —
+   * and {@link PENDING_TIMEOUT_MS} measured from the asking would give up on
+   * moves that had not left yet. It starts at positive infinity, meaning "not
+   * out", and the queue's `onSent` is what writes the real figure.
+   */
+  sinceMs: number;
   /** Whether it was a quaff potion, which is what the manual guard cares about. */
   readonly potion: boolean;
 }
@@ -113,6 +123,16 @@ export class LootSession {
   }
 
   /**
+   * Gives up on the pending move without waiting it out.
+   *
+   * For the answers the queue can give that waiting cannot improve on: a move
+   * the server refused outright, and one that never left at all.
+   */
+  clearPending(): void {
+    this.#pending = undefined;
+  }
+
+  /**
    * Clears the pending move once it has been seen to happen at **both ends**,
    * or has waited long enough to be assumed lost.
    *
@@ -145,6 +165,9 @@ export class LootSession {
       this.#pending = undefined;
       return undefined;
     }
+    // A move still waiting its turn in the queue has not been answered because
+    // it has not been asked; `sinceMs` is infinite until it leaves, so this
+    // never fires on one.
     if (nowMs - move.sinceMs < PENDING_TIMEOUT_MS) return undefined;
     this.#pending = undefined;
     return move;

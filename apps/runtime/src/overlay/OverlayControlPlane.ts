@@ -46,6 +46,7 @@ const WIRE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   select: 'select',
   multiSelect: 'multiSelect',
   assetMultiSelect: 'assetMultiSelect',
+  assetSelect: 'assetSelect',
   text: 'text',
   colour: 'colour',
   button: 'button',
@@ -59,6 +60,8 @@ const VALUE_TYPE: Readonly<Record<SettingDescriptor['kind'], string>> = {
   // A set of keys, carried as one delimited string — see MULTI_SELECT_DELIMITER.
   multiSelect: 's',
   assetMultiSelect: 's',
+  // One of the declared keys, like any other select.
+  assetSelect: 's',
   text: 's',
   // `#rrggbbaa`, which is a string like any other on the wire — the overlay is
   // where it becomes four bars, and it comes back in the same spelling.
@@ -318,7 +321,8 @@ function settingRecords(
   const choices =
     descriptor.kind === 'select' ||
     descriptor.kind === 'multiSelect' ||
-    descriptor.kind === 'assetMultiSelect'
+    descriptor.kind === 'assetMultiSelect' ||
+    descriptor.kind === 'assetSelect'
       ? descriptor
       : undefined;
   const cells =
@@ -327,13 +331,13 @@ function settingRecords(
       : [];
   const whole = cells.join(';');
 
-  // The picture a picture multi-select's options are drawn as, in the options'
+  // The picture a picture chooser's options are drawn as, in the options'
   // own order and joined the way the codec joins a list — one key per option,
   // and empty for the ones that carry none. Appended after everything an
   // overlay built before pictures reads, so it is exactly as new as the
   // feature.
   const spriteKeys =
-    descriptor.kind === 'assetMultiSelect'
+    descriptor.kind === 'assetMultiSelect' || descriptor.kind === 'assetSelect'
       ? descriptor.options.map((option) => option[2] ?? '')
       : [];
   const visible = descriptor.visibleWhen;

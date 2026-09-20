@@ -262,6 +262,32 @@ describe('OverlayControlPlane', () => {
     expect(setting?.[15]).toBe(';1803');
   });
 
+  it('draws a picture select the same way, one choice at a time', () => {
+    const h = harness(() => 'C:/wherever/game-data/sprites.bin');
+    h.host.load(
+      plugin('skin-changer', (ctx) => {
+        ctx.settings.assetSelect('skin', {
+          default: '0',
+          options: [
+            ['0', 'Default', '782'],
+            ['838', 'Merlin Wizard'],
+            // A dye that is one flat colour: the key is the colour itself.
+            ['16775930', 'Color: Alice Blue', '#f0f8ff'],
+          ],
+        });
+      }),
+    );
+    h.plane.start();
+    h.flush();
+
+    const [setting] = h.overlay.of('setting');
+    expect(setting?.[3]).toBe('assetSelect');
+    // One of the keys, like any select — the pictures are a separate field.
+    expect(setting?.[5]).toBe('0');
+    expect(setting?.[12]).toBe('Default=0;Merlin Wizard=838;Color: Alice Blue=16775930');
+    expect(setting?.[15]).toBe('782;;#f0f8ff');
+  });
+
   it('splits an option list too long for one frame across options records', () => {
     const h = harness();
     // ~30 bytes a cell: enough of them to pass the 100 KiB budget several

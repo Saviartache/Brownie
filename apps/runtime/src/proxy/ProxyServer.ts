@@ -12,6 +12,7 @@ import {
   type PipelineStage,
   type StageFailure,
 } from '../pipeline/PacketPipeline.js';
+import { OutboundQueueStage } from '../pipeline/stages/OutboundQueueStage.js';
 import { StateStage } from '../pipeline/stages/StateStage.js';
 import { WorldState, type WorldStateOptions } from '../state/WorldState.js';
 import { ProxySession, type ServerConnector, type ServerTarget } from './ProxySession.js';
@@ -245,7 +246,7 @@ export class ProxyServer implements SessionApi {
 
   #openSession(id: string, transport: SocketTransport): void {
     const world = new WorldState(this.#options.worldOptions ?? {});
-    let view: SessionView | undefined;
+    let context: SessionContext | undefined;
 
     const session = new ProxySession({
       id,
@@ -254,11 +255,19 @@ export class ProxyServer implements SessionApi {
       connector: this.#options.connector,
       resolveTarget: (packet) => this.#options.targets.resolve(packet),
       buildPipeline: (built) => {
-        view = new SessionContext(built, world, this.#options.registry, this.#log.forSession(id));
+        const view = new SessionContext(
+          built,
+          world,
+          this.#options.registry,
+          this.#log.forSession(id),
+        );
+        context = view;
         // The order is fixed here, not by whoever registers first: state is
-        // current before anything else sees the packet.
+        // current before anything else sees the packet, and the outbound queue
+        // has seen a refusal before a plugin can react to it.
         const stages: PipelineStage[] = [
           new StateStage(world),
+          new OutboundQueueStage(view.outbound),
           ...(this.#options.buildStages?.(view, world) ?? []),
         ];
         return new PacketPipeline(stages, (failure) => {
@@ -272,12 +281,17 @@ export class ProxyServer implements SessionApi {
       },
       onClosed: (closed) => {
         this.#sessions.delete(closed.id);
-        if (view !== undefined) {
-          for (const listener of this.#disconnected) listener(view);
+        // Before the listeners: a plugin told the session has gone must not be
+        // able to queue anything into what is left of it, and a queue still
+        // holding a timer would keep the process alive past shutdown.
+        context?.outbound.dispose();
+        if (context !== undefined) {
+          for (const listener of this.#disconnected) listener(context);
         }
       },
     });
 
+    const view: SessionView | undefined = context;
     if (view === undefined) throw new Error('pipeline builder did not produce a session view');
     this.#sessions.set(id, { session, view });
     this.#log.info(`session ${id} accepted (${String(this.#sessions.size)} live)`);

@@ -12,6 +12,8 @@
  * mistake; ask again.
  */
 
+import type { SendOptions } from './outbound.js';
+
 export interface Position {
   readonly x: number;
   readonly y: number;
@@ -383,8 +385,32 @@ export interface SessionView {
   readonly world: WorldView;
   /** The game server this session is connected to. */
   readonly server: { readonly host: string; readonly port: number };
-  /** Sends a packet to the game server, as though the client had sent it. */
-  sendToServer(packetName: string, fields: Readonly<Record<string, unknown>>): void;
+  /**
+   * Sends a packet to the game server, as though the client had sent it.
+   *
+   * **Not necessarily this instant.** A packet the server counts against a
+   * rate limit — anything that moves or uses an item, enters a portal,
+   * teleports or speaks — goes through the session's one outbound queue, which
+   * spaces it against everything *else* the runtime and the player are sending.
+   * That queue is the answer to two plugins acting in the same tick: before it,
+   * the server carried out one of them and silently refused the other, and the
+   * refused plugin asking again is what got sessions kicked.
+   *
+   * Everything else — an acknowledgement, an `ESCAPE`, a movement — is not
+   * paced at all and leaves during this call.
+   *
+   * `options` is how a plugin takes part in the queue's decisions rather than
+   * just submitting to them: what to send first, what supersedes what, when to
+   * give up, and how to find out what happened. Omitting it is fine.
+   *
+   * @param fields Taken over by the call. Do not keep a reference: a queued
+   *   packet's timestamp and position are rewritten the moment it leaves.
+   */
+  sendToServer(
+    packetName: string,
+    fields: Readonly<Record<string, unknown>>,
+    options?: SendOptions,
+  ): void;
   /** Sends a packet to the game client, as though the server had sent it. */
   sendToClient(packetName: string, fields: Readonly<Record<string, unknown>>): void;
   /** Shows a line in the game's own chat, locally. Never reaches the server. */

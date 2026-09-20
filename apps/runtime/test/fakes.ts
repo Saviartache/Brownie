@@ -1,3 +1,4 @@
+import { SendOutcome, type SendOptions, type SessionView } from '@brownie/plugin-api';
 import { CIPHER_OFFSET, CLIENT_KEY, Rc4, SERVER_KEY } from '@brownie/protocol';
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
@@ -183,4 +184,46 @@ export class PeerCiphers {
     this.#receive.process(copy, CIPHER_OFFSET);
     return copy;
   }
+}
+
+/**
+ * A `SessionView.sendToServer` that behaves like a session whose outbound lane
+ * is free.
+ *
+ * **The callbacks are the contract, not an extra.** A plugin's own cooldown
+ * starts in `onSent` now that a packet can wait its turn, so a fake that
+ * records the call and drops the options is a fake of a session that never
+ * sends anything — every such plugin would look permanently stuck. This is the
+ * happy path spelled out once, instead of in every test file.
+ *
+ * @param record Called with what a two-argument `sendToServer` would have been
+ *   called with, so an assertion reads the way it always did.
+ * @param outcome What to report. The default is the one a packet with nothing
+ *   watching for it gets; pass {@link SendOutcome.Refused} to make a plugin
+ *   handle a refusal, or {@link SendOutcome.Confirmed} where it passed a
+ *   `confirm`.
+ */
+export function immediateSend(
+  record: (packetName: string, fields: Readonly<Record<string, unknown>>) => void,
+  outcome: SendOutcome = SendOutcome.Sent,
+): SessionView['sendToServer'] {
+  return (
+    packetName: string,
+    fields: Readonly<Record<string, unknown>>,
+    options?: SendOptions,
+  ): void => {
+    record(packetName, fields);
+    options?.onSent?.();
+    options?.onOutcome?.(outcome);
+  };
+}
+
+/**
+ * A `sendToServer` that queues forever: it records nothing and never reports.
+ *
+ * What a plugin looks like to itself while the lane ahead of it is busy, which
+ * is the state its bookkeeping has to survive without stacking up requests.
+ */
+export function neverSends(): SessionView['sendToServer'] {
+  return (): void => undefined;
 }

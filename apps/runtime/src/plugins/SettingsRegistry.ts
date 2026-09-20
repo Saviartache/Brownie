@@ -4,6 +4,9 @@ import {
   MULTI_SELECT_DELIMITER,
   normaliseColour,
   type AssetMultiSelectSettingOptions,
+  type AssetOption,
+  type AssetSelectHandle,
+  type AssetSelectSettingOptions,
   type BooleanSettingOptions,
   type ButtonOptions,
   type ColourSettingOptions,
@@ -185,6 +188,30 @@ export class SettingsRegistry implements SettingsApi {
     return this.#multiHandle<T>(key);
   }
 
+  /**
+   * The picture select. The same value machinery as the plain select — one of
+   * the declared keys, checked the same way on the way in — so the two differ
+   * in nothing but what the overlay draws.
+   */
+  assetSelect<T extends string>(
+    key: string,
+    options: AssetSelectSettingOptions<T>,
+  ): AssetSelectHandle<T> {
+    if (!options.options.some(([value]) => value === options.default)) {
+      throw new TypeError(
+        `setting "${key}" defaults to "${options.default}", which is not one of its options`,
+      );
+    }
+    this.#declare({ kind: 'assetSelect', key, ...withLabel(key, options) }, options.default);
+    const handle = this.#handle<T>(key);
+    return {
+      ...handle,
+      setOptions: (next): void => {
+        this.#setSelectOptions(key, next);
+      },
+    };
+  }
+
   text(key: string, options: TextSettingOptions): SettingHandle<string> {
     this.#declare({ kind: 'text', key, ...withLabel(key, options) }, options.default);
     return this.#handle<string>(key);
@@ -293,16 +320,29 @@ export class SettingsRegistry implements SettingsApi {
     this.#onChanged(this.#pluginId, key, value);
   }
 
-  #setSelectOptions(key: string, options: ReadonlyArray<readonly [string, string]>): void {
+  /**
+   * Replaces a one-of-N choice's options, whether it is drawn as a drop-down or
+   * as a grid of pictures.
+   *
+   * The two differ in nothing this method does — an option is a value, a label
+   * and, for the picture one, a key it is drawn by — so the live list they both
+   * need is one piece of machinery rather than two that must be kept in step.
+   */
+  #setSelectOptions(key: string, options: ReadonlyArray<AssetOption<string>>): void {
     const current = this.#descriptors.get(key);
-    if (current?.kind !== 'select') throw new TypeError(`setting "${key}" is not a select`);
+    if (current?.kind !== 'select' && current?.kind !== 'assetSelect') {
+      throw new TypeError(`setting "${key}" is not a select`);
+    }
     if (!options.some(([value]) => value === current.default)) {
       throw new TypeError(
         `setting "${key}" options no longer contain its default "${current.default}"`,
       );
     }
 
-    const descriptor: SettingDescriptor = { ...current, options };
+    const descriptor: SettingDescriptor =
+      current.kind === 'select'
+        ? { ...current, options: options.map(([value, label]) => [value, label] as const) }
+        : { ...current, options };
     this.#descriptors.set(key, descriptor);
     const value = this.#values.get(key);
     if (typeof value === 'string' && options.some(([candidate]) => candidate === value)) {
@@ -363,7 +403,10 @@ function coerce(descriptor: SettingDescriptor, raw: unknown): SettingValue | und
       if (!Number.isFinite(value)) return undefined;
       return clampToBounds(value, descriptor);
     }
-    case 'select': {
+    case 'select':
+    case 'assetSelect': {
+      // One of the declared keys and nothing else — the pictures take no part
+      // in what the value is, exactly as with the two multi-selects below.
       if (typeof raw !== 'string') return undefined;
       return descriptor.options.some(([value]) => value === raw) ? raw : undefined;
     }

@@ -35,7 +35,7 @@ import { shouldWithhold, touchesPotions } from '../src/features/autoloot/manualG
 import { PotionKind, type ContainerFacts, type ItemFacts } from '../src/gamedata/items.js';
 import { isBeltSlot, SlotRange } from '../src/state/ItemSlots.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
-import { testLogger } from './fakes.js';
+import { immediateSend, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
 
@@ -757,7 +757,9 @@ describe('the auto-loot plugin', () => {
       id: 's1',
       self,
       world,
-      sendToServer: sent,
+      // The real session's contract: a move's clock starts when it leaves, and
+      // with an empty lane it leaves during the call.
+      sendToServer: immediateSend(sent),
       notify: (text: string) => notified.push(text),
     } as unknown as SessionView;
 

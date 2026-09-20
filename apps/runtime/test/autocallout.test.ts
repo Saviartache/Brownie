@@ -20,7 +20,7 @@ import {
 import { announceablePortals } from '../src/features/autocallout/portals.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import type { DungeonPortal } from '../src/state/ObjectCatalog.js';
-import { testLogger } from './fakes.js';
+import { immediateSend, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
 
@@ -131,7 +131,9 @@ describe('the auto-callout plugin', () => {
         entities: () => entities,
         entity: (id: number) => entities.find((e) => e.objectId === id),
       },
-      sendToServer: sent,
+      // The real session's contract: a plugin's clock starts when the packet
+      // leaves, and with an empty lane it leaves during the call.
+      sendToServer: immediateSend(sent),
       notify: () => undefined,
     } as unknown as SessionView;
 

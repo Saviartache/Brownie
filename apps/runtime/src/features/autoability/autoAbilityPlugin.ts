@@ -166,6 +166,16 @@ const MANUAL_PAUSE_MS = 2000;
 const MAP_SETTLE_MS = 1000;
 
 /**
+ * How long a cast waiting its turn in the outbound queue is still worth firing.
+ *
+ * Short, and shorter than the shortest ability interval: what a cast is aimed
+ * at moves, and a mana-priced heal fired at where the fight was a second ago is
+ * worse than one not fired at all. A cast that lapses is simply asked for again
+ * on the next tick, with the room as it stands then.
+ */
+const CAST_EXPIRY_MS = 400;
+
+/**
  * There is no setting for either.
  *
  * Auto-aim offers them because an invulnerable boss phase ends and a shot in
@@ -509,18 +519,42 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         self: SelfView,
         slot: ItemSlotView,
         at: Position,
+        ability: AbilityFacts,
+        aimed: boolean,
+        state: SessionState,
       ): void => {
-        session.sendToServer('USEITEM', {
-          time: Math.trunc(session.world.clientTimeMs),
-          slotObject: {
-            objectId: self.objectId,
-            slotId: ABILITY_SLOT,
-            objectType: slot.objectType,
+        session.sendToServer(
+          'USEITEM',
+          {
+            // Rewritten by the session the instant this leaves, for the reason
+            // above; written here as well so the packet's shape is visible
+            // where it is built.
+            time: Math.trunc(session.world.clientTimeMs),
+            slotObject: {
+              objectId: self.objectId,
+              slotId: ABILITY_SLOT,
+              objectType: slot.objectType,
+            },
+            itemUsePos: { x: at.x, y: at.y },
+            useType: USE_TYPE_SELF,
+            unknownInt: 0,
           },
-          itemUsePos: { x: at.x, y: at.y },
-          useType: USE_TYPE_SELF,
-          unknownInt: 0,
-        });
+          {
+            // One cast outstanding, ever. A cast waiting behind a pickup is
+            // replaced each tick rather than joined, so what finally goes out
+            // is aimed where the enemy is now and not where it was when the
+            // ability first came off cooldown.
+            key: 'auto-ability:cast',
+            expiresInMs: CAST_EXPIRY_MS,
+            // **The interval starts here, not at the decision.** Measured from
+            // the decision it would be a cooldown against a moment the server
+            // never saw, and a cast held up by a busy lane would come off
+            // cooldown while it was still waiting.
+            onSent: () => {
+              state.nextAtMs = session.world.gameTimeMs + intervalOf(ability, aimed);
+            },
+          },
+        );
       };
 
       /**
@@ -537,7 +571,6 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         slot: ItemSlotView,
         ability: AbilityFacts,
         state: SessionState,
-        nowMs: number,
       ): void => {
         if (!tuning.support) return;
 
@@ -594,8 +627,7 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // both — `pD Tome` and its handful of neighbours.
         const at: Position = aimed ? (targetEnemy(session) ?? self) : self;
 
-        sendCast(session, self, slot, at);
-        state.nextAtMs = nowMs + intervalOf(ability, aimed);
+        sendCast(session, self, slot, at, ability, aimed, state);
       };
 
       /**
@@ -621,13 +653,11 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         slot: ItemSlotView,
         ability: AbilityFacts,
         state: SessionState,
-        nowMs: number,
       ): void => {
         if (!tuning.autoCastAttacks) return;
         const boss = search(session, tuning.priority, { rule: BossRule.Only, isBoss });
         if (boss === undefined) return;
-        sendCast(session, self, slot, boss);
-        state.nextAtMs = nowMs + intervalOf(ability, true);
+        sendCast(session, self, slot, boss, ability, true, state);
       };
 
       // Cheapest test first, and each one is a test the next would have been
@@ -673,11 +703,11 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // against "is there a boss to spend it on" — so they part here and
         // share everything above it.
         if (ability.benefits.length > 0) {
-          castIfWorthHaving(session, self, slot, ability, state, nowMs);
+          castIfWorthHaving(session, self, slot, ability, state);
           return;
         }
         if (ability.use === AbilityUse.Aimed) {
-          castIfBossInReach(session, self, slot, ability, state, nowMs);
+          castIfBossInReach(session, self, slot, ability, state);
         }
       });
 

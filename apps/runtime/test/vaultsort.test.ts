@@ -14,7 +14,7 @@ import { VaultSortOrder, planMoves, sortedSlots } from '../src/features/vaultsor
 import { createVaultSortPlugin } from '../src/features/vaultsort/vaultSortPlugin.js';
 import { VaultChests, contentsDiffer, slotRefOf } from '../src/features/vaultsort/vaultChests.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
-import { testLogger } from './fakes.js';
+import { immediateSend, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
 
@@ -402,7 +402,9 @@ describe('the vault sort plugin', () => {
       self,
       world,
       server: { host: 'h', port: 1 },
-      sendToServer: sent,
+      // The real session's contract: a move's clock starts when it leaves, and
+      // with an empty lane it leaves during the call.
+      sendToServer: immediateSend(sent),
       sendToClient: vi.fn(),
       notify: (text: string) => notified.push(text),
     } as unknown as SessionView;

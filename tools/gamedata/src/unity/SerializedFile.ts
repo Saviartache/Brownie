@@ -114,10 +114,15 @@ export interface TextureAsset {
    * The pixels, RGBA, four bytes each — a view into `buffer`, not a copy.
    *
    * The game ships its sprite atlases uncompressed, so there is nothing to
-   * decode: the pixels are the tail of the object, exactly `width * height * 4`
-   * bytes of it. That arithmetic is the whole validation — if it does not hold,
-   * the texture is not the RGBA32 this reader knows how to slice, and guessing
-   * at another layout would return plausible noise.
+   * decode: the pixels are one length-prefixed byte array, exactly
+   * `width * height * 4` bytes of it.
+   *
+   * **Row zero is the bottom of the picture.** Unity stores texture pixels the
+   * way the graphics API wants them, bottom row first, while everything that
+   * addresses a sprite — the game's own index, this tool's callers — counts
+   * rows from the top. Slicing without turning one into the other reads a
+   * mirrored part of the atlas, which is art, just not the art that was asked
+   * for.
    */
   readonly pixels: Buffer;
 }
@@ -134,12 +139,12 @@ export function readTexture2D(buffer: Buffer, entry: AssetEntry): TextureAsset {
   const name = readAlignedString(buffer, objectStart);
 
   // The width and height follow the name, four bytes in — past one `int` this
-  // reader has no use for. Everything between them and the pixel tail is header
-  // it skips the same way, and the object's own size is what proves the layout:
-  // an RGBA32 texture's bytes are exactly its header plus `width * height * 4`,
-  // and no other reading of these numbers satisfies that for every atlas the
-  // game ships. (`name.next` is already absolute — the width sits at it, four
-  // bytes on.)
+  // reader has no use for. Everything between them and the pixels is header it
+  // skips the same way, and the object's own size is what proves the layout:
+  // an RGBA32 texture's bytes are exactly its header plus `width * height * 4`
+  // plus its `m_StreamData` tail, and no other reading of these numbers
+  // satisfies that for every atlas the game ships. (`name.next` is already
+  // absolute — the width sits at it, four bytes on.)
   if (name.next + 12 > buffer.length) {
     throw new SerializedFileError(`texture "${name.value}" is too short to carry a size`);
   }
@@ -158,8 +163,55 @@ export function readTexture2D(buffer: Buffer, entry: AssetEntry): TextureAsset {
         `(w=${String(width)} h=${String(height)} size=${String(entry.byteSize)} header=${String(entry.byteSize - pixelBytes)})`,
     );
   }
-  const start = objectStart + entry.byteSize - pixelBytes;
+  const start = findPixelArray(buffer, name.next, objectStart + entry.byteSize, pixelBytes);
+  if (start === undefined) {
+    throw new SerializedFileError(
+      `texture "${name.value}" carries no pixel array of the size its header states ` +
+        `(w=${String(width)} h=${String(height)} size=${String(entry.byteSize)})`,
+    );
+  }
   return { width, height, pixels: buffer.subarray(start, start + pixelBytes) };
+}
+
+/**
+ * The bytes of `m_StreamData`, the record Unity writes after the pixels: a
+ * 64-bit offset, a 32-bit size and a path — all three zero for a texture whose
+ * pixels are in the file rather than in a `.resS` beside it, which is how the
+ * game ships its atlases.
+ */
+const STREAM_DATA_BYTES = 16;
+
+/**
+ * Where the pixel array starts, found by the `int` length that precedes it.
+ *
+ * **The object does not end with its pixels.** `m_StreamData` follows them, so
+ * anchoring the pixels to the object's last byte reads them sixteen bytes late
+ * — four pixels of shift, which slides every sprite in the atlas sideways and
+ * is invisible in a fixture that leaves the tail off.
+ *
+ * The header states the same byte count twice, as `m_CompleteImageSize` and
+ * again as the array's own length; the one that matters is the last, the one
+ * the pixels follow. So the search runs backwards from the latest position an
+ * array of this size could start at and still leave room for the tail, and the
+ * first hit is that length. Fields are four-byte aligned, and the search keeps
+ * to the grid the name ends on.
+ */
+function findPixelArray(
+  buffer: Buffer,
+  headerStart: number,
+  objectEnd: number,
+  pixelBytes: number,
+): number | undefined {
+  const last = objectEnd - STREAM_DATA_BYTES - pixelBytes - 4;
+  for (
+    let at = headerStart + Math.trunc((last - headerStart) / 4) * 4;
+    at >= headerStart;
+    at -= 4
+  ) {
+    if (at + 4 > buffer.length) continue;
+    if (buffer.readInt32LE(at) === pixelBytes) return at + 4;
+  }
+  return undefined;
 }
 
 /**

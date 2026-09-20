@@ -17,7 +17,7 @@ import { Quaff, quaffKindOf } from '../src/features/autodrink/potions.js';
 import { PotionKind, type ItemFacts } from '../src/gamedata/items.js';
 import { SlotRange } from '../src/state/ItemSlots.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
-import { testLogger } from './fakes.js';
+import { immediateSend, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
 
@@ -190,7 +190,9 @@ describe('the auto-drink plugin', () => {
       id: 's1',
       self,
       world,
-      sendToServer: sent,
+      // Through the same contract the real session honours: a plugin's cooldown
+      // starts when the packet leaves, and here it leaves at once.
+      sendToServer: immediateSend(sent),
       notify: () => undefined,
     } as unknown as SessionView;
 

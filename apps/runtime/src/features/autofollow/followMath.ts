@@ -6,6 +6,7 @@
  */
 
 import type { EntityView, Position } from '@brownie/plugin-api';
+import { PLAYER_ENVIRONMENT_HALF_TILES } from '../dodge/hitbox.js';
 
 /** Tiles between two points. */
 export function tilesBetween(a: Position, b: Position): number {
@@ -61,4 +62,49 @@ export function nearestPlayerTo(
     best = player;
   }
   return best;
+}
+
+/**
+ * How far apart the places along a line are asked about, in tiles.
+ *
+ * The body's own half-width, so consecutive samples overlap and there is no gap
+ * between two of them for a wall to hide in. The dodge samples its steps at
+ * exactly this spacing and for exactly this reason — see `dodge/DodgeGround`.
+ */
+const SAMPLE_TILES = PLAYER_ENVIRONMENT_HALF_TILES;
+
+/**
+ * Whether the character could walk the straight line between two places.
+ *
+ * **This is the question the old follow never asked.** It aimed at where the
+ * ally stood and left the walking to the native mover, which walks a heading
+ * and tests nothing on the way: an ally around a corner was a character held
+ * against the corner for as long as they stayed there. Asking turns a heading
+ * into a route — and, used against a remembered trail, turns a route the ally
+ * proved walkable into one the follow can take.
+ *
+ * Both ends are tested along with everything between, because the far end is
+ * usually the place being proposed as a walk target and the near end is where a
+ * character already wedged into scenery stands.
+ *
+ * @param canStand Whether the player's whole body fits at a point. Expected to
+ *   be cached per tile by the caller — this asks a hundred times for a line
+ *   across the screen, and the lines it is asked about overlap heavily.
+ */
+export function clearLineBetween(
+  from: Position,
+  to: Position,
+  canStand: (x: number, y: number) => boolean,
+): boolean {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (!(distance > 0)) return canStand(to.x, to.y);
+
+  const steps = Math.max(1, Math.ceil(distance / SAMPLE_TILES));
+  for (let i = 0; i <= steps; i += 1) {
+    const at = i / steps;
+    if (!canStand(from.x + dx * at, from.y + dy * at)) return false;
+  }
+  return true;
 }

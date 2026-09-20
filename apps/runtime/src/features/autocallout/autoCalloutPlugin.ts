@@ -40,6 +40,15 @@ import { announceablePortals, type AnnounceablePortal } from './portals.js';
 /** The packet a Ctrl+click sends, and the one this sends in its place. */
 const CALLOUT_PACKET = 'PLAYERCALLOUT';
 
+/**
+ * How long a callout waiting in the session's outbound queue is worth making.
+ *
+ * Generous: a portal that has been open for a few seconds is still worth
+ * naming, and the thing this guards against is a callout surfacing minutes
+ * later about a dungeon everybody has already left.
+ */
+const CALLOUT_EXPIRY_MS = 8000;
+
 /** What the composition root hands over — none of it is on the plugin surface. */
 export interface AutoCalloutInputs {
   /** Whether an object type is a key-opened dungeon portal. */
@@ -101,10 +110,24 @@ export function createAutoCalloutPlugin(inputs: AutoCalloutInputs): Plugin {
       ): void => {
         state.lastSentMs = session.world.gameTimeMs;
         context.log.info(`calling out ${portal.dungeonName}, object ${String(portal.objectId)}`);
-        session.sendToServer(CALLOUT_PACKET, {
-          calloutType: PORTAL_CALLOUT_TYPE,
-          value: portal.objectId,
-        });
+        session.sendToServer(
+          CALLOUT_PACKET,
+          {
+            calloutType: PORTAL_CALLOUT_TYPE,
+            value: portal.objectId,
+          },
+          {
+            // Named per portal rather than per plugin: two portals opening at
+            // once are two different things to say, and one must not quietly
+            // replace the other.
+            key: `auto-callout:${String(portal.objectId)}`,
+            expiresInMs: CALLOUT_EXPIRY_MS,
+            // The spacing clock is already set above, from the decision rather
+            // than the send: a callout that waits its turn is still a callout
+            // about a portal that has just appeared, and the announcement below
+            // has already told the player it was made.
+          },
+        );
         session.notify(`${portal.dungeonName} called out.`, 'Auto Callout');
       };
 

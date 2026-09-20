@@ -17,7 +17,6 @@ export interface AntiLagPresetValues {
   readonly hideAllyNotifications: boolean;
   readonly blockShowEffect: boolean;
   readonly sizeScaling: boolean;
-  readonly playerSize: number;
   readonly allySize: number;
 }
 
@@ -42,7 +41,6 @@ export const PRESETS: Readonly<Record<PresetId, AntiLagPresetValues>> = {
     hideAllyNotifications: false,
     blockShowEffect: false,
     sizeScaling: false,
-    playerSize: 100,
     allySize: 100,
   },
   effects: {
@@ -53,7 +51,6 @@ export const PRESETS: Readonly<Record<PresetId, AntiLagPresetValues>> = {
     hideAllyNotifications: true,
     blockShowEffect: true,
     sizeScaling: false,
-    playerSize: 100,
     allySize: 100,
   },
   crowded: {
@@ -64,7 +61,6 @@ export const PRESETS: Readonly<Record<PresetId, AntiLagPresetValues>> = {
     hideAllyNotifications: true,
     blockShowEffect: true,
     sizeScaling: true,
-    playerSize: 100,
     allySize: 50,
   },
   max: {
@@ -75,7 +71,6 @@ export const PRESETS: Readonly<Record<PresetId, AntiLagPresetValues>> = {
     hideAllyNotifications: true,
     blockShowEffect: true,
     sizeScaling: false,
-    playerSize: 100,
     allySize: 100,
   },
 };

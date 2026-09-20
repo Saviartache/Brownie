@@ -30,6 +30,12 @@ export const ActionLane = {
 
 export type ActionLane = (typeof ActionLane)[keyof typeof ActionLane];
 
+/**
+ * A field whose value is "the moment this leaves", filled in at the last
+ * instant rather than carried from where the packet was built.
+ */
+export type RefreshedField = 'time' | 'position';
+
 export interface ActionLaneEntry {
   readonly lane: ActionLane;
   /**
@@ -52,7 +58,7 @@ export interface ActionLaneEntry {
    * an item move names where the player is standing, and by the time it goes
    * out they have walked.
    */
-  readonly refresh: readonly ('time' | 'position')[];
+  readonly refresh: readonly RefreshedField[];
 }
 
 /**

@@ -10,6 +10,7 @@ import { EquippedWeapon } from '../src/gamedata/EquippedWeapon.js';
 import { reachTiles, type ProjectileDefinition } from '../src/gamedata/projectiles.js';
 import { GearFamily, PotionKind, gearFamilyOf } from '../src/gamedata/items.js';
 import { readSpriteTypes } from '../src/gamedata/spriteIndex.js';
+import { appearancePicture } from '../src/gamedata/cosmetics.js';
 import {
   GameDataError,
   attribute,
@@ -303,6 +304,17 @@ describe('object catalog', () => {
     ]);
     expect(catalog.mainAppearances()).toBe(catalog.mainAppearances());
     expect(catalog.accessoryAppearances()).toBe(catalog.accessoryAppearances());
+  });
+
+  it('draws a colour dye as its colour and a cloth dye as its cloth', () => {
+    // The number says both things at once: a `0x01` top byte means the low
+    // three bytes are the colour the game tints the character with, and there
+    // is no art to show. Anything else names a cloth in a textile sheet, which
+    // the sprite file carries under this very number.
+    expect(appearancePicture(0x01f0f8ff)).toBe('#f0f8ff');
+    expect(appearancePicture(0x01000000)).toBe('#000000');
+    expect(appearancePicture(0x04000000)).toBe(String(0x04000000));
+    expect(appearancePicture(0x0a000012)).toBe(String(0x0a000012));
   });
 
   it('lists only equipment that applies an Arcane Style', async () => {

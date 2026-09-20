@@ -2,7 +2,9 @@
  * Anti-lag: trims what the game client has to simulate and draw, purely by
  * rewriting the server→client stream. Four levers, all optional:
  *
- *   1. **size** — rewrite stat 2 for you, other players and pets.
+ *   1. **size** — rewrite stat 2 for other players and pets. Your own size is
+ *      the skin changer's, alongside the rest of what your character looks
+ *      like, and is remembered per class there.
  *   2. **hide** — size 0, or strip the object from `UPDATE.newObjs` and from
  *      `NEWTICK` statuses so the client never creates it at all.
  *   3. **shots** — drop `ALLYSHOOT`, which is what spawns other players'
@@ -164,18 +166,8 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
 
       const sizeScaling = context.settings.boolean('sizeScaling', {
         group: 'Size',
-        label: 'Resize players by percentage',
+        label: 'Resize other players by percentage',
         default: false,
-      });
-
-      const playerSize = context.settings.range('playerSize', {
-        group: 'Size',
-        label: 'Your size (%, 0 hides you)',
-        default: 100,
-        min: MIN_SIZE_PERCENT,
-        max: MAX_SIZE_PERCENT,
-        step: 5,
-        visibleWhen: { key: 'sizeScaling', equals: [true] },
       });
 
       const allySize = context.settings.range('allySize', {
@@ -195,7 +187,6 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
         petMode: petHide.get(),
         exemptGuildmates: exemptGuildmates.get(),
         scaleSizes: sizeScaling.get(),
-        selfPercent: playerSize.get(),
         otherPercent: allySize.get(),
         dropAllyShots: hideAllyProjectiles.get(),
         allyEffects: allyEffects.get(),
@@ -235,7 +226,6 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
         hideAllyNotifications: hideAllyNotifications.get(),
         blockShowEffect: blockShowEffect.get(),
         sizeScaling: sizeScaling.get(),
-        playerSize: playerSize.get(),
         allySize: allySize.get(),
       });
 
@@ -253,7 +243,6 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
           hideAllyNotifications.set(values.hideAllyNotifications);
           blockShowEffect.set(values.blockShowEffect);
           sizeScaling.set(values.sizeScaling);
-          playerSize.set(values.playerSize);
           allySize.set(values.allySize);
         } finally {
           applyingPreset = false;
@@ -284,7 +273,6 @@ export function createAntiLagPlugin(gameData: AntiLagGameData): Plugin {
       context.onDispose(blockShowEffect.onChange(onSettingChanged));
       context.onDispose(blockedEffectTypes.onChange(onSettingChanged));
       context.onDispose(sizeScaling.onChange(onSettingChanged));
-      context.onDispose(playerSize.onChange(onSettingChanged));
       context.onDispose(allySize.onChange(onSettingChanged));
 
       // ── Per-session state ────────────────────────────────────────────────

@@ -83,7 +83,7 @@ One plugin's mistake never reaches another plugin, the proxy, or the game.
 |---|---|
 | `ctx.packets` | `on`, `onFirst`, `onAny` — packet subscriptions |
 | `ctx.commands` | chat commands, consumed only if the handler succeeds |
-| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `text`, `colour`, `button` |
+| `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `assetSelect`, `assetMultiSelect`, `text`, `colour`, `button` |
 | `ctx.sessions` | the current session, and connect/disconnect events |
 | `ctx.native` | `setFeature`, and whether the native module is connected |
 | `ctx.timers` | timers the host cancels with the plugin |
@@ -139,6 +139,34 @@ const dungeons = ctx.settings.multiSelect('portals', {
 });
 // dungeons.get() -> readonly string[];  dungeons.has('1817') -> boolean
 ```
+
+`assetSelect` and `assetMultiSelect` are the same two choices drawn as a grid of
+the options' own pictures, which is what makes a choice between four thousand
+items, a hundred dungeon keys or a class's hundred skins something a person can
+actually make. The value contract is unchanged — `assetSelect` holds one key
+like a `select`, `assetMultiSelect` holds the same delimited string a
+`multiSelect` does — and each option may name the picture it is drawn as:
+
+```ts
+const skin = ctx.settings.assetSelect('skin', {
+  label: 'Skin',
+  default: '0',
+  dynamic: true,
+  options: [
+    ['0', 'Default', '782'], // drawn as another object's art
+    ['838', 'Merlin Wizard'], // drawn as its own value's art
+    ['16775930', 'Color: Alice Blue', '#f0f8ff'], // drawn as a flat colour
+  ],
+});
+```
+
+A picture key is an object type as decimal text, resolved in the sprite file the
+game data carries; a `#rrggbb` key is a colour rather than a picture, and fills
+the tile with itself. An option with no key of its own is drawn as its value,
+which is how an item chooser says "the item is the picture". A choice the game
+ships no art for gets the stand-in the extraction packs for exactly that, and
+when there is no sprite file at all both kinds fall back to the plain control —
+so nothing declared here is ever less usable than a `select` or a `multiSelect`.
 
 `colour` is a colour, drawn as a picker with a bar for red, green, blue and
 alpha. Its value is **always `#rrggbbaa` in lower case**, whatever spelling it
@@ -401,9 +429,57 @@ is a field some build had, not one this build wants.
 
 **4. Leave a gap between packets that change the same thing.** Two item moves
 inside half a second end the session; the same two seven seconds apart are fine.
-Auto-loot holds everything it sends to one second by default and never resets
-that spacing — not even when the player steps from one loot bag onto another,
-which is precisely the case that produced the fatal pair.
+The gap is not yours to keep, and it never was — see below.
+
+### The queue under `sendToServer`
+
+Rules 1, 2 and 4 are enforced rather than remembered. Every send passes through
+one queue per session, because a plugin pacing itself perfectly says nothing
+about what the *other* plugins — and the player's own hands — are doing in the
+same tick. Two features acting at once used to mean the server carried out one
+of them and silently refused the other; both then asked again, and a few rounds
+of that is a kick.
+
+So `sendToServer` does not promise to send during the call. A packet the server
+counts against a rate limit — anything that moves or uses an item, enters a
+portal, teleports or speaks — is spaced against everything else the runtime is
+sending, and its `time` and `position` are rewritten at the instant it leaves.
+Everything else, including every acknowledgement and `ESCAPE`, is not paced at
+all and goes out immediately.
+
+The third argument is how a plugin takes part in that rather than only
+submitting to it. All of it is optional:
+
+```ts
+session.sendToServer('USEITEM', fields, {
+  // Ahead of looting when the lane frees up. It does not jump the spacing:
+  // nothing does, because the spacing is what the disconnects were about.
+  priority: SendPriority.Survival,
+  // A newer request under the same name replaces the one still waiting,
+  // instead of queueing behind it. Prefix it with your plugin's id.
+  key: 'auto-drink:health',
+  // Dropped rather than sent late once the world has moved on.
+  expiresInMs: 2000,
+  // Your own clock starts here, not at the call above.
+  onSent: () => { lastDrinkAtMs = session.world.gameTimeMs; },
+  onOutcome: (outcome) => {
+    // `Refused` is the one answer worth treating as a verdict: the server
+    // said so. Silence (`Unconfirmed`) is not — a bag somebody else emptied
+    // and a bag that was merely slow look exactly the same.
+    if (outcome === SendOutcome.Refused) standDown();
+  },
+});
+```
+
+**If your plugin has a cooldown, start it in `onSent`.** A cooldown measured
+from the decision is measured from a moment the server never saw, and a packet
+held up behind a busy lane would come off cooldown while it was still waiting.
+
+**If your plugin can tell whether its packet worked, say so with `confirm`.**
+Nothing acknowledges an item move, so "worked" is a fact about the world — the
+destination slot filling. A `confirm` holds the lane until it answers or the
+window closes, which is what stops a second move being aimed with a picture of
+the inventory from before the first.
 
 ### What the server says when it refuses
 

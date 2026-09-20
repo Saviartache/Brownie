@@ -186,8 +186,21 @@ export function createAutoPortalPlugin(inputs: AutoPortalInputs): Plugin {
           standDown(session, state);
           const nowMs = session.world.gameTimeMs;
           if (nowMs - state.lastEnterAtMs >= ENTER_INTERVAL_MS) {
-            session.sendToServer('USEPORTAL', { objectId: nearest.entity.objectId });
-            state.lastEnterAtMs = nowMs;
+            session.sendToServer(
+              'USEPORTAL',
+              { objectId: nearest.entity.objectId },
+              {
+                // One entry waiting at a time: standing on a portal while the
+                // lane is busy would otherwise queue one per tick.
+                key: 'auto-portal:enter',
+                expiresInMs: ENTER_INTERVAL_MS,
+                // The interval starts when the entry leaves, not when standing
+                // on the portal was noticed.
+                onSent: () => {
+                  state.lastEnterAtMs = session.world.gameTimeMs;
+                },
+              },
+            );
           }
           return;
         }

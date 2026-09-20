@@ -21,7 +21,13 @@
  * job, engaged by naming the teammate in the shared {@link FollowTarget}.
  */
 
-import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
+import {
+  PluginCategory,
+  definePlugin,
+  wasSent,
+  type Plugin,
+  type SessionView,
+} from '@brownie/plugin-api';
 import { isSafeZone } from '../../constants/SafeZones.js';
 import { bareName } from '../../state/playerName.js';
 import { ARRIVE_TILES, CONFIRM_MS, MAX_FAILURES, TELEPORT_INTERVAL_MS } from './constants.js';
@@ -149,12 +155,37 @@ export function createAutoTeleportPlugin(inputs: AutoTeleportInputs): Plugin {
         if (approacher === undefined) return;
         if (nowMs - state.lastAttemptMs < TELEPORT_INTERVAL_MS) return;
 
-        session.sendToServer('TELEPORT', {
-          objectId: approacher.objectId,
-          playerName: approacher.name,
-        });
-        state.pending = { targetId: approacher.objectId, sentAtMs: nowMs };
-        state.lastAttemptMs = nowMs;
+        const pending = { targetId: approacher.objectId, sentAtMs: Number.POSITIVE_INFINITY };
+        state.pending = pending;
+        session.sendToServer(
+          'TELEPORT',
+          {
+            objectId: approacher.objectId,
+            playerName: approacher.name,
+          },
+          {
+            // One teleport waiting at a time — the tick above already refuses
+            // to stack them, so this is the guard for the window between asking
+            // and leaving.
+            key: 'auto-teleport:jump',
+            expiresInMs: TELEPORT_INTERVAL_MS,
+            // **Both clocks start when it leaves.** Measured from the decision,
+            // a teleport held up by a busy lane would be counted a failure
+            // before the server had ever seen it — and two of those block the
+            // feature for the rest of the map.
+            onSent: () => {
+              const sentAtMs = session.world.gameTimeMs;
+              pending.sentAtMs = sentAtMs;
+              state.lastAttemptMs = sentAtMs;
+            },
+            onOutcome: (outcome) => {
+              if (state.pending !== pending || wasSent(outcome)) return;
+              // It never left, so it is not an attempt and not a failure: the
+              // next tick asks again, against whoever is nearest the boss then.
+              state.pending = undefined;
+            },
+          },
+        );
       });
 
       // An object id is unique only within a map, and what a map refuses is a

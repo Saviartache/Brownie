@@ -99,8 +99,9 @@ PacketDecoder         frame → DecodedPacket, driven by the schema registry
    ▼
 PacketPipeline        ordered stages:
    │                    1. state    — world/player/session updates
-   │                    2. core     — reconnect, commands, safety
-   │                    3. plugins  — subscriber dispatch
+   │                    2. outbound — the send queue watches for FAILURE
+   │                    3. core     — reconnect, commands, safety
+   │                    4. plugins  — subscriber dispatch
    │
    ▼
 verdict               forward | drop | forward-modified
@@ -217,6 +218,11 @@ The practical rule for anything injecting toward the server:
 * leave room between injected packets rather than emitting several for one tick,
   so what we add to the stream keeps the shape the client's own traffic has.
 
+All three are now enforced rather than remembered: every plugin send passes
+through the session's one outbound queue, which spaces packets, and which
+rewrites `time` and `position` at the instant a held packet leaves. See
+**[One outbound queue per session](#one-outbound-queue-per-session)**.
+
 ### Two item moves inside half a second end the session
 
 Every disconnect auto-loot has caused has one shape, and it is not the item, the
@@ -238,6 +244,56 @@ a move immediately — which is exactly the pair above, two different bags.
 So the spacing is a floor on everything the feature sends and is never reset.
 A second by default, exposed as a setting, because where the real limit sits
 between 400 ms and 7 s has not been measured.
+
+### One outbound queue per session
+
+A floor inside one feature is only as good as the assumption that the feature is
+the only thing sending. It is not. Auto-loot paces its pickups, auto-drink its
+potions and auto-ability its casts, each correctly and each on its own clock —
+and the tick where a bag comes into reach *while* mana runs low *while* the tome
+comes off cooldown puts three item packets on the wire inside a millisecond. The
+server carries out one. The other two get silence, their features conclude
+nothing happened and ask again, and a few rounds of that is the disconnect
+above. The player's own hands are a fourth sender nobody was counting.
+
+So there is one queue per session, it lives under `SessionView.sendToServer`,
+and nothing goes around it. `apps/runtime/src/outbound/` is the whole of it.
+
+**What is paced is a short table, not a guess.** `actionLanes.ts` names the
+packets the server has been seen to count and groups them into *lanes* that do
+not wait for each other — items, travel, chat. A packet the table does not name
+is not queued at all: an acknowledgement is an answer the server is already
+waiting on, an `ESCAPE` is somebody's life, a `MOVE` is the player walking, and
+delaying any of those to be polite about a limit that does not apply to them is
+strictly worse than sending them. Within a lane, the wait between two packets is
+the longer of what each asks for, so a cheap `USEITEM` following an expensive
+`INVENTORYSWAP` still waits out the swap.
+
+**Priority orders the queue; it never jumps the floor.** A potion at a survival
+threshold goes ahead of a pickup, and still waits its turn — because the floor
+is the thing the disconnects were about, and no priority is worth one.
+
+**A caller can say how to tell whether its packet worked.** The protocol
+acknowledges neither an item move nor a drink, so "worked" is a fact about the
+world: the destination slot filling. A caller that supplies that predicate holds
+its lane until the predicate answers or the window closes, which is what stops
+a second move being aimed with a picture of the inventory from before the first.
+The outcome it gets back distinguishes *confirmed*, *unconfirmed* (silence,
+which is retryable because a slow bag and a refused one look identical),
+*refused* (a `FAILURE` arrived while it was out), and the three ways a packet
+can never leave at all — expired, superseded by a newer request under the same
+key, or dropped with the map.
+
+**A `FAILURE` holds every lane, and consecutive ones hold them longer.** That
+packet is the server's only unambiguous complaint and the thing that precedes a
+kick, so the queue treats it as a reason to be quiet even when nothing of ours
+can be blamed for it: we cannot prove a complaint was not about us, and the two
+ways of being wrong cost wildly different amounts. A confirmed packet breaks the
+streak, because it is evidence the server is listening again.
+
+**And a held packet is restamped when it leaves.** A queue that delivered the
+`time` a packet was *built* with would be a queue that reliably produced the
+silent rejection two sections above.
 
 ### A trailing optional the definition has and the game does not
 

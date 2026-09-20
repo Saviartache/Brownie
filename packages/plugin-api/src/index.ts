@@ -14,6 +14,8 @@
 
 export { MutablePacket, Verdict } from './packet.js';
 
+export { SendOutcome, SendPriority, wasSent, type SendOptions } from './outbound.js';
+
 export {
   clampToBounds,
   humaniseKey,
@@ -21,6 +23,8 @@ export {
   normaliseColour,
   type AssetMultiSelectSettingOptions,
   type AssetOption,
+  type AssetSelectHandle,
+  type AssetSelectSettingOptions,
   type BooleanSettingOptions,
   type ButtonOptions,
   type ColourSettingOptions,

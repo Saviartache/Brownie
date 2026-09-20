@@ -17,11 +17,15 @@
  * because each reader of them reads one kind of object and nothing else.
  */
 
-/** Where a sprite sits in its atlas, in pixels. */
+/**
+ * Where a sprite sits in its atlas, in pixels, counted from the top-left —
+ * which is the opposite end from the one Unity stores texture rows at.
+ */
 export interface SpriteRect {
   /** Which atlas: the value the index carries, resolved by the caller. */
   readonly atlasId: number;
   readonly x: number;
+  /** Rows from the top of the picture, not from the first row in memory. */
   readonly y: number;
   readonly w: number;
   readonly h: number;
@@ -85,26 +89,44 @@ export function readSpriteSheet(buffer: Buffer): Map<string, SpriteGroup> {
     });
   }
 
-  // SpriteSheetRoot, field 1: `animatedSprites`. An animated sprite is one
-  // still of it — the frame the game shows at rest — filed under the animated
-  // group's own name and index. AnimatedSprite, field 0: `name`; field 1:
-  // `index`; field 5: `sprites`, the one frame as an ordinary Sprite.
+  // SpriteSheetRoot, field 1: `animatedSprites` — a character's frames, one
+  // entry per frame rather than one per character. AnimatedSprite, field 0:
+  // `name`; field 1: `index`; field 3: `direction`; field 4: `action`; field 5:
+  // the frame itself, a Sprite with no index of its own.
+  //
+  // Two facts decide what this loop keeps. **A sheet may live only here**: the
+  // game's skins and pets are animated and nothing else, so the group has to be
+  // made rather than looked up, or every skin in the chooser is a blank tile.
+  // And **the frames of one character are many**, so one of them has to be
+  // picked: the still is the lowest action facing the lowest direction, which
+  // is the standing, front-facing frame the game itself shows at rest.
   const rootAnimatedSlot = slot(buffer, root, 1);
   if (rootAnimatedSlot !== 0) {
     const animated = vector(buffer, root + rootAnimatedSlot);
+    const stills = new Map<string, Pose>();
     for (let i = 0; i < animated.count; i++) {
       const entry = indirect(buffer, animated.at + i * 4);
       const nameSlot = slot(buffer, entry, 0);
-      const indexSlot = slot(buffer, entry, 1);
       const frameSlot = slot(buffer, entry, 5);
-      if (nameSlot === 0 || indexSlot === 0 || frameSlot === 0) continue;
+      if (nameSlot === 0 || frameSlot === 0) continue;
 
-      const frame = indirect(buffer, entry + frameSlot);
-      const sprite = readSprite(buffer, frame);
-      if (sprite === undefined) continue;
-      const group = groups.get(string(buffer, entry + nameSlot));
-      if (group === undefined) continue;
-      group.sprites.set(buffer.readInt32LE(entry + indexSlot), sprite.rect);
+      const rect = readRect(buffer, indirect(buffer, entry + frameSlot));
+      if (rect === undefined) continue;
+      const name = string(buffer, entry + nameSlot);
+      const index = field(buffer, entry, 1);
+      const pose: Pose = { action: field(buffer, entry, 4), direction: field(buffer, entry, 3) };
+
+      const key = `${name}\0${String(index)}`;
+      const kept = stills.get(key);
+      if (kept !== undefined && !isStiller(pose, kept)) continue;
+      stills.set(key, pose);
+
+      let group = groups.get(name);
+      if (group === undefined) {
+        group = { atlasId: rect.atlasId, sprites: new Map() };
+        groups.set(name, group);
+      }
+      group.sprites.set(index, rect);
     }
   }
 
@@ -116,27 +138,59 @@ export function readSpriteSheet(buffer: Buffer): Map<string, SpriteGroup> {
   );
 }
 
-/** Sprite, field 3: `index`; field 7: `aId`; field 0: `position`. */
+/** Which frame of an animation a sprite is: what it is doing, and facing where. */
+interface Pose {
+  readonly action: number;
+  readonly direction: number;
+}
+
+/** Whether `pose` is more at rest than the one already kept. */
+function isStiller(pose: Pose, kept: Pose): boolean {
+  return pose.action !== kept.action ? pose.action < kept.action : pose.direction < kept.direction;
+}
+
+/** Sprite, field 3: `index`, over the rectangle below. */
 function readSprite(
   buffer: Buffer,
   sprite: number,
 ): { readonly index: number; readonly rect: SpriteRect } | undefined {
   const indexSlot = slot(buffer, sprite, 3);
-  const positionSlot = slot(buffer, sprite, 0);
-  if (indexSlot === 0 || positionSlot === 0) return undefined;
+  const rect = readRect(buffer, sprite);
+  if (indexSlot === 0 || rect === undefined) return undefined;
+  return { index: buffer.readInt32LE(sprite + indexSlot), rect };
+}
 
-  // `position` is a struct, laid out inline as four floats — x, y, h, w.
+/**
+ * An `int` field, or zero when the table does not carry it.
+ *
+ * FlatBuffers leaves out a field that holds its type's default, so an absent
+ * slot is a zero rather than a miss — and zero is a real index, a real
+ * direction and a real action. Reading "absent" as "skip this one" is how the
+ * first skin of every sheet, and every frame at rest, went missing.
+ */
+function field(buffer: Buffer, table: number, index: number): number {
+  const at = slot(buffer, table, index);
+  return at === 0 ? 0 : buffer.readInt32LE(table + at);
+}
+
+/** Sprite, field 0: `position`; field 7: `aId`. */
+function readRect(buffer: Buffer, sprite: number): SpriteRect | undefined {
+  const positionSlot = slot(buffer, sprite, 0);
+  if (positionSlot === 0) return undefined;
+
+  // `position` is a struct, laid out inline as four floats — x, y, h, w. The
+  // height comes before the width, which most of the game's art hides: its
+  // sprites are square, and reading the pair the other way round is only wrong
+  // for the tall ones — a 16×48 portal read as 48×16, sliced into its
+  // neighbours and cut off at its own knees.
   const aidSlot = slot(buffer, sprite, 7);
   const position = sprite + positionSlot;
   return {
-    index: buffer.readInt32LE(sprite + indexSlot),
-    rect: {
-      atlasId: aidSlot !== 0 ? Number(buffer.readBigUInt64LE(sprite + aidSlot)) : 0,
-      x: Math.round(buffer.readFloatLE(position)),
-      y: Math.round(buffer.readFloatLE(position + 4)),
-      w: Math.round(buffer.readFloatLE(position + 8)),
-      h: Math.round(buffer.readFloatLE(position + 12)),
-    },
+    atlasId: aidSlot !== 0 ? Number(buffer.readBigUInt64LE(sprite + aidSlot)) : 0,
+    x: Math.round(buffer.readFloatLE(position)),
+    y: Math.round(buffer.readFloatLE(position + 4)),
+    h: Math.round(buffer.readFloatLE(position + 8)),
+    w: Math.round(buffer.readFloatLE(position + 12)),
   };
 }
 

@@ -1,15 +1,23 @@
 import {
   PluginCategory,
   definePlugin,
+  type AssetOption as AssetOptionOf,
   type MutablePacket,
   type Plugin,
   type SessionView,
 } from '@brownie/plugin-api';
 import { StatType } from '../../constants/StatType.js';
-import type { AppearanceChoice, PlayerSkin } from '../../gamedata/cosmetics.js';
+import {
+  appearancePicture,
+  type AppearanceChoice,
+  type PlayerSkin,
+} from '../../gamedata/cosmetics.js';
 import { StatOverrides, findStatus } from '../../state/StatOverrides.js';
 import {
   DEFAULT_APPEARANCE,
+  DEFAULT_SIZE,
+  MAX_SIZE_PERCENT,
+  MIN_SIZE_PERCENT,
   readAppearanceMemory,
   writeAppearanceMemory,
   type ClassAppearance,
@@ -17,12 +25,20 @@ import {
 
 const DEFAULT_SKIN = DEFAULT_APPEARANCE.skin;
 const DEFAULT_STYLE = DEFAULT_APPEARANCE.arcaneStyle;
+/** Every chooser here holds a plain string, so its options are these. */
+type AssetOption = AssetOptionOf<string>;
+
 const DEFAULT_OPTION = [DEFAULT_SKIN, 'Default'] as const;
 const DEFAULT_STYLE_OPTION = [DEFAULT_STYLE, 'Default'] as const;
 const ARCANE_STYLE_FEATURE = 'player.arcaneStyle';
 const SKIN_FEATURE = 'player.skin';
 const CLAIM_INTERVAL_MS = 1000;
-const APPEARANCE_STATS = [StatType.Texture1, StatType.Texture2] as const;
+const APPEARANCE_STATS = [StatType.Texture1, StatType.Texture2, StatType.Size] as const;
+/**
+ * What stat 2 reads as when no status carries it, so that turning the slider
+ * back to 100 restores an ordinary character rather than an invisible one.
+ */
+const ABSENT_STATS: ReadonlyMap<number, number> = new Map([[StatType.Size, DEFAULT_SIZE]]);
 
 export interface SkinChangerInputs {
   readonly skinsForClass: (objectType: number) => readonly PlayerSkin[];
@@ -35,7 +51,7 @@ export interface SkinChangerInputs {
 export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
   const mainOptions = appearanceOptions(inputs.mainAppearances());
   const accessoryOptions = appearanceOptions(inputs.accessoryAppearances());
-  const skinOptionsByClass = new Map<number, readonly (readonly [string, string])[]>();
+  const skinOptionsByClass = new Map<number, readonly AssetOption[]>();
 
   return definePlugin({
     meta: {
@@ -46,23 +62,41 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
     },
 
     setup(context) {
-      const skin = context.settings.select<string>('skin', {
+      // Skins, dyes and cloths are all pictures: a name like "Sacred Cloak
+      // Priest" or "Large Beisa Cloth" says nothing a player can picture, and
+      // there are hundreds of each. So all three are grids — the same widget
+      // the item and portal choosers use — and the overlay falls back to the
+      // drop-down where there is no game data to draw from.
+      const skin = context.settings.assetSelect<string>('skin', {
         label: 'Skin',
         default: DEFAULT_SKIN,
         dynamic: true,
         options: [DEFAULT_OPTION],
       });
-      const mainAppearance = context.settings.select<string>('mainAppearance', {
+      const mainAppearance = context.settings.assetSelect<string>('mainAppearance', {
         group: 'Dyes and effects',
         label: 'Main color / effect',
         default: DEFAULT_APPEARANCE.main,
         options: mainOptions,
       });
-      const accessoryAppearance = context.settings.select<string>('accessoryAppearance', {
+      const accessoryAppearance = context.settings.assetSelect<string>('accessoryAppearance', {
         group: 'Dyes and effects',
         label: 'Accessory color / effect',
         default: DEFAULT_APPEARANCE.accessory,
         options: accessoryOptions,
+      });
+      // Your own size, which used to live in anti-lag as a percentage of what
+      // the server sent. Here it is the size itself: this is the plugin that
+      // already owns what your character looks like, and it is remembered per
+      // class with the rest of it — a giant knight and a tiny archer are two
+      // different wishes, not one.
+      const size = context.settings.range('size', {
+        group: 'Size',
+        label: 'Your size (%, 100 is normal, 0 hides you)',
+        default: DEFAULT_SIZE,
+        min: MIN_SIZE_PERCENT,
+        max: MAX_SIZE_PERCENT,
+        step: 5,
       });
       const arcaneStyle = context.settings.select<string>('arcaneStyle', {
         group: 'Arcane Style',
@@ -115,9 +149,13 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
         targets.clear();
         addTarget(targets, StatType.Texture1, mainAppearance.get());
         addTarget(targets, StatType.Texture2, accessoryAppearance.get());
+        // 100 is "leave it alone": a skin the game draws larger than life keeps
+        // its own size until the slider actually asks for something else.
+        const wantedSize = size.get();
+        if (wantedSize !== DEFAULT_SIZE) targets.set(StatType.Size, wantedSize);
       };
       refreshTargets();
-      for (const setting of [mainAppearance, accessoryAppearance]) {
+      for (const setting of [mainAppearance, accessoryAppearance, size]) {
         context.onDispose(setting.onChange(refreshTargets));
       }
 
@@ -141,10 +179,11 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
           main: mainAppearance.get(),
           accessory: accessoryAppearance.get(),
           arcaneStyle: arcaneStyle.get(),
+          size: size.get(),
         });
         memory.set(writeAppearanceMemory(remembered));
       };
-      for (const setting of [skin, mainAppearance, accessoryAppearance, arcaneStyle]) {
+      for (const setting of [skin, mainAppearance, accessoryAppearance, arcaneStyle, size]) {
         context.onDispose(setting.onChange(remember));
       }
 
@@ -155,6 +194,7 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
         mainAppearance.set(appearance.main);
         accessoryAppearance.set(appearance.accessory);
         arcaneStyle.set(appearance.arcaneStyle);
+        size.set(appearance.size);
       };
 
       const showClass = (objectType: number): void => {
@@ -167,13 +207,14 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
         let options = skinOptionsByClass.get(objectType);
         if (options === undefined) {
           options = [
-            DEFAULT_OPTION,
+            // "Default" is the class in its own clothes, so the class itself is
+            // the picture — the one tile in the grid that has no skin to show.
+            [DEFAULT_SKIN, 'Default', String(objectType)],
+            // A skin's value is its object type, which is also the key its
+            // picture is filed under, so the option needs no third field.
             ...inputs
               .skinsForClass(objectType)
-              .map((definition): readonly [string, string] => [
-                String(definition.type),
-                definition.name,
-              ]),
+              .map((definition): AssetOption => [String(definition.type), definition.name]),
           ];
           skinOptionsByClass.set(objectType, options);
         }
@@ -200,7 +241,7 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
 
         let state = states.get(session.id);
         if (state === undefined) {
-          state = new StatOverrides();
+          state = new StatOverrides(ABSENT_STATS);
           states.set(session.id, state);
         }
 
@@ -232,14 +273,21 @@ export function createSkinChangerPlugin(inputs: SkinChangerInputs): Plugin {
   });
 }
 
-function appearanceOptions(
-  appearances: readonly AppearanceChoice[],
-): readonly (readonly [string, string])[] {
+/**
+ * The dye and effect choices, as pictures.
+ *
+ * A dye's own icon is the same little bottle for all four hundred of them, so
+ * the picture is what the dye *does*: the colour it paints, or the cloth it
+ * weaves — see `appearancePicture`. The label keeps its "Color:" / "Effect:"
+ * prefix, which is what the grid's search box filters on.
+ */
+function appearanceOptions(appearances: readonly AppearanceChoice[]): readonly AssetOption[] {
   return [
     DEFAULT_OPTION,
-    ...appearances.map((appearance): readonly [string, string] => [
+    ...appearances.map((appearance): AssetOption => [
       String(appearance.value),
       `${appearance.kind === 'color' ? 'Color' : 'Effect'}: ${appearance.name}`,
+      appearancePicture(appearance.value),
     ]),
   ];
 }

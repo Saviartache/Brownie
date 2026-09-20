@@ -1,5 +1,6 @@
 import {
   MutablePacket,
+  type AssetOption,
   type NativeApi,
   type SessionApi,
   type SessionView,
@@ -41,11 +42,13 @@ function packetOf(name: string, fields: Record<string, unknown>): MutablePacket 
 
 function status(
   objectId: number,
-  values: Partial<Record<'skin' | 'main' | 'accessory', number>> = {},
+  values: Partial<Record<'skin' | 'main' | 'accessory' | 'size', number>> = {},
 ): Record<string, unknown> {
   const data: Record<string, unknown>[] = [];
   if (values.skin !== undefined)
     data.push({ id: StatType.Skin, value: values.skin, stackCount: 0 });
+  if (values.size !== undefined)
+    data.push({ id: StatType.Size, value: values.size, stackCount: 0 });
   if (values.main !== undefined) {
     data.push({ id: StatType.Texture1, value: values.main, stackCount: 0 });
   }
@@ -91,9 +94,9 @@ function session(objectType: number): SessionView {
 
 function load(store?: PluginStore): {
   host: PluginHost;
-  options: (key: string) => readonly (readonly [string, string])[];
+  options: (key: string) => readonly AssetOption<string>[];
   value: (key: string) => SettingValue | undefined;
-  set: (key: string, value: string) => void;
+  set: (key: string, value: SettingValue) => void;
   nativeCalls: { key: string; value: boolean | number | string }[];
 } {
   const nativeCalls: { key: string; value: boolean | number | string }[] = [];
@@ -136,7 +139,9 @@ function load(store?: PluginStore): {
         .settingsOf('skin-changer')!
         .descriptors()
         .find((candidate) => candidate.key === key);
-      return descriptor?.kind === 'select' ? descriptor.options : [];
+      return descriptor?.kind === 'select' || descriptor?.kind === 'assetSelect'
+        ? descriptor.options
+        : [];
     },
     value: (key) => host.settingsOf('skin-changer')!.values()[key],
     set: (key, value) => {
@@ -157,13 +162,14 @@ describe('Skin Changer', () => {
 
     host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
     expect(options('skin')).toEqual([
-      ['0', 'Default'],
+      // Default wears the class's own picture; a skin is its own.
+      ['0', 'Default', String(WIZARD)],
       [String(MERLIN), 'Merlin Wizard'],
     ]);
 
     host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
     expect(options('skin')).toEqual([
-      ['0', 'Default'],
+      ['0', 'Default', String(KNIGHT)],
       [String(ROUND_KNIGHT), 'Knight of the Round Knight'],
     ]);
   });
@@ -171,15 +177,16 @@ describe('Skin Changer', () => {
   it('offers cached colours and cloth effects for the correct texture layer', () => {
     const { options } = load();
 
+    // A colour is drawn as itself, a cloth as the textile the value names.
     expect(options('mainAppearance')).toEqual([
       ['0', 'Default'],
-      [String(BLUE), 'Color: Alice Blue'],
-      [String(PINSTRIPE), 'Effect: Purple Pinstripe'],
+      [String(BLUE), 'Color: Alice Blue', '#f0f8ff'],
+      [String(PINSTRIPE), 'Effect: Purple Pinstripe', String(PINSTRIPE)],
     ]);
     expect(options('accessoryAppearance')).toEqual([
       ['0', 'Default'],
-      [String(BLUE), 'Color: Alice Blue'],
-      [String(PINSTRIPE), 'Effect: Purple Pinstripe'],
+      [String(BLUE), 'Color: Alice Blue', '#f0f8ff'],
+      [String(PINSTRIPE), 'Effect: Purple Pinstripe', String(PINSTRIPE)],
     ]);
   });
 
@@ -312,6 +319,69 @@ describe('Skin Changer', () => {
     second.host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
     expect(second.value('skin')).toBe(String(ROUND_KNIGHT));
     expect(second.value('mainAppearance')).toBe(String(BLUE));
+  });
+
+  it('resizes your own character and nobody else', () => {
+    const { host, set } = load();
+    const view = session(WIZARD);
+    host.dispatchPacket(tick(status(SELF_ID)), view);
+    set('size', 150);
+
+    const packet = tick(status(SELF_ID), status(OTHER_ID));
+    host.dispatchPacket(packet, view);
+
+    expect(statIn(packet, SELF_ID, StatType.Size)).toBe(150);
+    expect(statIn(packet, OTHER_ID, StatType.Size)).toBeUndefined();
+  });
+
+  it('puts an ordinary size back when the slider returns to 100', () => {
+    const { host, set } = load();
+    const view = session(WIZARD);
+    host.dispatchPacket(tick(status(SELF_ID)), view);
+    set('size', 40);
+    host.dispatchPacket(tick(status(SELF_ID)), view);
+
+    // The server never sent stat 2, so the restore has to *know* that an
+    // absent size is 100 — putting back a zero would leave you invisible.
+    set('size', 100);
+    const restored = tick(status(SELF_ID));
+    host.dispatchPacket(restored, view);
+
+    expect(statIn(restored, SELF_ID, StatType.Size)).toBe(100);
+  });
+
+  it('restores the size the server sent for a skin drawn larger than life', () => {
+    const { host, set } = load();
+    const view = session(WIZARD);
+    host.dispatchPacket(tick(status(SELF_ID, { size: 130 })), view);
+    set('size', 50);
+    host.dispatchPacket(tick(status(SELF_ID)), view);
+
+    set('size', 100);
+    const restored = tick(status(SELF_ID));
+    host.dispatchPacket(restored, view);
+
+    expect(statIn(restored, SELF_ID, StatType.Size)).toBe(130);
+  });
+
+  it('remembers a size per class, like the rest of the look', () => {
+    const { host, value, set } = load();
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(WIZARD));
+    set('size', 60);
+
+    host.dispatchPacket(tick(status(SELF_ID)), session(KNIGHT));
+    set('size', 150);
+    const asKnight = tick(status(SELF_ID));
+    host.dispatchPacket(asKnight, session(KNIGHT));
+    expect(statIn(asKnight, SELF_ID, StatType.Size)).toBe(150);
+
+    // The tick that notices the class is the one that dresses it: after this
+    // the client holds the size, so the next tick says nothing about it.
+    const asWizard = tick(status(SELF_ID));
+    host.dispatchPacket(asWizard, session(WIZARD));
+    expect(value('size')).toBe(60);
+    expect(statIn(asWizard, SELF_ID, StatType.Size)).toBe(60);
   });
 
   it('restores server dyes when Default is selected', () => {

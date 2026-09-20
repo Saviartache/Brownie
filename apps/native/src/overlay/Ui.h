@@ -113,6 +113,10 @@ enum class SettingKind : std::uint8_t {
     /// A multi-select drawn as a grid of the options' own pictures. Same value
     /// on the wire as `kMultiSelect`; the difference is entirely in the drawing.
     kAssetMultiSelect,
+    /// A select drawn as that same grid, one choice at a time. Same value on
+    /// the wire as `kSelect`, and the same fall-back when there are no
+    /// pictures: the drop-down.
+    kAssetSelect,
     kText,
     kColour,
     kButton,
@@ -359,6 +363,10 @@ class SpriteAtlas {
     [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
     /// One sprite by the key the settings carry, or null for an unknown one.
     [[nodiscard]] const SpriteRect* find(std::string_view key) const;
+    /// The stand-in picture for a choice the game has no art for, or null when
+    /// the file carries none — the extraction files it under object type zero,
+    /// which the game itself never uses.
+    [[nodiscard]] const SpriteRect* stand_in() const;
 
   private:
     std::string path_;

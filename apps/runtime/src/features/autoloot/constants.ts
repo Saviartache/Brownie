@@ -56,6 +56,32 @@ export const RETRY_ITEM_AFTER_MS = 1500;
  */
 export const PENDING_TIMEOUT_MS = 1200;
 
+/**
+ * How long a pickup waiting in the session's outbound queue is still worth
+ * making.
+ *
+ * A pickup names a bag slot and a destination slot, and both are statements
+ * about a moment. Long enough that an ordinary wait behind a potion or a cast
+ * does not throw the move away, short enough that a lane held up by a server
+ * that has gone quiet does not deliver a bagful of stale intentions when it
+ * frees up. A request that lapses costs nothing: the next tick makes it again
+ * against the world as it stands then.
+ */
+export const QUEUE_EXPIRY_MS = 2500;
+
+/**
+ * How long auto-loot stands down after the server refuses one of its moves.
+ *
+ * **The one answer that is not silence, and the only one worth treating as a
+ * verdict.** A move that goes unanswered is retried, because a bag somebody
+ * else emptied first looks exactly like a bag that was merely slow — but a
+ * `FAILURE` is the server saying so, and asking again through that is the shape
+ * every disconnect this feature has caused actually had. Longer than the
+ * manual-guard pause, because the server's opinion outranks a guess about the
+ * player's hands.
+ */
+export const REFUSAL_PAUSE_MS = 6000;
+
 /** Ticks of standing still before an idle player stops looting. */
 export const STATIONARY_TICK_LIMIT = 100;
 

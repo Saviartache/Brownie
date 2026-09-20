@@ -16,7 +16,7 @@ import {
 import { MAX_FAILURES, TELEPORT_INTERVAL_MS } from '../src/features/autoteleport/constants.js';
 import { nearestApproacher, nearestBoss } from '../src/features/autoteleport/bossApproach.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
-import { testLogger } from './fakes.js';
+import { immediateSend, testLogger } from './fakes.js';
 
 const registry = createBundledRegistry();
 
@@ -134,7 +134,9 @@ describe('the auto-teleport plugin', () => {
         players: () => players,
         entity: (id: number) => [...enemies, ...players].find((e) => e.objectId === id),
       },
-      sendToServer: sent,
+      // The real session's contract: a plugin's clock starts when the packet
+      // leaves, and with an empty lane it leaves during the call.
+      sendToServer: immediateSend(sent),
       notify: () => undefined,
     } as unknown as SessionView;
 

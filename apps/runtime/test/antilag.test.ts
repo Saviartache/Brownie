@@ -37,7 +37,6 @@ const DEFAULTS: AntiLagSettings = {
   petMode: PetMode.Off,
   exemptGuildmates: false,
   scaleSizes: false,
-  selfPercent: 100,
   otherPercent: 100,
   dropAllyShots: false,
   allyEffects: AllyEffectMode.Off,
@@ -83,11 +82,17 @@ describe('the resolved policy', () => {
       ...DEFAULTS,
       petMode: PetMode.AllyFirst,
       scaleSizes: true,
-      selfPercent: 80,
+      otherPercent: 25,
     });
 
-    expect(targetSize(policy, EntityKind.Pet, true, 100)).toBe(80);
+    // Yours is left exactly as the server sent it; everybody else's goes.
+    expect(targetSize(policy, EntityKind.Pet, true, 100)).toBe(100);
     expect(targetSize(policy, EntityKind.Pet, false, 100)).toBe(0);
+  });
+
+  it('never touches your own size — that is the skin changer’s, per class', () => {
+    const policy = resolvePolicy({ ...DEFAULTS, scaleSizes: true, otherPercent: 25 });
+    expect(targetSize(policy, EntityKind.Self, false, 120)).toBe(120);
   });
 
   it('scales against what the server sent, not against the default', () => {

@@ -42,7 +42,15 @@
  * server answers by hanging up.
  */
 
-import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
+import {
+  PluginCategory,
+  SendOutcome,
+  SendPriority,
+  definePlugin,
+  wasSent,
+  type Plugin,
+  type SessionView,
+} from '@brownie/plugin-api';
 import type { ItemFacts } from '../../gamedata/items.js';
 import {
   VaultSortOrder,
@@ -81,6 +89,15 @@ const MAX_UNCONFIRMED_MOVES = 3;
 /** How often the sort looks at whether it may send its next move. */
 const DRIVER_TICK_MS = 100;
 
+/**
+ * How long a move waiting in the session's outbound queue is still worth making.
+ *
+ * Shorter than {@link PENDING_TIMEOUT_MS}, because a request that has not left
+ * yet describes the chest as it was when it was planned, and the plan is cheap
+ * to make again. A lapsed one costs a driver tick, not a strike.
+ */
+const QUEUE_EXPIRY_MS = 2500;
+
 /** The default least time between two moves — auto-loot's, for its reasons. */
 const MOVE_INTERVAL_MS = 1000;
 
@@ -106,7 +123,15 @@ interface SortRun {
   readonly label: string;
   /** The chest entity in the current map; re-pointed by each fresh snapshot. */
   chestObjectId: number;
-  /** The move that is out and not yet seen to land. */
+  /**
+   * The move that has been asked for and not yet seen to land.
+   *
+   * `sentAtMs` is when it **left**, which is not when it was decided: a move
+   * goes into the session's one outbound queue and waits there for whatever
+   * else the runtime is sending. It is positive infinity — "not out" — until
+   * the queue says otherwise, so {@link PENDING_TIMEOUT_MS} is never spent on
+   * a move that has not been asked yet.
+   */
   pending: { move: PlannedMove; sentAtMs: number } | undefined;
   /** When the last move left, so the spacing floor spans the whole sort. */
   lastSendAtMs: number;
@@ -458,19 +483,53 @@ export function createVaultSortPlugin(inputs: VaultSortInputs): Plugin {
         // packets spell it as. The destination is an empty slot by construction.
         const fromType = chest.contents[move.from] ?? -1;
         const toType = chest.contents[move.to] ?? -1;
-        session.sendToServer('INVENTORYSWAP', {
-          // The client's own clock, never the connection's: a packet stamped
-          // with the wrong one is dropped by the server without a word.
-          time: Math.trunc(session.world.clientTimeMs),
-          position: { x: session.self.x, y: session.self.y },
-          slotObject1: { objectId: chest.objectId, slotId: move.from, objectType: fromType },
-          slotObject2: { objectId: chest.objectId, slotId: move.to, objectType: toType },
-          // No `tickId`: the definition carries it as a trailing optional and
-          // this build of the game does not — filling it in was what had every
-          // swap answered with `Bad message received`.
-        });
-        run.pending = { move, sentAtMs: nowMs };
-        run.lastSendAtMs = nowMs;
+        const pending = { move, sentAtMs: Number.POSITIVE_INFINITY };
+        run.pending = pending;
+        session.sendToServer(
+          'INVENTORYSWAP',
+          {
+            // Both are rewritten by the session at the instant the packet
+            // leaves — the clock because a stamp the server reads as going
+            // backwards is dropped without a word, the position because the
+            // player can walk away from the chest while a move waits its turn.
+            // Filled in here as well so the packet's shape is visible where it
+            // is built.
+            time: Math.trunc(session.world.clientTimeMs),
+            position: { x: session.self.x, y: session.self.y },
+            slotObject1: { objectId: chest.objectId, slotId: move.from, objectType: fromType },
+            slotObject2: { objectId: chest.objectId, slotId: move.to, objectType: toType },
+            // No `tickId`: the definition carries it as a trailing optional and
+            // this build of the game does not — filling it in was what had every
+            // swap answered with `Bad message received`.
+          },
+          {
+            // Sorting a chest is the most patient thing the runtime does and
+            // the least urgent: it yields the lane to anything at all.
+            priority: SendPriority.Background,
+            // One move outstanding by construction — the driver will not plan
+            // another while `pending` is set — so this is a guard rather than a
+            // rule, and it costs nothing to state.
+            key: 'vault-sort:move',
+            expiresInMs: QUEUE_EXPIRY_MS,
+            onSent: () => {
+              const sentAtMs = session.world.gameTimeMs;
+              pending.sentAtMs = sentAtMs;
+              run.lastSendAtMs = sentAtMs;
+            },
+            onOutcome: (outcome) => {
+              if (run.pending !== pending) return;
+              if (outcome === SendOutcome.Refused) {
+                run.pending = undefined;
+                stop(session, state, 'Sort stopped — the server refused a move.');
+                return;
+              }
+              // Superseded, expired, dropped: it never left, so there is
+              // nothing to wait on and nothing to hold against the chest. The
+              // driver plans the same move again from the same picture.
+              if (!wasSent(outcome)) run.pending = undefined;
+            },
+          },
+        );
       }, DRIVER_TICK_MS);
 
       // ── Lifecycle ────────────────────────────────────────────────────────

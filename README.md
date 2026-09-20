@@ -287,6 +287,16 @@ map.
 
 ## Items
 
+Everything in this section sends packets the server counts against a rate limit,
+and it does not count them per feature. Looting, drinking, casting and sorting a
+vault all reach for the same limit, and so does the player — so none of them
+paces itself any more. Every packet the runtime sends passes through one queue
+per session, which spaces them, waits for one to settle before sending the next,
+puts a potion at a survival threshold ahead of a pickup, and goes quiet for a
+while whenever the server answers `FAILURE`. Two features acting in the same
+tick used to mean one of them was silently refused and then asked again, which
+is how sessions got dropped.
+
 ### Auto Loot
 
 Takes what is worth taking out of the bag you are standing on. What counts as a
@@ -344,12 +354,19 @@ server is never told, and no other player sees it.
 
 ### Skin Changer
 
-Changes your character's skin, dyes and arcane style in this client only, and
-remembers the choice per class.
+Changes your character's skin, dyes, size and arcane style in this client only,
+and remembers the choice per class.
 
-- **Skin** — every skin the game has for that class.
-- **Main colour / effect** and **accessory colour / effect** — dyes.
-- **Arcane Style.**
+- **Skin** — every skin the game has for that class, as a grid of the little
+  characters themselves; *Default* is the class in its own clothes.
+- **Main colour / effect** and **accessory colour / effect** — dyes, also as a
+  grid: a colour is drawn as the colour, a cloth as the pattern it weaves. A dye
+  called *Large Beisa Cloth* tells you nothing; the swatch does.
+- **Arcane Style** — a list, because the game draws every style with the same
+  icon and there is nothing to show.
+- **Your size** — a percentage, where 100 is the size the class is drawn at
+  normally and 0 hides you. Per class like the rest: a giant knight and a tiny
+  archer are two different wishes.
 
 Both of them on one character, changed from the overlay while the game runs:
 
@@ -374,8 +391,9 @@ or a full dungeon actually costs in frames. Start from a preset and adjust.
 - **Block heavy effects from everyone** — beams, novas, streams — with an
   advanced list of effect types.
 - **Hide heal numbers and status popups from other players.**
-- **Size** — resize players by percentage: your size and other players' size,
-  where 0 hides them.
+- **Size** — resize other players by percentage, where 0 hides them. Your own
+  size lives in the Skin Changer, with the rest of what your character looks
+  like.
 
 Objects removed from the world stay removed until the next map change.
 

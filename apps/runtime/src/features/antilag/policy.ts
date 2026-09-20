@@ -77,7 +77,6 @@ export interface AntiLagSettings {
   readonly petMode: PetMode;
   readonly exemptGuildmates: boolean;
   readonly scaleSizes: boolean;
-  readonly selfPercent: number;
   readonly otherPercent: number;
   readonly dropAllyShots: boolean;
   readonly allyEffects: AllyEffectMode;
@@ -90,7 +89,7 @@ export interface AntiLagSettings {
 export interface AntiLagPolicy {
   /** Wanted size, as a percentage of what the server sent, by entity kind. */
   readonly sizePercent: Int16Array;
-  /** Pets are split: `ally_first` keeps your own at your own percentage. */
+  /** Pets are split: `ally_first` keeps your own as the server sent it. */
   readonly ownPetSizePercent: number;
   /** 1 where the kind is stripped from the stream rather than resized. */
   readonly removable: Uint8Array;
@@ -112,11 +111,10 @@ export function clampPercent(value: number): number {
 }
 
 export function resolvePolicy(settings: AntiLagSettings): AntiLagPolicy {
-  const self = settings.scaleSizes ? clampPercent(settings.selfPercent) : UNCHANGED;
   const other = settings.scaleSizes ? clampPercent(settings.otherPercent) : UNCHANGED;
 
+  // Your own size is the skin changer's, per class — nothing here touches it.
   const sizePercent = new Int16Array(KIND_COUNT).fill(UNCHANGED);
-  sizePercent[EntityKind.Self] = self;
   sizePercent[EntityKind.Player] = settings.playerMode === PlayerMode.Off ? other : 0;
   sizePercent[EntityKind.Pet] = petPercent(settings.petMode, other);
   // Exempt guildmates keep the server's size — hiding and scaling alike.
@@ -131,7 +129,7 @@ export function resolvePolicy(settings: AntiLagSettings): AntiLagPolicy {
   return {
     sizePercent,
     ownPetSizePercent:
-      settings.petMode === PetMode.AllyFirst ? self : petPercent(settings.petMode, other),
+      settings.petMode === PetMode.AllyFirst ? UNCHANGED : petPercent(settings.petMode, other),
     removable,
     exemptGuildmates: settings.exemptGuildmates,
     allyEffects: settings.allyEffects,

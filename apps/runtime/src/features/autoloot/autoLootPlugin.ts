@@ -36,9 +36,12 @@
 
 import {
   PluginCategory,
+  SendOutcome,
+  SendPriority,
   definePlugin,
   type Plugin,
   type PluginContext,
+  type SendOptions,
   type SessionView,
   type SettingHandle,
 } from '@brownie/plugin-api';
@@ -55,13 +58,15 @@ import {
   NOTIFY_RADIUS_TILES,
   ON_TOP_TILES,
   PICKUP_INTERVAL_MS,
+  QUEUE_EXPIRY_MS,
+  REFUSAL_PAUSE_MS,
   RETRY_ITEM_AFTER_MS,
   STATIONARY_TICK_LIMIT,
 } from './constants.js';
 import { findBeltDestination, freeSlots, type Destination } from './destination.js';
 import { droppedObjectType } from './droppedItems.js';
 import { enchantCount, UNIQUE_DATA_STAT } from './enchants.js';
-import { LootSession, bagSlotKey } from './LootSession.js';
+import { LootSession, bagSlotKey, type PendingMove } from './LootSession.js';
 import { parseItemList, shouldLoot, type LootPreferences } from './lootRules.js';
 import { GUARDED_PACKETS, shouldWithhold, touchesPotions } from './manualGuard.js';
 
@@ -84,6 +89,9 @@ export interface AutoLootInputs {
  * *at* anywhere.
  */
 const USE_TYPE_FROM_BAG = 0;
+
+/** What auto-loot's requests are called in the session's outbound queue. */
+const QUEUE_KEY = 'auto-loot';
 
 /** How the enchant filter's choices map to a count. */
 const ENCHANT_CHOICES = [
@@ -366,8 +374,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
             facts?.potion?.kind === PotionKind.Permanent &&
             !alreadyCapped(session, facts)
           ) {
-            drinkFromBag(session, bag, slot, objectType);
-            state.lastActionAtMs = nowMs;
+            drinkFromBag(session, state, bag, slot, objectType);
             state.attempts.hold(key, nowMs + RETRY_ITEM_AFTER_MS);
             return true;
           }
@@ -405,51 +412,97 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           // this slot, so there is nothing further in this bag to try.
           if (destination === undefined) return false;
 
-          moveFromBag(session, bag, slot, objectType, destination);
-
-          state.lastActionAtMs = nowMs;
-          state.attempts.hold(key, nowMs + RETRY_ITEM_AFTER_MS);
-          state.startPending({
+          // Recorded before it is asked for, so the tick below stops offering
+          // a second move while this one is still queued — but dated only once
+          // it leaves. See {@link PendingMove.sinceMs}.
+          const move: PendingMove = {
             slotId: destination.slotId,
             expectedQuantity: destination.expectedQuantity,
             source: { objectId: bag.entity.objectId, slot, objectType },
-            sinceMs: nowMs,
+            sinceMs: Number.POSITIVE_INFINITY,
             potion: quaffable,
-          });
-          // A potion is still the one thing the player's own hands are likely
-          // to be doing at the same moment, so it holds their potion packets
-          // back for the window in which ours is settling.
-          if (quaffable) {
-            state.blockUntilMs = Math.max(state.blockUntilMs, nowMs + MANUAL_BLOCK_MS);
-          }
+          };
+          state.startPending(move);
+          state.attempts.hold(key, nowMs + RETRY_ITEM_AFTER_MS);
+          moveFromBag(session, state, move, bag, slot, objectType, destination, quaffable);
           return true;
         }
         return false;
       };
 
+      /**
+       * What every request auto-loot makes has in common.
+       *
+       * **Background, because looting is the one thing here nobody dies of.**
+       * A potion at a threshold and an ability off cooldown want the same lane,
+       * and a bag will still be there in a second — so a pickup yields to both
+       * rather than being first because it happened to ask first.
+       *
+       * **And a refusal is a fact, where silence is not.** A move that goes
+       * unanswered is retried, because a bag that is merely slow looks exactly
+       * the same; a move the server answered `FAILURE` to is the one case where
+       * asking again is what ends the session, so it stands down instead.
+       */
+      const lootSendOptions = (session: SessionView, state: LootSession): SendOptions => ({
+        priority: SendPriority.Background,
+        expiresInMs: QUEUE_EXPIRY_MS,
+        onOutcome: (outcome) => {
+          if (outcome === SendOutcome.Refused) {
+            state.clearPending();
+            state.pauseUntilMs = Math.max(
+              state.pauseUntilMs,
+              session.world.gameTimeMs + REFUSAL_PAUSE_MS,
+            );
+            context.log.warn('the server refused a pickup; standing down for a moment');
+            return;
+          }
+          // Superseded, expired, dropped: it never left, so there is nothing to
+          // wait on. The item keeps only its ordinary retry cooldown.
+          if (outcome === SendOutcome.Sent || outcome === SendOutcome.Confirmed) return;
+          if (outcome === SendOutcome.Unconfirmed) return;
+          state.clearPending();
+        },
+      });
+
       const drinkFromBag = (
         session: SessionView,
+        state: LootSession,
         bag: NearbyBag,
         slot: number,
         objectType: number,
       ): void => {
-        session.sendToServer('USEITEM', {
-          // The client's own clock, never the connection's: a packet stamped
-          // with the wrong one is dropped by the server without a word.
-          time: Math.trunc(session.world.clientTimeMs),
-          slotObject: { objectId: bag.entity.objectId, slotId: slot, objectType },
-          itemUsePos: { x: 0, y: 0 },
-          useType: USE_TYPE_FROM_BAG,
-          unknownInt: 0,
-        });
+        session.sendToServer(
+          'USEITEM',
+          {
+            // Rewritten by the session the instant this leaves: the client's own
+            // clock, never the connection's, because a packet stamped with the
+            // wrong one is dropped by the server without a word. Filled in here
+            // as well so the packet's shape is visible where it is built.
+            time: Math.trunc(session.world.clientTimeMs),
+            slotObject: { objectId: bag.entity.objectId, slotId: slot, objectType },
+            itemUsePos: { x: 0, y: 0 },
+            useType: USE_TYPE_FROM_BAG,
+            unknownInt: 0,
+          },
+          {
+            ...lootSendOptions(session, state),
+            key: `${QUEUE_KEY}:drink`,
+            onSent: () => {
+              state.lastActionAtMs = session.world.gameTimeMs;
+            },
+          },
+        );
       };
 
       const moveFromBag = (
         session: SessionView,
+        state: LootSession,
+        move: PendingMove,
         bag: NearbyBag,
         slot: number,
         objectType: number,
         destination: Destination,
+        quaffable: boolean,
       ): void => {
         // **`tickId` is deliberately absent, and the live game said so.**
         // `packet-definitions.json` carries it as a trailing optional, and
@@ -457,18 +510,40 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         // had been working — came back `FAILURE [0] Bad message received`,
         // which is the server failing to *parse* the packet rather than
         // refusing what it asked for. Four bytes this build does not expect.
-        session.sendToServer('INVENTORYSWAP', {
-          // The client's own clock, never the connection's: a packet stamped
-          // with the wrong one is dropped by the server without a word.
-          time: Math.trunc(session.world.clientTimeMs),
-          position: { x: session.self.x, y: session.self.y },
-          slotObject1: { objectId: bag.entity.objectId, slotId: slot, objectType },
-          slotObject2: {
-            objectId: session.self.objectId,
-            slotId: destination.slotId,
-            objectType: destination.objectType,
+        session.sendToServer(
+          'INVENTORYSWAP',
+          {
+            // Both of these are rewritten by the session at the instant the
+            // packet leaves — the clock because a stamp the server reads as
+            // going backwards is dropped without a word, the position because
+            // the player walks while a move waits its turn. Filled in here as
+            // well so the packet's shape is visible where it is built.
+            time: Math.trunc(session.world.clientTimeMs),
+            position: { x: session.self.x, y: session.self.y },
+            slotObject1: { objectId: bag.entity.objectId, slotId: slot, objectType },
+            slotObject2: {
+              objectId: session.self.objectId,
+              slotId: destination.slotId,
+              objectType: destination.objectType,
+            },
           },
-        });
+          {
+            ...lootSendOptions(session, state),
+            key: `${QUEUE_KEY}:move`,
+            onSent: () => {
+              const sentAtMs = session.world.gameTimeMs;
+              state.lastActionAtMs = sentAtMs;
+              move.sinceMs = sentAtMs;
+              // A potion is still the one thing the player's own hands are
+              // likely to be doing at the same moment, so it holds their potion
+              // packets back for the window in which ours is settling — a
+              // window that starts when ours goes out, not when it was decided.
+              if (quaffable) {
+                state.blockUntilMs = Math.max(state.blockUntilMs, sentAtMs + MANUAL_BLOCK_MS);
+              }
+            },
+          },
+        );
       };
 
       // ── The tick ─────────────────────────────────────────────────────────

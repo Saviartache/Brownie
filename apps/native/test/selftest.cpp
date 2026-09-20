@@ -1365,6 +1365,28 @@ void AssetMultiSelectIsReadWithItsSprites() {
     Check(mirror.sprites_path().empty(), "the sprite file left with the sync that named it");
 }
 
+void AssetSelectIsReadWithItsSprites() {
+    brownie::overlay::ControlMirror mirror;
+    Check(!mirror.Apply("sync-begin"), "open");
+    Check(!mirror.Apply("plugin|a|A|visuals|1|enabled|"), "a plugin");
+    Check(!mirror.Apply("sprites|C%3A%2Fwherever%2Fsprites.bin"), "the sprite file, by path");
+    // The picture select: a select, with the same appended sprite keys the
+    // picture multi-select carries. One of them is a colour rather than an
+    // object type, which is what a dye that is one flat colour looks like.
+    Check(!mirror.Apply("setting|a|skin|Skin|assetSelect|s|838|0|0|0|0|0|0|"
+                        "Default%3D0%3BMerlin%3D838%3BBlue%3D16775930|||782%3B%3B%23f0f8ff"),
+          "a picture select");
+    Check(mirror.Apply("sync-end"), "commits");
+
+    const auto& row = mirror.plugins().front().settings.front();
+    Check(row.kind == brownie::overlay::SettingKind::kAssetSelect, "kept as a picture select");
+    Check(row.value == "838", "holding one key, as a select does");
+    Check(row.options.size() == 3, "every option");
+    Check(row.options[0].sprite == "782", "the default drawn as the class itself");
+    Check(row.options[1].sprite.empty(), "a skin that falls back to its own value");
+    Check(row.options[2].sprite == "#f0f8ff", "and a colour, carried as one");
+}
+
 void AssetSpritesAreAlignedToTheirOptions() {
     brownie::overlay::ControlMirror mirror;
     Check(!mirror.Apply("sync-begin"), "open");
@@ -2960,6 +2982,7 @@ int main() {
     SelectOptionsAndVisibilityAreRead();
     MultiSelectIsReadAsAChecklist();
     AssetMultiSelectIsReadWithItsSprites();
+    AssetSelectIsReadWithItsSprites();
     AssetSpritesAreAlignedToTheirOptions();
     LongOptionListsArriveInPieces();
     AChordNamesAKeyByWhereItIsRatherThanByWhatItTypes();

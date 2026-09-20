@@ -28,6 +28,25 @@ export const EMPTY_COSMETIC_CATALOG: CosmeticCatalog = {
 export type AppearanceKind = 'color' | 'effect';
 export type AppearanceLayer = 'main' | 'accessory';
 
+/** The top byte of a dye value that means "the rest of me is a colour". */
+const COLOUR_CLOTH = 0x01;
+
+/**
+ * What a chooser draws one dye value as.
+ *
+ * The number says both things at once. A `0x01` top byte means the low three
+ * bytes are a plain RGB colour — the game has no art for those, it tints the
+ * character, so the picture is the colour itself and the overlay fills a tile
+ * with it. Anything else names a cloth in one of the game's textile sheets,
+ * and the extraction files that cloth in the sprite atlas under this very
+ * number, so the value is its own sprite key.
+ */
+export function appearancePicture(value: number): string {
+  return value >>> 24 === COLOUR_CLOTH
+    ? `#${(value & 0xffffff).toString(16).padStart(6, '0')}`
+    : String(value);
+}
+
 /** One distinct value the client accepts for a dye texture stat. */
 export interface AppearanceChoice {
   readonly value: number;

@@ -6,7 +6,7 @@ import { runCli } from '../src/cli.js';
 import { extractGameData } from '../src/extract.js';
 import { describeInstall, findGameInstall } from '../src/install.js';
 import { buildManifest, checkStaleness, readManifest, writeManifest } from '../src/manifest.js';
-import { SPRITES_FILE, buildSpritesFile } from '../src/sprites.js';
+import { FALLBACK_TYPE, SPRITES_FILE, buildSpritesFile } from '../src/sprites.js';
 import {
   SerializedFileError,
   findAssetsByName,
@@ -122,22 +122,31 @@ const OBJECTS_B = '<?xml version="1.0"?><Objects><Object type="0x2" id="B" /></O
 const TILES = '<?xml version="1.0"?><GroundTypes><Ground type="0x9" id="Lava" /></GroundTypes>';
 
 /**
- * A `Texture2D` shaped the way the reader expects: name, a header whose width
- * and height sit four bytes past the name, and a pixel tail exactly
- * `width * height * 4` long. The pixel bytes are a ramp, so a test can tell
- * which sprite landed where by reading them back.
+ * A `Texture2D` shaped the way Unity writes one: name, a header whose width and
+ * height sit four bytes past the name, the pixels as a length-prefixed array —
+ * and `m_StreamData` after them, so the object does *not* end with its picture.
+ * That tail is the point of the fixture carrying it: without it, a reader that
+ * anchors the pixels to the object's last byte passes here and reads every
+ * atlas four pixels out of place against the real game.
+ *
+ * The pixel bytes are a ramp, so a test can tell which sprite landed where by
+ * reading them back. Row zero is the bottom of the picture, as Unity stores it.
  */
 function fakeAtlas(name: string, width: number, height: number): FakeAsset {
-  const pixels = Buffer.alloc(width * height * 4);
+  const pixels = Buffer.alloc(4 + width * height * 4);
+  pixels.writeInt32LE(width * height * 4, 0);
   // A visible ramp: every pixel opaque, its blue channel counting up, so a
   // test can tell which sprite landed where by reading pixels back.
   for (let i = 0; i < width * height; i++)
-    pixels.writeUInt32LE((0xff000000 | (i + 1)) >>> 0, i * 4);
+    pixels.writeUInt32LE((0xff000000 | (i + 1)) >>> 0, 4 + i * 4);
   const header = Buffer.alloc(16);
   // The layout the reader walks: a leading `int` it skips, then width, height.
   header.writeInt32LE(width, 4);
   header.writeInt32LE(height, 8);
-  return { name, data: Buffer.concat([header, pixels]), classId: 28 };
+  // `m_StreamData`: a 64-bit offset, a size and an empty path — all zero for a
+  // texture whose pixels are in the file rather than streamed from beside it.
+  const streamData = Buffer.alloc(16);
+  return { name, data: Buffer.concat([header, pixels, streamData]), classId: 28 };
 }
 
 // ── A synthetic sprite index ────────────────────────────────────────────────
@@ -146,6 +155,21 @@ function fakeAtlas(name: string, width: number, height: number): FakeAsset {
 // every vtable a row of u16 field offsets, every reference a u32 relative to
 // itself. Built back-to-front into one buffer, the way the real builder works,
 // so the offsets being relative is exercised rather than arranged away.
+
+/**
+ * One frame of an animated sheet: which character, doing what, facing where.
+ *
+ * `index` is optional because FlatBuffers leaves out a field holding its
+ * default — an animated sprite numbered zero carries no index at all, and the
+ * reader has to read that as zero rather than as "no index".
+ */
+interface FakeFrame {
+  name: string;
+  index?: number;
+  direction?: number;
+  action?: number;
+  rect: readonly [atlasId: number, x: number, y: number, w: number, h: number];
+}
 
 function buildSpriteIndex(
   sheets: readonly {
@@ -159,6 +183,7 @@ function buildSpriteIndex(
       h: number,
     ][];
   }[],
+  animated: readonly FakeFrame[] = [],
 ): Buffer {
   const parts: Buffer[] = [Buffer.alloc(8)]; // room for the root offset
   let at = 8;
@@ -179,12 +204,12 @@ function buildSpriteIndex(
   // point the same way they do in the game's own index.
   const rootVtable = Buffer.alloc(4 + 2 * 2);
   rootVtable.writeUInt16LE(rootVtable.length, 0);
-  rootVtable.writeUInt16LE(8, 2);
+  rootVtable.writeUInt16LE(12, 2);
   rootVtable.writeUInt16LE(4, 4 + 0 * 2);
-  rootVtable.writeUInt16LE(0, 4 + 1 * 2); // animatedSprites: absent
+  rootVtable.writeUInt16LE(animated.length > 0 ? 8 : 0, 4 + 1 * 2); // animatedSprites
   const rootVtableAt = place(rootVtable);
 
-  const rootTable = Buffer.alloc(4 + 4);
+  const rootTable = Buffer.alloc(4 + 4 + 4);
   const rootTableAt = place(rootTable);
   rootTable.writeInt32LE(rootTableAt - rootVtableAt, 0);
 
@@ -241,6 +266,61 @@ function buildSpriteIndex(
 
     rootVector.writeUInt32LE(tableAt - (rootVectorAt + 4 + i * 4), 4 + i * 4);
   });
+
+  if (animated.length > 0) {
+    const animatedVector = Buffer.alloc(4 + animated.length * 4);
+    animatedVector.writeUInt32LE(animated.length, 0);
+    const animatedVectorAt = place(animatedVector);
+    rootTable.writeUInt32LE(animatedVectorAt - (rootTableAt + 8), 8);
+
+    // AnimatedSprite: name, index, direction, action and the one frame — the
+    // frame being a Sprite with a rectangle and no index of its own.
+    animated.forEach((frame, i) => {
+      const vtable = Buffer.alloc(4 + 6 * 2);
+      vtable.writeUInt16LE(vtable.length, 0);
+      vtable.writeUInt16LE(24, 2);
+      vtable.writeUInt16LE(4, 4 + 0 * 2); // name
+      vtable.writeUInt16LE(frame.index === undefined ? 0 : 8, 4 + 1 * 2); // index
+      vtable.writeUInt16LE(0, 4 + 2 * 2); // set: absent
+      vtable.writeUInt16LE(12, 4 + 3 * 2); // direction
+      vtable.writeUInt16LE(16, 4 + 4 * 2); // action
+      vtable.writeUInt16LE(20, 4 + 5 * 2); // the frame
+      const vtableAt = place(vtable);
+
+      const table = Buffer.alloc(24);
+      const tableAt = place(table);
+      table.writeInt32LE(tableAt - vtableAt, 0);
+      table.writeInt32LE(frame.index ?? 0, 8);
+      table.writeInt32LE(frame.direction ?? 0, 12);
+      table.writeInt32LE(frame.action ?? 0, 16);
+
+      const name = Buffer.alloc(4 + frame.name.length);
+      name.writeUInt32LE(frame.name.length, 0);
+      name.write(frame.name, 4, 'utf8');
+      const nameAt = place(name);
+      table.writeUInt32LE(nameAt - (tableAt + 4), 4);
+
+      const spriteVtable = Buffer.alloc(4 + 8 * 2);
+      spriteVtable.writeUInt16LE(spriteVtable.length, 0);
+      spriteVtable.writeUInt16LE(32, 2);
+      spriteVtable.writeUInt16LE(4, 4 + 0 * 2); // position
+      spriteVtable.writeUInt16LE(24, 4 + 7 * 2); // aId
+      const spriteVtableAt = place(spriteVtable);
+
+      const [atlasId, x, y, w, h] = frame.rect;
+      const spriteTable = Buffer.alloc(32);
+      const spriteTableAt = place(spriteTable);
+      spriteTable.writeInt32LE(spriteTableAt - spriteVtableAt, 0);
+      spriteTable.writeFloatLE(x, 4);
+      spriteTable.writeFloatLE(y, 8);
+      spriteTable.writeFloatLE(h, 12);
+      spriteTable.writeFloatLE(w, 16);
+      spriteTable.writeBigUInt64LE(BigInt(atlasId), 24);
+      table.writeUInt32LE(spriteTableAt - (tableAt + 20), 20);
+
+      animatedVector.writeUInt32LE(tableAt - (animatedVectorAt + 4 + i * 4), 4 + i * 4);
+    });
+  }
 
   const out = Buffer.concat(parts);
   out.writeUInt32LE(rootTableAt, 0);
@@ -342,6 +422,43 @@ describe('the sprite index', () => {
     expect(group?.sprites.get(0x22)).toEqual({ atlasId: 4, x: 30, y: 40, w: 16, h: 16 });
   });
 
+  it('reads a rectangle that is taller than it is wide the way it was written', () => {
+    // The struct is x, y, *height*, width — an order only the game's tall art
+    // can tell apart, which is why a portal's 16x48 strip is the case worth a
+    // test of its own: read the pair the other way round and every animated
+    // portal in the chooser is a slice of its neighbours.
+    const index = buildSpriteIndex([{ name: 'portals', sprites: [[5, 4, 12, 24, 16, 48]] }]);
+
+    expect(readSpriteSheet(index).get('portals')?.sprites.get(5)).toEqual({
+      atlasId: 4,
+      x: 12,
+      y: 24,
+      w: 16,
+      h: 48,
+    });
+  });
+
+  it('makes a group for a sheet that exists only as animated frames', () => {
+    // Skins and pets are animated and nothing else: their sheet never appears
+    // among the plain ones, and a reader that only files animated frames into
+    // sheets it already knows leaves every skin without a picture.
+    const index = buildSpriteIndex(
+      [{ name: 'lofiObj3', sprites: [[1, 4, 0, 0, 8, 8]] }],
+      [
+        { name: 'playerskins', direction: 2, action: 1, rect: [2, 90, 90, 8, 8] },
+        // The still: the lowest action, facing the lowest direction. Its index
+        // is left out altogether, which is how the format spells a zero.
+        { name: 'playerskins', direction: 0, action: 0, rect: [2, 10, 20, 8, 8] },
+        { name: 'playerskins', direction: 1, action: 0, rect: [2, 50, 50, 8, 8] },
+        { name: 'playerskins', index: 1, action: 0, rect: [2, 30, 40, 8, 16] },
+      ],
+    );
+
+    const group = readSpriteSheet(index).get('playerskins');
+    expect(group?.sprites.get(0)).toEqual({ atlasId: 2, x: 10, y: 20, w: 8, h: 8 });
+    expect(group?.sprites.get(1)).toEqual({ atlasId: 2, x: 30, y: 40, w: 8, h: 16 });
+  });
+
   it('refuses an index it cannot walk rather than slicing noise', () => {
     expect(() => readSpriteSheet(Buffer.alloc(4))).toThrow(SpriteSheetError);
     // A root offset pointing outside the buffer.
@@ -363,8 +480,12 @@ describe('texture reading', () => {
     expect(atlas.width).toBe(4);
     expect(atlas.height).toBe(2);
     // The ramp the fixture wrote: pixel 0 is 1, pixel 1 is 2, both opaque.
+    // Reading them means the pixels were found by their own length prefix
+    // rather than by counting back from the object's end, which `m_StreamData`
+    // would have put four pixels out.
     expect(atlas.pixels.readUInt32LE(0)).toBe((0xff000000 | 1) >>> 0);
     expect(atlas.pixels.readUInt32LE(4)).toBe((0xff000000 | 2) >>> 0);
+    expect(atlas.pixels).toHaveLength(4 * 2 * 4);
   });
 
   it('refuses a texture whose bytes do not add up as RGBA32', () => {
@@ -383,17 +504,36 @@ describe('sprites.bin', () => {
 <Object type="0x1823" id="Pirate Portal"><DungeonPortal /><AnimatedTexture><File>portals</File><Index>5</Index></AnimatedTexture></Object>
 <Object type="0x9" id="No Art"><Class>Equipment</Class><Item /></Object>
 <Object type="0xa" id="Unknown Group"><Class>Equipment</Class><Item /><Texture><File>nowhere</File><Index>0x1</Index></Texture></Object>
+<Object type="0x346" id="Merlin Wizard"><Class>Skin</Class><Skin /><PlayerClassType>0x30e</PlayerClassType><AnimatedTexture><File>playerskins</File><Index>0</Index></AnimatedTexture></Object>
+<Object type="0x811" id="Large Brown Lined Cloth"><Class>Dye</Class><Tex1>0x4000001</Tex1><Texture><File>lofiObj3</File><Index>0xa3</Index></Texture></Object>
 </Objects>`;
 
-  function spriteInstall(): Buffer {
+  /**
+   * The sheet the stand-in picture is cut from, and the one sprite of it the
+   * extraction looks for — a fixture detail only because the stand-in is a
+   * fixed choice rather than something the XML names.
+   */
+  const STAND_IN_SHEET: Parameters<typeof buildSpriteIndex>[0][number] = {
+    name: 'lofiInterfaceBig',
+    sprites: [[2, 4, 3, 1, 1, 1]],
+  };
+
+  function spriteInstall(
+    sheets: Parameters<typeof buildSpriteIndex>[0] = [STAND_IN_SHEET],
+  ): Buffer {
     return buildSerializedFile([
       fakeAtlas('mapObjects', 4, 2),
       {
         name: 'spritesheetf',
-        data: buildSpriteIndex([
-          { name: 'lofiObj3', sprites: [[0xa3, 4, 1, 0, 2, 2]] },
-          { name: 'portals', sprites: [[5, 4, 0, 0, 2, 1]] },
-        ]),
+        data: buildSpriteIndex(
+          [
+            { name: 'lofiObj3', sprites: [[0xa3, 4, 1, 0, 2, 2]] },
+            { name: 'portals', sprites: [[5, 4, 0, 0, 2, 1]] },
+            { name: 'textile4x4', sprites: [[1, 4, 3, 1, 1, 1]] },
+            ...sheets,
+          ],
+          [{ name: 'playerskins', action: 0, direction: 0, rect: [4, 2, 1, 1, 1] }],
+        ),
       },
       { name: 'objects1', data: OBJECTS_WITH_SPRITES },
     ]);
@@ -409,8 +549,9 @@ describe('sprites.bin', () => {
     expect(sprites!.readUInt32LE(8)).toBe(1);
     const atlasWidth = sprites!.readUInt32LE(12);
     const count = sprites!.readUInt32LE(20);
-    // The two items share art, so three object types fill two slots.
-    expect(count).toBe(3);
+    // The two items share art, so three object types fill two slots; the
+    // stand-in, the skin and the dye's cloth are three more keys.
+    expect(count).toBe(6);
 
     const entries = new Map<number, { x: number; y: number; w: number; h: number }>();
     for (let i = 0; i < count; i++) {
@@ -432,13 +573,59 @@ describe('sprites.bin', () => {
     // Shared art shares a slot.
     expect(entries.get(0x7b)).toEqual(entries.get(0x7c));
 
-    // The pixel the entry points at is the pixel the atlas held: the fixture's
-    // ramp writes y * width + x + 1, and the 2x2 sprite sits at (1, 0).
+    // The pixel the entry points at is the pixel the atlas held, turned the
+    // right way up: the fixture's ramp writes row * width + column + 1 counting
+    // from the *bottom* row, as Unity stores a texture, and the 2x2 sprite sits
+    // at (1, 0) counting from the top. So the sprite's own top-left pixel is
+    // the atlas's bottom row, one column in — 1 * 4 + 1 + 1.
     const key = entries.get(0x7b)!;
     const pixels = sprites!.subarray(24 + count * 20);
     const first = pixels.readUInt32LE((key.y * atlasWidth + key.x) * 4);
-    expect(first).toBe((0xff000000 | (0 * 4 + 1 + 1)) >>> 0);
+    expect(first).toBe((0xff000000 | (1 * 4 + 1 + 1)) >>> 0);
+    // And the row below it is the row above in memory, not the same row twice.
+    const below = pixels.readUInt32LE(((key.y + 1) * atlasWidth + key.x) * 4);
+    expect(below).toBe((0xff000000 | (0 * 4 + 1 + 1)) >>> 0);
   });
+
+  it('packs a skin by its standing frame and a dye by the cloth it weaves', () => {
+    const assets = spriteInstall();
+    const objects = extractGameData(assets).files.find((f) => f.name === 'objects.xml')!;
+    const sprites = buildSpritesFile(assets, objects.content.toString('utf8'))!;
+
+    const types = packedTypes(sprites);
+    // The skin, by its own object type, from a sheet that is animated only.
+    expect(types).toContain(0x346);
+    // The cloth, by the number the dye carries rather than the dye's own type:
+    // that number is what the setting holds, and every dye's own icon is the
+    // same little bottle. So the dye itself is not a key here.
+    expect(types).toContain(0x4000001);
+    expect(types).not.toContain(0x811);
+  });
+
+  it('packs a stand-in for the choices the game ships no art for', () => {
+    const assets = spriteInstall();
+    const objects = extractGameData(assets).files.find((f) => f.name === 'objects.xml')!;
+    const sprites = buildSpritesFile(assets, objects.content.toString('utf8'))!;
+
+    expect(packedTypes(sprites)).toContain(FALLBACK_TYPE);
+  });
+
+  it('leaves the stand-in out rather than guessing when its art has moved', () => {
+    // A future patch that renames the interface sheet costs the grid its
+    // stand-in and nothing else: the overlay draws the label for those tiles
+    // again, which is what it did before there was a stand-in at all.
+    const assets = spriteInstall([{ name: 'someOtherSheet', sprites: [[2, 4, 3, 1, 1, 1]] }]);
+    const objects = extractGameData(assets).files.find((f) => f.name === 'objects.xml')!;
+    const sprites = buildSpritesFile(assets, objects.content.toString('utf8'))!;
+
+    expect(packedTypes(sprites)).not.toContain(FALLBACK_TYPE);
+  });
+
+  /** Every object type the built file carries a picture of. */
+  function packedTypes(sprites: Buffer): number[] {
+    const count = sprites.readUInt32LE(20);
+    return Array.from({ length: count }, (_unused, i) => sprites.readUInt32LE(24 + i * 20));
+  }
 
   it('is extracted alongside the documents it illustrates', () => {
     const result = extractGameData(spriteInstall());

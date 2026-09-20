@@ -45,6 +45,18 @@ export class StatOverrides {
   readonly #originals = new Map<number, number>();
   /** statId → the value the client was last made to see, for ids we drive. */
   readonly #applied = new Map<number, number>();
+  /** statId → what it reads as when no status ever carried it. */
+  readonly #absent: ReadonlyMap<number, number>;
+
+  /**
+   * @param absent the value to restore for a stat the server never sent, for
+   *   the ids whose "absent" is not zero. Stat 2 is the one that matters: a
+   *   size the server leaves out is a size of 100, and restoring it as zero
+   *   would make the object invisible instead of ordinary.
+   */
+  constructor(absent: ReadonlyMap<number, number> = new Map()) {
+    this.#absent = absent;
+  }
 
   /** Whether anything is currently being held away from the server's value. */
   get active(): boolean {
@@ -139,7 +151,8 @@ export class StatOverrides {
       return false;
     }
 
-    stats.push({ id, value: this.#originals.get(id) ?? ABSENT_VALUE, stackCount: 0 });
+    const restored = this.#originals.get(id) ?? this.#absent.get(id) ?? ABSENT_VALUE;
+    stats.push({ id, value: restored, stackCount: 0 });
     return true;
   }
 }

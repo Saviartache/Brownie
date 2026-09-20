@@ -312,3 +312,124 @@ describe('ProxySession', () => {
     expect(h.server().sent).toHaveLength(sentBefore);
   });
 });
+
+/**
+ * The queue as a plugin actually reaches it: through `sendToServer`, with a
+ * real encoder, a real cipher and a real socket underneath.
+ *
+ * The unit tests in `outbound.test.ts` cover the ordering rules. What is worth
+ * proving here is the two things only the wiring can get wrong — that an
+ * unpaced packet still leaves during the call, and that a held one is stamped
+ * when it leaves rather than when it was asked for.
+ */
+describe('SessionContext and the outbound queue', () => {
+  function connected(): {
+    h: ReturnType<typeof harness>;
+    world: WorldState;
+    view: SessionContext;
+    toServer: () => { name: string; fields: Readonly<Record<string, unknown>> }[];
+  } {
+    const h = harness();
+    // The first client packet is what opens the server link.
+    h.client.receive(h.gameClient.encipher(teleportFrame(1, 'x')));
+    const world = new WorldState();
+    world.markConnected();
+    const view = new SessionContext(h.session, world, registry, testLogger(h.sink));
+
+    // **Each frame is deciphered exactly once.** RC4 is a keystream, not a
+    // function of the bytes in front of it, so reading the same frame twice
+    // advances the state past everything after it and turns the rest of the
+    // conversation into noise — which is the same thing that happens on a live
+    // connection when one packet goes missing.
+    let read = 0;
+    const decoded: { name: string; fields: Readonly<Record<string, unknown>> }[] = [];
+    const toServer = (): typeof decoded => {
+      const frames = h.server().sent;
+      for (; read < frames.length; read++) {
+        const frame = frames[read];
+        if (frame === undefined) continue;
+        decoded.push(decodeFrame(registry, h.gameServer.decipher(frame)));
+      }
+      // The session's own forwarding of the packet that opened the link is not
+      // what any of this is about.
+      return decoded.filter((packet) => packet.name !== 'TELEPORT');
+    };
+    return { h, world, view, toServer };
+  }
+
+  it('sends an escape during the call, whatever else is waiting', () => {
+    const c = connected();
+    // Two item moves first: the lane they share is now busy for a full second.
+    c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    c.view.sendToServer('INVENTORYSWAP', swapFields(5));
+    // An escape is somebody's life and is not in the table at all.
+    c.view.sendToServer('ESCAPE', {});
+
+    expect(c.toServer().map((packet) => packet.name)).toEqual(['INVENTORYSWAP', 'ESCAPE']);
+  });
+
+  it('holds the second item move rather than putting both on the wire', () => {
+    const c = connected();
+    c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    c.view.sendToServer('USEITEM', {
+      time: 0,
+      slotObject: { objectId: 1, slotId: 4, objectType: 2594 },
+      itemUsePos: { x: 0, y: 0 },
+      useType: 1,
+      unknownInt: 0,
+    });
+
+    // This is the collision, on the wire, with the real encoder: one packet,
+    // not two inside a millisecond.
+    expect(c.toServer()).toHaveLength(1);
+  });
+
+  it('stamps a held packet with the clock of the moment it leaves', async () => {
+    const c = connected();
+    c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    c.view.sendToServer('INVENTORYSWAP', swapFields(5));
+
+    // The client's clock, as the server has been hearing it — and moved on by
+    // more than the lane's spacing while the second move waited.
+    c.world.calibrateClientClock(500_000);
+    await waitFor(() => c.toServer().length === 2);
+
+    const [first, second] = c.toServer();
+    // The first left before the calibration, on the only clock there was: the
+    // milliseconds since this connection opened, which is a handful.
+    expect(first?.fields['time']).toBeLessThan(1000);
+    // Not the zero it was built with: a stamp the server reads as going
+    // backwards is dropped without a word, which is indistinguishable from the
+    // move simply not working.
+    expect(second?.fields['time']).toBeGreaterThanOrEqual(500_000);
+  });
+
+  it('stops sending once the session has gone', async () => {
+    const c = connected();
+    c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    c.view.sendToServer('INVENTORYSWAP', swapFields(5));
+    c.view.outbound.dispose();
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(c.toServer()).toHaveLength(1);
+  });
+});
+
+/** An inventory move, with the fields the session rewrites left at zero. */
+function swapFields(slotId: number): Record<string, unknown> {
+  return {
+    time: 0,
+    position: { x: 0, y: 0 },
+    slotObject1: { objectId: 100, slotId: 0, objectType: 2594 },
+    slotObject2: { objectId: 1, slotId, objectType: -1 },
+  };
+}
+
+/** Polls until a condition holds, or gives up — the queue runs on real timers. */
+async function waitFor(done: () => boolean, timeoutMs = 3000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!done()) {
+    if (Date.now() > until) throw new Error('timed out waiting for the queue');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}

@@ -87,8 +87,9 @@ export interface SendOptions {
    * Names the intent, so a newer request replaces an older one still waiting.
    *
    * A feature that asks every tick would otherwise queue a tick's worth of
-   * duplicates behind one slow slot and then send all of them. The key is
-   * scoped to the plugin by the host, so two plugins cannot collide on one.
+   * duplicates behind one slow slot and then send all of them. The name is
+   * session-wide and nothing scopes it, so a plugin prefixes its own id —
+   * `auto-loot:move` — rather than trusting `move` to be unclaimed.
    */
   readonly key?: string;
   /**
@@ -111,13 +112,18 @@ export interface SendOptions {
   /** How long to poll {@link confirm} for. Defaults to the queue's own window. */
   readonly confirmWindowMs?: number;
   /**
-   * Called the moment it actually leaves, with the time it left.
+   * Called the moment it actually leaves.
    *
    * **This, not the call to send, is when a plugin's own clock starts.** A
    * cooldown measured from the request is measured from a moment that has
    * nothing to do with when the server heard it.
+   *
+   * Deliberately given no time of its own: the queue runs on wall time and a
+   * plugin on the world's clock, and handing one across would be two quantities
+   * that look alike and are not. Read `session.world.gameTimeMs` here — this is
+   * "now".
    */
-  readonly onSent?: (sentAtMs: number) => void;
+  readonly onSent?: () => void;
   /** Called exactly once, when the journey ends. */
   readonly onOutcome?: (outcome: SendOutcome) => void;
 }

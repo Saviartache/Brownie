@@ -855,6 +855,35 @@ float AssetTileSize() {
     return ImGui::GetTextLineHeight() * 4.0F;
 }
 
+/// Reads a `#rrggbb` sprite key as a colour.
+///
+/// The runtime spells a colour this way precisely because it cannot be an
+/// object type: everything else in this field is decimal digits, so one leading
+/// `#` tells the two apart with no flag on the wire.
+bool ColourKey(std::string_view key, ImU32& out) {
+    if (key.size() != 7 || key.front() != '#') return false;
+    std::uint32_t rgb = 0;
+    for (const char digit : key.substr(1)) {
+        const int value = digit >= '0' && digit <= '9'   ? digit - '0'
+                          : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+                          : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10
+                                                         : -1;
+        if (value < 0) return false;
+        rgb = (rgb << 4U) | static_cast<std::uint32_t>(value);
+    }
+    out = IM_COL32((rgb >> 16U) & 0xFFU, (rgb >> 8U) & 0xFFU, rgb & 0xFFU, 0xFF);
+    return true;
+}
+
+/// One colour multiplied by another, which is how "off" is said here.
+ImU32 Dimmed(ImU32 colour, const ImVec4& by) {
+    const auto channel = [colour](unsigned shift, float scale) {
+        return static_cast<int>(static_cast<float>((colour >> shift) & 0xFFU) * scale);
+    };
+    return IM_COL32(channel(IM_COL32_R_SHIFT, by.x), channel(IM_COL32_G_SHIFT, by.y),
+                    channel(IM_COL32_B_SHIFT, by.z), channel(IM_COL32_A_SHIFT, 1.0F));
+}
+
 /// One clickable picture of the grid.
 ///
 /// The sprite is drawn to fit the tile at its own aspect, centred; an option
@@ -866,7 +895,8 @@ float AssetTileSize() {
 /// it *is*.
 void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
                    PendingEdit& edit, const ActionSink& emit, const SpriteAtlas& atlas,
-                   const std::vector<std::string>& chosen, std::size_t option_index, float cell) {
+                   const std::vector<std::string>& chosen, std::size_t option_index, float cell,
+                   bool single) {
     const SettingOption& option = row.options[option_index];
     const bool on = std::find(chosen.begin(), chosen.end(), option.value) != chosen.end();
 
@@ -893,7 +923,11 @@ void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t
     }
 
     // The sprite the option names, or its own value when it names none - an
-    // item chooser's options are their own sprite keys.
+    // item chooser's options are their own sprite keys. A choice the game ships
+    // no art for - and it ships items whose own texture index is a hole in its
+    // data - draws the stand-in the extraction packed for exactly that, because
+    // a tile of clipped label text in a grid of pictures reads as a fault
+    // rather than as a choice. The name is on the tooltip either way.
     //
     // The sprite is drawn one filled rectangle per source pixel, fitted to the
     // tile at its own aspect and centred. That is the whole point of this
@@ -903,14 +937,36 @@ void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t
     // texture upload at all. The unchosen pictures are dimmed by multiplying
     // each pixel with the theme's disabled-text colour, so what reads as "off"
     // stays a theme colour rather than a constant someone picked.
-    const SpriteRect* const rect = atlas.find(option.sprite.empty() ? option.value : option.sprite);
-    if (rect != nullptr) {
+    //
+    // A key that is a colour rather than a picture fills the tile with it: the
+    // game ships no art for a dye that is one flat colour, because what it
+    // draws is the character tinted - so the colour is the honest picture, and
+    // a grid of four hundred of them is the only readable way to pick one.
+    const std::string& key = option.sprite.empty() ? option.value : option.sprite;
+    ImU32 swatch = 0;
+    const bool is_colour = ColourKey(key, swatch);
+    const SpriteRect* const named = is_colour ? nullptr : atlas.find(key);
+    const SpriteRect* const rect =
+        named != nullptr ? named : (is_colour ? nullptr : atlas.stand_in());
+    if (is_colour) {
+        const ImVec4 dim = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+        const float inset = ImGui::GetStyle().FramePadding.x + 2.0F;
+        const ImVec2 from(origin.x + inset, origin.y + inset);
+        const ImVec2 to(origin.x + cell - inset, origin.y + cell - inset);
+        draws->AddRectFilled(from, to, on ? swatch : Dimmed(swatch, dim));
+        draws->AddRect(from, to, ImGui::GetColorU32(ImGuiCol_Border));
+    } else if (rect != nullptr) {
         // An integer pixel size wherever one fits, so the art keeps its own
         // proportions rather than being stretched to the last sliver of tile -
-        // the same rule every pixel-art game draws by.
+        // the same rule every pixel-art game draws by. Art too big for the tile
+        // is the one case that cannot have it: the game's cloths run to
+        // sixty-four pixels square against a tile of about fifty, and a whole
+        // pixel each would draw a Void Swirl straight over its neighbours. So
+        // below one the step becomes a fraction of a pixel - the art shrinks to
+        // fit, which is what every other tile already does.
         const float inner = cell - ImGui::GetStyle().FramePadding.x * 2.0F - 2.0F;
-        const float step = std::max(
-            1.0F, std::floor(std::min(inner / rect->width, inner / rect->height)));
+        const float fit = std::min(inner / rect->width, inner / rect->height);
+        const float step = fit >= 1.0F ? std::floor(fit) : fit;
         const float at_x = origin.x + (cell - rect->width * step) * 0.5F;
         const float at_y = origin.y + (cell - rect->height * step) * 0.5F;
 
@@ -920,6 +976,13 @@ void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t
         const float tint_b = on ? 1.0F : dim.z;
         const float tint_a = on ? 1.0F : (dim.w * 0.5F + 0.5F);
 
+        // The stand-in is a shape, not art: it is drawn in the theme's own text
+        // colour instead of its own, because the game draws that glyph as a
+        // black outline and a black outline on a dark overlay is no picture at
+        // all. Real art keeps the colours the game gave it.
+        const ImVec4 shape = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        const bool own_colours = named != nullptr;
+
         const std::uint8_t* const pixels = atlas.pixels();
         const std::uint32_t atlas_width = atlas.width();
         for (std::uint16_t py = 0; py < rect->height; ++py) {
@@ -927,20 +990,31 @@ void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t
                 const std::uint8_t* const pixel =
                     pixels + ((rect->y + py) * atlas_width + rect->x + px) * 4;
                 if (pixel[3] == 0) continue;
-                const auto channel = [pixel](std::size_t at, float tint) {
-                    return static_cast<int>(static_cast<float>(pixel[at]) * tint);
+                const auto channel = [pixel, own_colours](std::size_t at, float tint, float flat) {
+                    const float source =
+                        own_colours ? static_cast<float>(pixel[at]) : flat * 255.0F;
+                    return static_cast<int>(source * tint);
                 };
                 const ImU32 colour =
-                    IM_COL32(channel(0, tint_r), channel(1, tint_g), channel(2, tint_b),
+                    IM_COL32(channel(0, tint_r, shape.x), channel(1, tint_g, shape.y),
+                             channel(2, tint_b, shape.z),
                              static_cast<int>(static_cast<float>(pixel[3]) * tint_a));
-                const float x0 = at_x + px * step;
-                const float y0 = at_y + py * step;
-                draws->AddRectFilled(ImVec2{x0, y0}, ImVec2{x0 + step, y0 + step}, colour);
+                // Edges snapped to whole pixels, so two neighbouring source
+                // pixels share an edge exactly: a fractional step otherwise
+                // leaves a hairline of background between them, where the fill
+                // is anti-aliased against nothing.
+                const float x0 = std::floor(at_x + px * step);
+                const float y0 = std::floor(at_y + py * step);
+                draws->AddRectFilled(
+                    ImVec2{x0, y0},
+                    ImVec2{std::floor(at_x + (px + 1) * step), std::floor(at_y + (py + 1) * step)},
+                    colour);
             }
         }
     } else {
-        // No picture: the label, clipped to the tile, so the choice is still
-        // told apart from its neighbours.
+        // No picture and no stand-in either, which means a sprite file from
+        // before the stand-in was packed: the label, clipped to the tile, so
+        // the choice is still told apart from its neighbours.
         const ImVec4 clip(origin.x, origin.y, origin.x + cell, origin.y + cell);
         const ImVec2 text_at(origin.x + ImGui::GetStyle().FramePadding.x,
                              origin.y + ImGui::GetStyle().FramePadding.y);
@@ -959,37 +1033,27 @@ void DrawAssetTile(const PluginRow& plugin, const SettingRow& row, std::uint64_t
     }
 
     if (!clicked) return;
-    const std::string joined = ToggleChosen(row, chosen, option.value, !on);
+    // A one-of-N grid chooses; it does not unchoose, any more than a drop-down
+    // does - so clicking the tile that is already on is nothing at all.
+    if (single && on) return;
+    const std::string next = single ? option.value : ToggleChosen(row, chosen, option.value, !on);
     edit.Hold(plugin.id, row.key);
-    edit.SetText(joined);
-    SendSetting(plugin, row, joined, emit);
+    edit.SetText(next);
+    SendSetting(plugin, row, next, emit);
     edit.Sent(version);
 }
 
-/// A many-of-N choice, drawn as a grid of the options' own pictures.
+/// The grid itself, under whichever chooser owns it.
 ///
-/// The same value as the checkbox list - one canonical string of chosen keys -
-/// and the same search box; the grid is only how it reads. Rows are clipped, so
-/// four thousand items draw four thousand tiles' worth of choice but only the
-/// rows on screen. Without sprites it is the checkbox list, which is the honest
-/// control when there is nothing to show a picture of.
-void DrawAssetMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
-                          PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
-                          const SpriteAtlas& atlas, std::vector<std::size_t>& matches) {
-    if (!atlas.ready()) {
-        if (atlas.failed()) {
-            ImGui::TextDisabled("sprites could not be read - a list instead");
-        }
-        DrawMultiSelect(plugin, row, version, edit, filters, emit);
-        return;
-    }
-
-    const std::string current =
-        edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
-    std::vector<std::string> chosen = SplitChosen(current);
-
-    ImGui::TextUnformatted(row.label.c_str());
-
+/// The search box, the filtered set, the clipped rows and the tiles - all of it
+/// is the same whether one choice is being made or many, because the only
+/// difference between those is what a click does and what counts as chosen.
+/// Rows are clipped, so four thousand items draw four thousand tiles' worth of
+/// choice but only the rows on screen.
+void DrawAssetGrid(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                   PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
+                   const SpriteAtlas& atlas, std::vector<std::size_t>& matches,
+                   const std::vector<std::string>& chosen, bool single) {
     std::string filter;
     if (row.options.size() > kSearchableFrom) {
         filter = DrawFilterBox(plugin, row, filters);
@@ -1028,12 +1092,66 @@ void DrawAssetMultiSelect(const PluginRow& plugin, const SettingRow& row, std::u
                     if (at >= matches.size()) break;
                     if (column != 0) ImGui::SameLine();
                     DrawAssetTile(plugin, row, version, edit, emit, atlas, chosen, matches[at],
-                                  cell);
+                                  cell, single);
                 }
             }
         }
     }
     ImGui::EndChild();
+}
+
+/// A many-of-N choice, drawn as a grid of the options' own pictures.
+///
+/// The same value as the checkbox list - one canonical string of chosen keys -
+/// and the same search box; the grid is only how it reads. Without sprites it
+/// is the checkbox list, which is the honest control when there is nothing to
+/// show a picture of.
+void DrawAssetMultiSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                          PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
+                          const SpriteAtlas& atlas, std::vector<std::size_t>& matches) {
+    if (!atlas.ready()) {
+        if (atlas.failed()) {
+            ImGui::TextDisabled("sprites could not be read - a list instead");
+        }
+        DrawMultiSelect(plugin, row, version, edit, filters, emit);
+        return;
+    }
+
+    const std::string current =
+        edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
+    ImGui::TextUnformatted(row.label.c_str());
+    DrawAssetGrid(plugin, row, version, edit, filters, emit, atlas, matches, SplitChosen(current),
+                  false);
+}
+
+/// A one-of-N choice, drawn as that same grid.
+///
+/// The value is one key, as on the drop-down this falls back to - so the chosen
+/// set the grid draws is that one key, and clicking a tile replaces it instead
+/// of adding to it. The chosen option's name is shown beside the label: a
+/// picture says which skin is worn, but not what it is called, and the grid may
+/// be scrolled away from it.
+void DrawAssetSelect(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
+                     PendingEdit& edit, MultiSelectFilters& filters, const ActionSink& emit,
+                     const SpriteAtlas& atlas, std::vector<std::size_t>& matches) {
+    if (!atlas.ready()) {
+        if (atlas.failed()) {
+            ImGui::TextDisabled("sprites could not be read - a list instead");
+        }
+        DrawSelect(plugin, row, version, edit, emit);
+        return;
+    }
+
+    const std::string current =
+        edit.Holds(plugin.id, row.key) ? std::string{edit.TextView()} : row.value;
+    ImGui::TextUnformatted(row.label.c_str());
+    for (const SettingOption& option : row.options) {
+        if (option.value != current) continue;
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", option.label.c_str());
+        break;
+    }
+    DrawAssetGrid(plugin, row, version, edit, filters, emit, atlas, matches, {current}, true);
 }
 
 void DrawText(const PluginRow& plugin, const SettingRow& row, std::uint64_t version,
@@ -1115,6 +1233,9 @@ void DrawSetting(const PluginRow& plugin, const SettingRow& row, std::uint64_t v
             break;
         case SettingKind::kAssetMultiSelect:
             DrawAssetMultiSelect(plugin, row, version, edit, filters, emit, atlas, asset_matches);
+            break;
+        case SettingKind::kAssetSelect:
+            DrawAssetSelect(plugin, row, version, edit, filters, emit, atlas, asset_matches);
             break;
         case SettingKind::kText:
             DrawText(plugin, row, version, edit, emit);
@@ -1734,9 +1855,14 @@ void SpriteAtlas::Shutdown() noexcept {
     *this = SpriteAtlas{};
 }
 
+const SpriteRect* SpriteAtlas::stand_in() const {
+    const auto found = rects_.find(0);
+    return found == rects_.end() ? nullptr : &found->second;
+}
+
 const SpriteRect* SpriteAtlas::find(std::string_view key) const {
     // The keys are the runtime's decimal object types; anything else is not one
-    // of ours, and answering null is the widget's cue to draw the label.
+    // of ours, and answering null is the widget's cue to draw the stand-in.
     if (key.empty() || key.size() > 10) return nullptr;
     std::uint32_t value = 0;
     for (const char digit : key) {

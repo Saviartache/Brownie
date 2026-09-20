@@ -1,5 +1,6 @@
 import {
   MutablePacket,
+  SendOutcome,
   type EntityView,
   type InventoryView,
   type ItemSlotView,
@@ -532,7 +533,9 @@ describe('the auto-ability plugin', () => {
       self,
       world,
       server: { host: '', port: 0 },
-      sendToServer: (name, fields) => {
+      // The real session's contract, spelled out: a cast's interval starts when
+      // the packet leaves, and here it leaves at once.
+      sendToServer: (name, fields, options) => {
         expect(name).toBe('USEITEM');
         const position = recordAt(fields, 'itemUsePos');
         const slotObject = recordAt(fields, 'slotObject');
@@ -548,6 +551,8 @@ describe('the auto-ability plugin', () => {
           slotId: numberAt(slotObject, 'slotId'),
           objectId: numberAt(slotObject, 'objectId'),
         });
+        options?.onSent?.();
+        options?.onOutcome?.(SendOutcome.Sent);
       },
       sendToClient: () => undefined,
       notify: () => undefined,

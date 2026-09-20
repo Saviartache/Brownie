@@ -629,6 +629,56 @@ describe('settings', () => {
     expect(h.host.status('badassets')?.state).toBe(PluginState.Failed);
   });
 
+  it('holds a picture select to the same value contract as a select', () => {
+    const h = host();
+    let handle: ReturnType<PluginContext['settings']['assetSelect']> | undefined;
+    h.host.load(
+      plugin('skins', (ctx) => {
+        handle = ctx.settings.assetSelect('skin', {
+          default: '0',
+          options: [
+            ['0', 'Default'],
+            ['838', 'Merlin Wizard', '838'],
+          ],
+        });
+      }),
+    );
+
+    handle!.set('838');
+    expect(h.host.settingsOf('skins')!.value('skin')).toBe('838');
+    // A key that is not an option is refused, as on any select — a skin the
+    // class cannot wear arrives from persisted config on every class switch.
+    h.host.settingsOf('skins')!.apply('skin', '999');
+    expect(handle!.get()).toBe('838');
+
+    // And its options follow the game: replaced whole, pictures and all.
+    handle!.setOptions([
+      ['0', 'Default', '782'],
+      ['901', 'Shield Knight'],
+    ]);
+    const descriptor = h.host
+      .settingsOf('skins')!
+      .descriptors()
+      .find((candidate) => candidate.key === 'skin');
+    expect(descriptor?.kind === 'assetSelect' && descriptor.options).toEqual([
+      ['0', 'Default', '782'],
+      ['901', 'Shield Knight'],
+    ]);
+    // The value it held is no longer on offer, so it falls back to the default
+    // rather than staying on a skin this class cannot wear.
+    expect(handle!.get()).toBe('0');
+  });
+
+  it('refuses a picture select whose default is not among its options', () => {
+    const h = host();
+    h.host.load(
+      plugin('badskins', (ctx) => {
+        ctx.settings.assetSelect('skin', { default: 'z', options: [['a', 'A', '1']] } as never);
+      }),
+    );
+    expect(h.host.status('badskins')?.state).toBe(PluginState.Failed);
+  });
+
   it('holds a picture multi-select to the same value contract as a multi-select', () => {
     const h = host();
     let handle: ReturnType<PluginContext['settings']['multiSelect']> | undefined;

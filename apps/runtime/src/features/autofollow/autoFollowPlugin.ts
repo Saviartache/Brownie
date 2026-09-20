@@ -19,6 +19,14 @@
  * chase and ends an engagement, a click on a monster does the reverse, and a
  * click on bare ground stops both. See `dodge/engageRing`.
  *
+ * **It walks the ally's own route, not the line to them.** Aiming straight at
+ * somebody works until they round a corner, and then it holds the character
+ * against the corner for as long as they stand behind it — the native mover
+ * walks a heading and tests nothing on the way. So the ally's recent positions
+ * are remembered and the follow walks the furthest one it can reach in a clear
+ * line, which in open ground is the ally themselves and costs nothing. See
+ * {@link FollowTrail}.
+ *
  * **It lets go on its own.** Following stops when the ally is gone from the map
  * — dead, disconnected or left — and, so the character is not dragged past the
  * fight it was brought to, when the boss is within combat range. Both are the
@@ -35,8 +43,10 @@ import {
 } from '@brownie/plugin-api';
 import { bareName } from '../../state/playerName.js';
 import { nearestBoss, type BossLookup } from '../autoteleport/bossApproach.js';
+import { GroundCache } from '../dodge/GroundCache.js';
 import { PICK_RADIUS_TILES, WALK_HOLD_MS } from './constants.js';
-import { followPoint, nearestPlayerTo, tilesBetween } from './followMath.js';
+import { FollowTrail } from './FollowTrail.js';
+import { clearLineBetween, nearestPlayerTo, tilesBetween } from './followMath.js';
 
 /** Asks the native module to walk, or to stop — the one thing a plugin cannot do alone. */
 export interface AutoFollowOutput {
@@ -76,10 +86,26 @@ interface FollowState {
   manualId: number | undefined;
   /** Whether a walk target is currently published, so it can be stood down. */
   commanding: boolean;
+  /** Where the ally has been, for getting round what the straight line hits. */
+  readonly trail: FollowTrail;
+  /**
+   * One walkability answer per tile, shared by every line test in a tick.
+   *
+   * **Per session rather than per plugin**, because the cache is keyed on the
+   * map it was filled from: two connections looking at two maps through one
+   * cache would throw each other's answers away every tick, which is the cost
+   * of the feature paid twice over for nothing.
+   */
+  readonly ground: GroundCache;
 }
 
 function newState(): FollowState {
-  return { manualId: undefined, commanding: false };
+  return {
+    manualId: undefined,
+    commanding: false,
+    trail: new FollowTrail(),
+    ground: new GroundCache(),
+  };
 }
 
 export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
@@ -183,6 +209,7 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         if (activeTarget(state) !== undefined) session.notify('Follow cancelled.', 'Auto Follow');
         state.manualId = undefined;
         inputs.followTarget.clear();
+        state.trail.clear();
       };
 
       context.packets.on('NEWTICK', (_packet, session) => {
@@ -217,9 +244,16 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
         const target = session.world.entity(targetId);
         if (target === undefined || !target.isPlayer) {
           dropActive(state);
+          state.trail.clear();
           standDown(session, state);
           return;
         }
+
+        // Recorded before any of the reasons to stand still, so a follow parked
+        // at the boss or yielding to the player's own hand still knows where
+        // the ally went while it was waiting.
+        state.trail.aim(targetId);
+        state.trail.record(target);
 
         if (stopNearBossSetting.get()) {
           const boss = nearestBoss(session.world.enemies(), inputs.isBoss, self);
@@ -229,7 +263,13 @@ export function createAutoFollowPlugin(inputs: AutoFollowInputs): Plugin {
           }
         }
 
-        const point = followPoint(self, target, keepDistanceSetting.get());
+        // Aimed once per tick and keyed on the tile the character stands in, so
+        // the dozens of samples the line tests below take between them cost a
+        // few map lookups rather than one apiece.
+        state.ground.aim(session.world, self.x, self.y, session.world.gameTimeMs);
+        const point = state.trail.steer(self, target, keepDistanceSetting.get(), (from, to) =>
+          clearLineBetween(from, to, (x, y) => state.ground.canStand(x, y, 0)),
+        );
         if (point === undefined) {
           standDown(session, state);
           return;

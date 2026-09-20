@@ -22,7 +22,13 @@
  * to do it.
  */
 
-import { PluginCategory, definePlugin, type Plugin, type SessionView } from '@brownie/plugin-api';
+import {
+  PluginCategory,
+  SendPriority,
+  definePlugin,
+  type Plugin,
+  type SessionView,
+} from '@brownie/plugin-api';
 import { ConditionEffect, hasConditionEffect } from '../../constants/ConditionEffect.js';
 import { isSafeZone } from '../../constants/SafeZones.js';
 import { findPotion } from './findPotion.js';
@@ -40,6 +46,15 @@ export interface AutoDrinkInputs {
  * is the other case and uses a different one — see auto-loot.
  */
 const USE_TYPE_SELF = 1;
+
+/**
+ * How long a queued potion is still worth drinking.
+ *
+ * Generous, because a bar under its threshold stays under it: what keeps the
+ * request fresh is that each tick replaces it, not that it lapses. This is the
+ * backstop for a lane that has gone quiet altogether.
+ */
+const DRINK_EXPIRY_MS = 2000;
 
 /** When the last drink of each kind went out, per session. */
 interface DrinkClock {
@@ -107,7 +122,21 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
       const kindOf = (objectType: number): Quaff | undefined =>
         quaffKindOf(objectType, inputs.item);
 
-      /** @returns true once a potion has been sent, so the tick stops there. */
+      /**
+       * Asks for a potion.
+       *
+       * **Asks, rather than sends.** Every item packet the runtime produces
+       * goes through the session's one outbound queue, and a drink can find the
+       * lane busy with a pickup — so the cooldown below starts when the potion
+       * actually leaves, not when it was wanted. Until then the request is
+       * re-made each tick and supersedes itself under the same name, so what
+       * eventually goes out names the slot as the inventory stands at that
+       * moment rather than the one the bar first crossed at.
+       *
+       * It goes in at {@link SendPriority.Survival}, which is what puts it in
+       * front of a queue full of looting. It does not jump the lane's spacing:
+       * nothing does, because that spacing is what the disconnects were about.
+       */
       const drink = (
         session: SessionView,
         wanted: Quaff,
@@ -116,29 +145,43 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
         percent: number,
         lastAtMs: number,
         nowMs: number,
-      ): boolean => {
-        if (maximum <= 0 || current > (maximum * percent) / 100) return false;
-        if (nowMs - lastAtMs < cooldownMs.get()) return false;
+        onSent: () => void,
+      ): void => {
+        if (maximum <= 0 || current > (maximum * percent) / 100) return;
+        if (nowMs - lastAtMs < cooldownMs.get()) return;
 
         const found = findPotion(session.self.inventory, wanted, kindOf, beltFirst.get());
-        if (found === undefined) return false;
+        if (found === undefined) return;
 
-        session.sendToServer('USEITEM', {
-          // The client's own clock, never the connection's: a packet stamped
-          // with the wrong one is dropped by the server without a word, and
-          // nothing acknowledges a drink, so it looks exactly like a potion
-          // that did nothing.
-          time: Math.trunc(session.world.clientTimeMs),
-          slotObject: {
-            objectId: session.self.objectId,
-            slotId: found.slotId,
-            objectType: found.objectType,
+        session.sendToServer(
+          'USEITEM',
+          {
+            // Rewritten by the session at the instant this leaves — the client's
+            // own clock, never the connection's, because a packet stamped with
+            // the wrong one is dropped by the server without a word, and nothing
+            // acknowledges a drink, so it looks exactly like a potion that did
+            // nothing. Filled in here too so the shape of the packet is visible
+            // where it is built.
+            time: Math.trunc(session.world.clientTimeMs),
+            slotObject: {
+              objectId: session.self.objectId,
+              slotId: found.slotId,
+              objectType: found.objectType,
+            },
+            itemUsePos: { x: session.self.x, y: session.self.y },
+            useType: USE_TYPE_SELF,
+            unknownInt: 0,
           },
-          itemUsePos: { x: session.self.x, y: session.self.y },
-          useType: USE_TYPE_SELF,
-          unknownInt: 0,
-        });
-        return true;
+          {
+            priority: SendPriority.Survival,
+            // One outstanding request per bar. Without this, a bar held under
+            // its threshold while the lane is busy queues a potion per tick and
+            // then drinks the lot.
+            key: `auto-drink:${wanted === Quaff.Health ? 'health' : 'magic'}`,
+            expiresInMs: DRINK_EXPIRY_MS,
+            onSent,
+          },
+        );
       };
 
       context.packets.on('NEWTICK', (_packet, session) => {
@@ -152,9 +195,7 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
         // thrown away — and the bar stays under the threshold, so it would be
         // every potion carried, one per cooldown, until the effect wore off.
         const canHeal = !hasConditionEffect(self.conditions, ConditionEffect.Sick);
-        if (
-          drinkHealth.get() &&
-          canHeal &&
+        if (drinkHealth.get() && canHeal) {
           drink(
             session,
             Quaff.Health,
@@ -163,16 +204,29 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
             healthPercent.get(),
             clock.health,
             nowMs,
-          )
-        ) {
-          clock.health = nowMs;
+            () => {
+              clock.health = session.world.gameTimeMs;
+            },
+          );
         }
 
-        if (
-          drinkMagic.get() &&
-          drink(session, Quaff.Magic, self.mp, self.maxMp, magicPercent.get(), clock.magic, nowMs)
-        ) {
-          clock.magic = nowMs;
+        // Both bars are asked about in the same tick, and both may queue: they
+        // are separate wants with separate thresholds, and the queue is what
+        // makes two item packets in one tick safe rather than the collision it
+        // used to be.
+        if (drinkMagic.get()) {
+          drink(
+            session,
+            Quaff.Magic,
+            self.mp,
+            self.maxMp,
+            magicPercent.get(),
+            clock.magic,
+            nowMs,
+            () => {
+              clock.magic = session.world.gameTimeMs;
+            },
+          );
         }
       });
 

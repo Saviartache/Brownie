@@ -470,6 +470,14 @@ extraction writes it: a `BROWNSPR` magic, a version, the atlas size, one
 sync that names no file is a runtime with no game data, and the picture
 controls fall back to their checkbox lists.
 
+Object type `0` in that table is reserved: it is the stand-in the grid draws for
+a choice the game ships no art for — the game numbers its own objects from one,
+and some of its items name a texture index its own sprite index does not carry.
+The module draws that one in the theme's text colour rather than the art's own,
+because it is a shape and not a picture. A file written before the stand-in
+existed simply has no such entry, and those tiles show their label as they used
+to.
+
 An option list too long for one frame — a picker over every item in the game
 runs to hundreds of kilobytes — does not travel in the setting's own options
 field. The setting goes out with that field empty, and the list follows it as
@@ -484,11 +492,19 @@ A setting whose kind is `assetMultiSelect` is a multi-select drawn as a grid of
 the options' own pictures, and carries one more field than the multi-select —
 appended, like every new field: the sprite key of each option, `;`-joined in
 the options' own order and empty for an option that carries none. A key is an
-object type as decimal text, resolved in the sprite file above; an option with
-no key is drawn with its own value as the key, which is how an item chooser
-says "the item is the picture" without sending a field at all. The value on the
-wire is unchanged from a multi-select: the chosen keys, comma-joined, and sent
-back the same way.
+object type as decimal text, resolved in the sprite file above, or a dye's cloth
+number, which that file carries the same way; an option with no key is drawn
+with its own value as the key, which is how an item chooser says "the item is
+the picture" without sending a field at all. A key of `#rrggbb` is not a picture
+at all but a colour, and the tile is filled with it — what a dye that is one
+flat colour actually looks like, and the one thing in a chooser the game ships
+no art for. The value on the wire is unchanged from a multi-select: the chosen
+keys, comma-joined, and sent back the same way.
+
+`assetSelect` is that same grid making one choice instead of many. It carries
+the same appended sprite keys, and its value is one option key — the select's
+own contract, sent back the same way. An overlay with no sprite file draws it as
+the drop-down, as the picture multi-select falls back to the checkbox list.
 
 `slot` is which of that plugin's switches the key moves: the setting it names,
 or empty for the plugin's own switch. It is the bind's identity — what it is
