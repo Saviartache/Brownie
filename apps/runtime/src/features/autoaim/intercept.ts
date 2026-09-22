@@ -35,6 +35,25 @@ export interface InterceptRequest {
    * shot could not reach is refused rather than aimed at.
    */
   readonly maxFlightMs: number;
+  /**
+   * How much of the flight not to lead through, in milliseconds.
+   *
+   * **A time rather than a share, because that is the shape of the error.** The
+   * thing a bullet is actually tested against is the client's own copy of the
+   * monster, and it is some interval behind whatever can be said about it from
+   * here. That interval is a property of the client, not of the monster, so the
+   * ground it costs is `velocity × interval` — nothing against something
+   * standing still, and more the faster the target moves. A share of the lead
+   * would grow with the distance as well, and shorten the lead on a slow
+   * monster far away that was never being missed.
+   *
+   * Comes off the flight the meeting is placed at, never off the flight that
+   * was solved: what the shot can reach is a fact about the weapon, and this is
+   * not about the weapon. The module applies the same number on the frame — see
+   * `game::AimShot::lead_lag_ms` — and this side keeps it in step so that the
+   * fallback point and the solved one describe the same aim.
+   */
+  readonly leadTrimMs?: number;
 }
 
 export interface Intercept {
@@ -91,7 +110,12 @@ export function solveIntercept(request: InterceptRequest): Intercept | undefined
     return undefined;
   }
 
-  const target = targetAt(request, flightMs);
+  // Led through the flight less whatever the target is behind by, and never
+  // past the target itself: a trim longer than the flight is an aim on the
+  // monster, not one behind it.
+  const trim = request.leadTrimMs ?? 0;
+  const ledThrough = Number.isFinite(trim) ? Math.max(flightMs - trim, 0) : flightMs;
+  const target = targetAt(request, ledThrough);
 
   return {
     x: target.x,

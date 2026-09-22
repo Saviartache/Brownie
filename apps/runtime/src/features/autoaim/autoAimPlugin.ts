@@ -146,6 +146,14 @@ export interface AimShot {
   readonly maxFlightMs: number;
   /** How much of the solved offset to apply, where 1 is the whole lead. */
   readonly lead: number;
+  /**
+   * How much of the flight not to lead through, in milliseconds.
+   *
+   * See {@link InterceptRequest.leadTrimMs}. Sent rather than applied here for
+   * the reason everything else in this record is: the meeting is solved again on
+   * the frame, and a trim applied only on this side would be undone by it.
+   */
+  readonly leadTrimMs: number;
 }
 
 export interface AimRequest {
@@ -303,6 +311,27 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
       // intervals, not a server tick: the aim is renewed far more often than
       // that now, so a longer hold only delays the moment the player's own aim
       // comes back after the last enemy dies.
+      // **The one number here that was measured rather than derived, and it is
+      // stated as a time.** Everything else in the lead comes from somewhere:
+      // the enemy's position out of the client's own tables, its speed out of
+      // readings of them, the flight out of the game's projectile data. What is
+      // left over when a shot still lands in front of a monster is that the copy
+      // a bullet is tested against is some interval behind anything that can be
+      // read about it — and that interval belongs to the client, not to the
+      // monster, so what it costs is the target's own speed through it. Which
+      // is why this is milliseconds and not a percentage: it corrects nothing at
+      // all on something standing still, and more the faster the target moves,
+      // which is the shape the misses have.
+      //
+      // Turn it up while shots still land in front of what is running; turn it
+      // down the moment they start landing behind.
+      const leadTrimMs = context.settings.range('leadTrimMs', {
+        label: 'Aim behind fast targets by (ms)',
+        default: 100,
+        min: 0,
+        max: 300,
+        step: 10,
+      });
       const holdMs = context.settings.range('holdMs', {
         label: 'Keep aiming for (ms)',
         default: 150,
@@ -479,6 +508,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
         const range = projectile.reachTiles;
         if (!(range > 0)) return;
         const lead = leadPercent.get() / 100;
+        const leadTrim = leadTrimMs.get();
 
         // **How long a shot has to hit something with, which is not its
         // lifetime.** The two agree for an ordinary weapon and do not for one
@@ -508,6 +538,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
             maxFlightMs,
             lead,
+            leadTrimMs: leadTrim,
           };
 
           // Where it is *now*, not where the last tick put it: between two
@@ -543,6 +574,7 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
             targetAngularVelocityPerMs: motion.angularVelocityPerMs ?? 0,
             bulletSpeedTilesPerMs: projectile.speedTilesPerMs,
             maxFlightMs,
+            leadTrimMs: leadTrim,
           });
           // **Solving it here is how a target is judged, not how it is aimed
           // at.** An enemy no shot can catch is one to pass over in favour of

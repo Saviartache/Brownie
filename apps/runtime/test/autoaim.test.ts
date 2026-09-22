@@ -90,6 +90,39 @@ describe('solveIntercept', () => {
     expect(solution?.y).toBeCloseTo(3 * Math.sin(0.75), 4);
   });
 
+  // **A time, not a share, because that is the shape of the error.** What a
+  // bullet is tested against is the client's own copy of a monster, and it is
+  // some interval behind anything that can be said about it from here. The
+  // interval belongs to the client, so the ground it costs is the target's own
+  // speed through it — nothing against something standing still, and twice as
+  // much for twice the speed.
+  it('trims the lead by a time, so the correction grows with the target speed', () => {
+    const crossing = { ...still, targetX: 5, targetY: 0 };
+
+    const led = solveIntercept({ ...crossing, targetVelocityY: 0.003 });
+    const trimmed = solveIntercept({ ...crossing, targetVelocityY: 0.003, leadTrimMs: 100 });
+    expect((led?.y ?? 0) - (trimmed?.y ?? 0)).toBeCloseTo(0.003 * 100, 6);
+
+    const quicker = solveIntercept({ ...crossing, targetVelocityY: 0.006 });
+    const quickerTrimmed = solveIntercept({ ...crossing, targetVelocityY: 0.006, leadTrimMs: 100 });
+    expect((quicker?.y ?? 0) - (quickerTrimmed?.y ?? 0)).toBeCloseTo(0.006 * 100, 6);
+
+    // Nothing at all against something standing still, which is most of what a
+    // shot connects with and was never the thing being missed.
+    const standing = solveIntercept({ ...crossing, leadTrimMs: 100 });
+    expect(standing?.x).toBeCloseTo(5);
+    expect(standing?.y).toBeCloseTo(0);
+
+    // And never past the target: a trim longer than the flight is an aim on the
+    // monster rather than one behind it.
+    const over = solveIntercept({ ...crossing, targetVelocityY: 0.003, leadTrimMs: 10_000 });
+    expect(over?.y).toBeCloseTo(0);
+
+    // What the shot can reach is a fact about the weapon, so the trim does not
+    // move it: the flight solved is the flight solved.
+    expect(trimmed?.flightMs).toBeCloseTo(led?.flightMs ?? 0, 6);
+  });
+
   it('refuses a target running away faster than the shot travels', () => {
     expect(
       solveIntercept({
@@ -243,14 +276,37 @@ describe('MotionTracker', () => {
       sight(tracker, atMs, radius * Math.cos(angle), radius * Math.sin(angle));
     };
 
+    // Four, not three: a heading change is asked to happen twice the same way
+    // round before it is a circle rather than a wobble. See the test below.
     observeAt(0, 0);
     observeAt(0.4, 200);
     observeAt(0.8, 400);
+    observeAt(1.2, 600);
 
-    const motion = tracker.motionAt(1, 400);
+    const motion = tracker.motionAt(1, 600);
     expect(motion?.angularVelocityPerMs).toBeCloseTo(0.002, 6);
-    expect(motion?.velocityX).toBeCloseTo(-0.006 * Math.sin(0.8), 6);
-    expect(motion?.velocityY).toBeCloseTo(0.006 * Math.cos(0.8), 6);
+    expect(motion?.velocityX).toBeCloseTo(-0.006 * Math.sin(1.2), 6);
+    expect(motion?.velocityY).toBeCloseTo(0.006 * Math.cos(1.2), 6);
+  });
+
+  // **The complaint auto-aim was carrying.** A tick's displacement is a step
+  // function with the server's own rounding in it, so a monster walking dead
+  // straight reports a heading that wobbles a couple of degrees either side of
+  // the line. Answering that with an arc swings the aim point off the line by
+  // more the faster the monster walks and the further the shot has to fly,
+  // which is a monster that is shot at beside rather than at.
+  it('does not read a wobble in the heading as a circle', () => {
+    const tracker = new MotionTracker();
+    const wobble = [0, 0.03, -0.04, 0.05, -0.03, 0.04];
+    wobble.forEach((offset, index) => {
+      sight(tracker, index * 200, index * 1.2, offset);
+    });
+
+    const motion = tracker.motionAt(1, (wobble.length - 1) * 200);
+    expect(motion?.angularVelocityPerMs).toBe(0);
+    // Still walking east at six tiles a second, which is what it is doing.
+    expect(motion?.velocityX).toBeCloseTo(0.006, 3);
+    expect(Math.abs(motion?.velocityY ?? 1)).toBeLessThan(0.0005);
   });
 
   // A monster that turns about has not started going round in a circle, and
@@ -873,6 +929,9 @@ describe('the auto-aim plugin', () => {
     expect(shot?.bulletSpeedTilesPerMs).toBe(WEAPON.speedTilesPerMs);
     expect(shot?.maxFlightMs).toBeCloseTo(WEAPON.reachTiles / WEAPON.speedTilesPerMs);
     expect(shot?.lead).toBe(1);
+    // And the one number that was measured rather than derived, so the frame
+    // applies the same trim this side put into its own fallback point.
+    expect(shot?.leadTrimMs).toBe(100);
   });
 
   // Not "no shot": a target not known to be moving is one whose lead is nought,

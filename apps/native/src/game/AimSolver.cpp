@@ -157,7 +157,8 @@ bool SolveAimPoint(const AimShot& shot, float& out_x, float& out_y) noexcept {
     if (!std::isfinite(shot.shooter_x) || !std::isfinite(shot.shooter_y) ||
         !std::isfinite(shot.target_x) || !std::isfinite(shot.target_y) ||
         !std::isfinite(shot.velocity_x) || !std::isfinite(shot.velocity_y) ||
-        !std::isfinite(shot.angular_velocity_per_ms) || !std::isfinite(shot.lead)) {
+        !std::isfinite(shot.angular_velocity_per_ms) || !std::isfinite(shot.lead) ||
+        !std::isfinite(shot.lead_lag_ms)) {
         return false;
     }
 
@@ -178,9 +179,16 @@ bool SolveAimPoint(const AimShot& shot, float& out_x, float& out_y) noexcept {
         return false;
     }
 
+    // **Led through the flight, less whatever the target is behind by.** The
+    // meeting is where the shot and the target both arrive; the trim says the
+    // target is not quite where this side can see it, and the ground that costs
+    // is its velocity times the interval — which is why it comes off the time
+    // rather than off the answer. Never below nought: a trim longer than the
+    // flight is an aim on the target itself, not behind it.
+    const double led_through = static_cast<double>(flight_ms) - shot.lead_lag_ms;
     double meeting_x = 0.0;
     double meeting_y = 0.0;
-    TargetAt(shot, flight_ms, meeting_x, meeting_y);
+    TargetAt(shot, led_through > 0.0 ? led_through : 0.0, meeting_x, meeting_y);
 
     // A share of the offset the solution names, measured from where the target
     // is now — so nought aims at the monster and one aims at the meeting.

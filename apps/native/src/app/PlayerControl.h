@@ -19,6 +19,7 @@
 #include "core/Snapshot.h"
 #include "game/AimHook.h"
 #include "game/AimSolver.h"
+#include "game/TargetMotion.h"
 #include "game/Il2CppRuntime.h"
 #include "game/MapObjects.h"
 #include "game/PlayerMover.h"
@@ -332,6 +333,12 @@ class PlayerControl {
     /// `FindMapObject` answers nothing for that — which is an aim left exactly
     /// as the runtime sent it.
     game::MapObjectRoute map_objects_{};
+    /// How fast the client is actually moving the enemy being aimed at, from
+    /// the frame's own readings of it. **The velocity that goes into the lead**,
+    /// where there is one: the runtime's is derived from the packet stream and
+    /// the shot is tested against the client's copy, and the two part company
+    /// exactly when a monster changes pace. See `game/TargetMotion.h`.
+    game::TargetMotion target_motion_;
     /// Where the player was when the last frame acted, and what this module
     /// asked the game to add to it — the two together are what the next frame
     /// subtracts to be left with the walking they did themselves. False

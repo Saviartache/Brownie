@@ -81,7 +81,15 @@ const MOVED_TILES = 0.05;
  */
 const MAX_PREDICT_MS = 250;
 
-/** Smaller heading changes are more likely packet noise than a real turn. */
+/**
+ * Smaller heading changes are more likely packet noise than a real turn.
+ *
+ * Small on purpose, because a monster going round a wide circle turns very
+ * little between two ticks and is exactly what the arc model is for. What keeps
+ * the noise out is not this figure but the corroboration beside it — see
+ * {@link MotionTracker.observe}: a heading change is believed once a second
+ * sample turns the same way, and packet noise does not, it alternates.
+ */
 const MIN_TURN_RADIANS = 0.05;
 
 /**
@@ -133,6 +141,14 @@ interface Track {
   sampleVelocityY: number;
   sampleElapsedMs: number;
   hasVelocitySample: boolean;
+  /**
+   * How far the last sample turned from the one before it, in radians.
+   *
+   * Kept so that a turn can be asked to happen twice before it is believed.
+   * Nought where there was no previous sample to turn from, and where the turn
+   * there was fell outside {@link MIN_TURN_RADIANS}…{@link MAX_TURN_RADIANS}.
+   */
+  sampleTurn: number;
   /** Whether a velocity has been derived at all, as against assumed to be nil. */
   moving: boolean;
   /**
@@ -229,6 +245,7 @@ export class MotionTracker {
         sampleVelocityY: 0,
         sampleElapsedMs: 0,
         hasVelocitySample: false,
+        sampleTurn: 0,
         moving: false,
         moved: false,
       });
@@ -269,18 +286,39 @@ export class MotionTracker {
         )
       : 0;
 
-    if (Math.abs(turn) >= MIN_TURN_RADIANS && Math.abs(turn) <= MAX_TURN_RADIANS) {
+    const believableTurn =
+      Math.abs(turn) >= MIN_TURN_RADIANS && Math.abs(turn) <= MAX_TURN_RADIANS ? turn : 0;
+    // **Asked to happen twice, and the same way round, before it is believed.**
+    // A tick's displacement is a step function with the server's own rounding in
+    // it, so the heading derived from one wobbles by a couple of degrees while a
+    // monster walks dead straight — and answering that with a circle projects
+    // the aim off the line it is actually on, by more the faster the monster
+    // moves and the further the shot has to fly. Noise wobbles one way and then
+    // the other; a monster going round something turns the same way every tick.
+    const turning = believableTurn !== 0 && believableTurn * track.sampleTurn > 0;
+
+    if (turning) {
       const betweenSamplesMs = (track.sampleElapsedMs + elapsed) / 2;
-      track.angularVelocityPerMs = turn / betweenSamplesMs;
+      const rate = believableTurn / betweenSamplesMs;
+      track.angularVelocityPerMs =
+        track.angularVelocityPerMs === 0
+          ? rate
+          : track.angularVelocityPerMs + (rate - track.angularVelocityPerMs) * BLEND;
 
       // A displacement is a chord whose direction belongs at its midpoint.
       // Rotate it to the endpoint tangent and restore the arc speed.
-      const halfTurn = (track.angularVelocityPerMs * elapsed) / 2;
+      const halfTurn = (rate * elapsed) / 2;
       const speedScale = halfTurn / Math.sin(halfTurn);
       const cos = Math.cos(halfTurn);
       const sin = Math.sin(halfTurn);
+      // Not blended, unlike the straight branch below: the running estimate is
+      // the tangent of the *previous* sample, which on an arc is a whole turn
+      // behind this one, so averaging the two would hold the aim permanently
+      // inside the circle. What the blend is there to keep out — a heading that
+      // wobbled for one tick — is already kept out by the corroboration above.
       track.velocityX = (sampleX * cos - sampleY * sin) * speedScale;
       track.velocityY = (sampleX * sin + sampleY * cos) * speedScale;
+      track.moving = true;
     } else if (track.moving) {
       track.velocityX += (sampleX - track.velocityX) * BLEND;
       track.velocityY += (sampleY - track.velocityY) * BLEND;
@@ -297,6 +335,7 @@ export class MotionTracker {
     track.sampleVelocityX = sampleX;
     track.sampleVelocityY = sampleY;
     track.sampleElapsedMs = elapsed;
+    track.sampleTurn = believableTurn;
     track.hasVelocitySample = true;
     track.x = x;
     track.y = y;
@@ -381,6 +420,7 @@ export class MotionTracker {
     track.velocityY = 0;
     track.angularVelocityPerMs = 0;
     track.hasVelocitySample = false;
+    track.sampleTurn = 0;
     track.moving = false;
   }
 

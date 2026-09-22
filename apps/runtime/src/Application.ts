@@ -856,6 +856,11 @@ export class Application {
                 Math.round(aim.shot.maxFlightMs),
                 // Per mille, like every other fraction on this link.
                 Math.round(aim.shot.lead * 1000),
+                // Milliseconds, and its own field rather than a seventh member
+                // of the group above: a record that stops before it wants no
+                // trim, which is a perfectly good aim — unlike a record that
+                // stops before the velocity, which is no lead at all.
+                Math.round(aim.shot.leadTrimMs),
               ].join('|'),
             );
           },

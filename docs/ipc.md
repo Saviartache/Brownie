@@ -522,7 +522,7 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
-| `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100, vx·100, vy·100, turn·1000, shotSpeed·100, maxFlightMs, lead‰ | point the shots the player fires at here, for this long unless replaced. `objectId` and the two positions after it name the enemy the point leads and where the *runtime* had that enemy — so the module can look it up in the game's own tables. The six after those say how the enemy moves (tiles a second, and radians a second for the turn), how fast the shot travels, how long it has to hit something with, and how much of the lead to apply — everything the module needs to solve the meeting again from the game's own positions. Each group is all or none: a shift needs somewhere to be measured from, and five sixths of a solution is not one. Absent is an aim used exactly as sent |
+| `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100, vx·100, vy·100, turn·1000, shotSpeed·100, maxFlightMs, lead‰, trimMs | point the shots the player fires at here, for this long unless replaced. `objectId` and the two positions after it name the enemy the point leads and where the *runtime* had that enemy — so the module can look it up in the game's own tables. The six after those say how the enemy moves (tiles a second, and radians a second for the turn), how fast the shot travels, how long it has to hit something with, and how much of the lead to apply — everything the module needs to solve the meeting again from the game's own positions. Each group is all or none: a shift needs somewhere to be measured from, and five sixths of a solution is not one. Absent is an aim used exactly as sent. `trimMs` rides after the group on its own, because a record that stops before it wants no trim — which is a perfectly good aim, unlike a record that stops before the velocity |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
@@ -839,11 +839,35 @@ ahead of the monster it sits.
 So the record carries the *rates* — how the enemy moves, how fast the shot
 travels, how long it has, how much lead to apply — and the module solves the
 meeting on the frame, from its own reading of where the player and the monster
-actually are. See `apps/native/src/game/AimSolver.h`. The division is the same
-one the rest of this file draws: **the runtime says how things move and which
-enemy is worth shooting at, and the client says where everything is.** A rate
-does not care which frame reads it; a position does, and only the game has the
-one a bullet is tested against.
+actually are. See `apps/native/src/game/AimSolver.h`.
+
+**How fast the enemy moves is measured on the frame too, where it can be.** The
+rate in the record is derived from `NEWTICK`, which states where a monster *is*
+at the end of a tick; the client winds its own copy towards that over the tick
+after, and a bullet is tested against that copy. The two agree while a monster
+holds its pace and part company the moment it changes one — always the same way
+round, with the packets ahead of what is drawn, so a lead built on them is sent
+in front of the monster and the quicker it moves the further in front. The
+module therefore times its own readings of the enemy and leads by what the
+client is doing, falling back to the record's rate for a target it has not
+watched long enough to divide. See `apps/native/src/game/TargetMotion.h`.
+
+**And one number that is measured rather than derived.** Everything above comes
+from somewhere — the enemy's position out of the client's tables, its speed out
+of readings of them, the flight out of the game's own projectile data. What is
+left over when a shot still lands in front of a monster is that the copy a
+bullet is tested against is some interval behind anything that can be read about
+it. That interval belongs to the client and not to the monster, so what it costs
+is the target's own speed through it: nothing at all against something standing
+still, and more the faster it runs. `trimMs` is that interval, and the module
+takes it off the flight the meeting is placed at — never off the flight that was
+solved, because how far a shot reaches is a fact about the weapon. It is a
+player setting for the plain reason that nothing on either side can measure it.
+
+What is left is the division the rest of this file draws: **the runtime says
+which enemy is worth shooting at and what cannot be seen from a frame — the
+projectile's speed and reach, the turn rate, how much lead the player asked for
+— and the client says where everything is and how fast it is being drawn.**
 
 ## Lifecycle
 

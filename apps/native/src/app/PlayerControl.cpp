@@ -10,6 +10,36 @@ namespace {
     const std::int32_t bounded = hold_ms > kMaxHoldMs ? kMaxHoldMs : hold_ms;
     return bounded > 0 ? static_cast<std::uint64_t>(bounded) : 0;
 }
+
+/// Turns a chord measured over `span_ms` into the tangent at its far end.
+///
+/// A velocity measured between two positions points along the line joining
+/// them, which for a target going round a circle is the direction it had
+/// halfway through — half a window's turn behind the one it has now. Rotating
+/// by that half turn puts it back on the heading, and dividing by the sine
+/// restores the speed the chord lost to the corner it cut.
+///
+/// A rate small enough to be noise is left alone: the correction divides by its
+/// own sine on the way, and a straight line is what a target that is not
+/// turning has anyway.
+void TurnChordToTangent(float angular_velocity_per_ms, std::uint64_t span_ms, float& x,
+                        float& y) noexcept {
+    const double half_turn = static_cast<double>(angular_velocity_per_ms) *
+                             static_cast<double>(span_ms) / 2.0;
+    if (!std::isfinite(half_turn) || std::abs(half_turn) < 1e-6 || std::abs(half_turn) > 1.0) {
+        return;
+    }
+    const double scale = half_turn / std::sin(half_turn);
+    const double cos = std::cos(half_turn);
+    const double sin = std::sin(half_turn);
+    const double turned_x = (static_cast<double>(x) * cos - static_cast<double>(y) * sin) * scale;
+    const double turned_y = (static_cast<double>(x) * sin + static_cast<double>(y) * cos) * scale;
+    if (!std::isfinite(turned_x) || !std::isfinite(turned_y)) {
+        return;
+    }
+    x = static_cast<float>(turned_x);
+    y = static_cast<float>(turned_y);
+}
 }  // namespace
 
 MoveTarget MoveTargetFrom(const overlay::MoveCommand& move, std::uint64_t now_ms) noexcept {
@@ -48,6 +78,7 @@ AimTarget AimTargetFrom(const overlay::AimCommand& aim, std::uint64_t now_ms) no
             static_cast<float>(aim.bullet_speed_hundredths) / 100000.0F;
         target.shot.max_flight_ms = static_cast<float>(aim.max_flight_ms);
         target.shot.lead = static_cast<float>(aim.lead_permille) / 1000.0F;
+        target.shot.lead_lag_ms = static_cast<float>(aim.lead_lag_ms);
     }
     return target;
 }
@@ -166,6 +197,10 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         // map rebuild. Nothing to aim from, so nothing is aimed.
         aim_.Clear();
         player_seen_ = false;
+        // And nothing the readings of the old map said is about this one: ids
+        // are unique within a map and re-used across one, so a ring kept over
+        // would be two monsters' positions subtracted from each other.
+        target_motion_.Clear();
         return;
     }
 
@@ -296,6 +331,19 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         const float seen_x = seen ? client_x : frame_aim_.target_x;
         const float seen_y = seen ? client_y : frame_aim_.target_y;
 
+        // **And how fast the client is moving it, measured the same way.** One
+        // reading a frame, differenced over a window, is the velocity of the
+        // very thing a bullet is tested against — where the runtime's is
+        // derived from the packets, which describe a monster the client is
+        // still winding its own copy up to. The two agree while a monster holds
+        // its pace and part company the moment it changes one, always the same
+        // way round: the packets run ahead of what is drawn, so a lead built on
+        // them is sent in front of the monster, and further in front the faster
+        // it moves. See `game/TargetMotion.h`.
+        if (seen) {
+            target_motion_.Observe(frame_aim_.object_id, seen_x, seen_y, now_ms);
+        }
+
         // **The lead is worked out here, from the two positions only this side
         // has.** The runtime chose the enemy and said how everything moves;
         // where the player and the monster actually are is the game's own
@@ -310,6 +358,29 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
             shot.shooter_y = player.y;
             shot.target_x = seen_x;
             shot.target_y = seen_y;
+
+            // The measured velocity where there is one, and the runtime's until
+            // there is — a target a few frames old has no span to divide over,
+            // and a lead from the packet stream is a great deal better than no
+            // lead at all. Which of the two is in use changes nothing else: the
+            // solver is handed a velocity either way.
+            float measured_x = 0.0F;
+            float measured_y = 0.0F;
+            std::uint64_t span_ms = 0;
+            if (seen && target_motion_.VelocityOf(frame_aim_.object_id, now_ms, measured_x,
+                                                  measured_y, span_ms)) {
+                // A displacement over a window is a chord, and its direction
+                // belongs at the middle of that window rather than at the end.
+                // For anything going round in a circle that is half a window's
+                // turn behind the heading the monster actually has, so it is
+                // rotated up to it — the same correction the runtime's own
+                // tracker makes, and for the same reason. The turn rate itself
+                // stays the runtime's: it is a rate, and rates are the half the
+                // server's tick answers well.
+                TurnChordToTangent(shot.angular_velocity_per_ms, span_ms, measured_x, measured_y);
+                shot.velocity_x = measured_x;
+                shot.velocity_y = measured_y;
+            }
             solved = game::SolveAimPoint(shot, aim_x, aim_y);
         }
         if (!solved && seen) {

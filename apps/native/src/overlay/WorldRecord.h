@@ -154,6 +154,12 @@ struct AimCommand {
     /// How much of the lead to actually apply, per mille. The player's setting,
     /// applied where the lead is worked out rather than where it is asked for.
     std::int32_t lead_permille = 0;
+    /// How far behind what can be read about it the thing a bullet is tested
+    /// against actually is, in milliseconds. The player's setting too, and its
+    /// own field rather than a seventh member of the group above: a runtime
+    /// that does not send it is one that wants nought, not one whose motion is
+    /// unreadable. See `game::AimShot::lead_lag_ms`.
+    std::int32_t lead_lag_ms = 0;
 };
 
 /// Parses `aim|x|y|holdMs`, the optional `|objectId|targetX|targetY` after it,

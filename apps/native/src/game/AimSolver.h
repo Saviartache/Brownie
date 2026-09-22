@@ -45,6 +45,12 @@ struct AimShot {
     float target_x = 0.0F;
     float target_y = 0.0F;
     /// Tiles per millisecond. Nought is a target not known to be moving.
+    ///
+    /// **The frame's own measurement where it has one**, and the runtime's
+    /// packet-derived rate until it does — see `TargetMotion.h`. The position
+    /// above comes out of the client's tables, and a velocity from anywhere
+    /// else is a lead measured between two different readings of the same
+    /// monster.
     float velocity_x = 0.0F;
     float velocity_y = 0.0F;
     /// Radians per millisecond. Nought keeps the target on a straight line.
@@ -61,6 +67,25 @@ struct AimShot {
     /// scaling the velocity asks a different question, and at anything above 1
     /// it asks one that a target moving near the shot's speed has no answer to.
     float lead = 1.0F;
+    /// How much of the flight not to lead through, in milliseconds.
+    ///
+    /// **The one empirical number in the chain, and it is a time rather than a
+    /// share on purpose.** Everything above is derived — the position out of the
+    /// client's tables, the velocity out of readings of them, the flight out of
+    /// the game's own projectile data — and what is left over when a shot still
+    /// lands in front of a monster is that the thing a bullet is tested against
+    /// is some interval behind what can be read about it. That interval is a
+    /// property of the client, not of the monster, so the ground it costs is
+    /// `velocity × interval`: nothing at all against something standing still,
+    /// and more the faster the target moves, which is the shape of the error
+    /// being corrected. A share of the lead would instead grow with the
+    /// *distance* as well, and shorten the lead on a slow monster far away that
+    /// was never being missed.
+    ///
+    /// Subtracted from the flight the meeting is placed at, never from the
+    /// flight that was solved: what the shot can reach is a fact about the
+    /// weapon and is not the thing being trimmed.
+    float lead_lag_ms = 0.0F;
 };
 
 /// Solves for the meeting point, or reports that there is not one.

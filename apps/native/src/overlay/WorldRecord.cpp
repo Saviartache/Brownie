@@ -220,6 +220,12 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
         ParseInt(TakeField(rest), bullet_speed) && ParseInt(TakeField(rest), max_flight) &&
         ParseInt(TakeField(rest), lead) && bullet_speed > 0 && max_flight > 0;
 
+    // And after those, on its own: an absent trim is a trim of nought, which is
+    // a perfectly good aim — unlike an absent velocity, which is no lead at all.
+    // So this one is not part of the group above and does not invalidate it.
+    int lead_lag = 0;
+    const bool has_lag = has_motion && ParseInt(TakeField(rest), lead_lag) && lead_lag >= 0;
+
     out.x_hundredths = x;
     out.y_hundredths = y;
     out.hold_ms = hold;
@@ -236,6 +242,7 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
         out.bullet_speed_hundredths = bullet_speed;
         out.max_flight_ms = max_flight;
         out.lead_permille = lead;
+        out.lead_lag_ms = has_lag ? lead_lag : 0;
     }
     return true;
 }

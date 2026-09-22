@@ -42,6 +42,7 @@
 #include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
 #include "game/ScreenProjection.h"
+#include "game/TargetMotion.h"
 #include "hooks/Hook.h"
 #include "hooks/SwapChain.h"
 #include "ipc/Frame.h"
@@ -529,6 +530,17 @@ void AimRecordsAreReadStrictly() {
     Check(solved.bullet_speed_hundredths == 800 && solved.max_flight_ms == 500,
           "how fast the shot goes and how long it has");
     Check(solved.lead_permille == 1000, "and how much of the lead to apply");
+    Check(solved.lead_lag_ms == 0, "a record that stops there trims nothing");
+
+    // The trim rides after the group rather than inside it: a runtime that does
+    // not send one wants nought, which is a perfectly good aim — unlike an
+    // absent velocity, which is no lead at all.
+    brownie::overlay::AimCommand trimmed;
+    Check(brownie::overlay::ParseAimRecord(
+              "aim|500|0|350|8821|450|25|300|-150|80|800|500|1000|120", trimmed),
+          "an aim carrying a trim parses");
+    Check(trimmed.has_motion && trimmed.lead_lag_ms == 120,
+          "and the trim comes through in milliseconds");
 
     // Five of the six describe no lead at all, so a half-written motion is read
     // as none — and the shift the enemy fields describe still stands.
@@ -642,12 +654,159 @@ void AimPointsAreSolvedFromWhereTheShooterStands() {
           "a turning target has a meeting point");
     Check(std::abs(turning_x - x) > 0.05F, "and it is not the one a straight line would name");
 
+    // **The trim, which is a time and not a share.** What is left over when a
+    // shot still lands in front of a monster is that the thing a bullet is
+    // tested against is some interval behind what can be read about it — a
+    // property of the client, not of the monster, so the ground it costs is the
+    // target's own speed times that interval.
+    brownie::game::AimShot trimmed = shot;
+    trimmed.lead_lag_ms = 100.0F;
+    float trimmed_x = 0.0F;
+    float trimmed_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(trimmed, trimmed_x, trimmed_y), "a trimmed lead still aims");
+    Check(std::abs((y - trimmed_y) - 0.003F * 100.0F) < 0.001F,
+          "and it is short by the target's own speed through the interval trimmed");
+
+    // Twice the speed, twice the correction — which is the whole point of
+    // stating it as a time. A share of the lead would instead grow with the
+    // distance as well, and shorten the lead on a slow monster far away that was
+    // never being missed.
+    brownie::game::AimShot quicker = trimmed;
+    quicker.velocity_y = 0.006F;
+    brownie::game::AimShot quicker_untrimmed = quicker;
+    quicker_untrimmed.lead_lag_ms = 0.0F;
+    float quick_x = 0.0F;
+    float quick_y = 0.0F;
+    float quick_full_x = 0.0F;
+    float quick_full_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(quicker, quick_x, quick_y) &&
+              brownie::game::SolveAimPoint(quicker_untrimmed, quick_full_x, quick_full_y),
+          "a quicker target is solved both ways");
+    Check(std::abs((quick_full_y - quick_y) - 0.006F * 100.0F) < 0.002F,
+          "and the correction is twice as much ground for twice the speed");
+
+    // Nothing at all against something standing still, which is most of what a
+    // shot connects with and was never the thing being missed.
+    brownie::game::AimShot trimmed_standing = standing;
+    trimmed_standing.lead_lag_ms = 100.0F;
+    float still_x = 0.0F;
+    float still_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(trimmed_standing, still_x, still_y),
+          "a standing target is still aimed at");
+    Check(std::abs(still_x - 3.0F) < 0.001F && std::abs(still_y) < 0.001F,
+          "and the trim moves it nowhere");
+
+    // A trim longer than the flight is an aim on the monster, never behind it.
+    brownie::game::AimShot over_trimmed = shot;
+    over_trimmed.lead_lag_ms = 10000.0F;
+    float over_x = 0.0F;
+    float over_y = 0.0F;
+    Check(brownie::game::SolveAimPoint(over_trimmed, over_x, over_y),
+          "a trim longer than the flight still aims");
+    Check(std::abs(over_x - 3.0F) < 0.001F && std::abs(over_y) < 0.001F,
+          "at the monster itself rather than behind it");
+
     // A number that is not one is a shot pointed at `NaN`, which the game would
     // take literally.
     brownie::game::AimShot broken = shot;
     broken.shooter_x = std::numeric_limits<float>::quiet_NaN();
     Check(!brownie::game::SolveAimPoint(broken, refused_x, refused_y),
           "and a position that is not a number names no meeting at all");
+}
+
+/// The lead is built on what the client is doing, not on what the packets say.
+///
+/// **The bug this was written for.** The runtime derives a velocity from
+/// `NEWTICK`, which states where a monster *is* at the end of a tick; the
+/// client winds its own copy towards that over the tick after, and a bullet is
+/// tested against that copy. While a monster holds its pace the two agree. The
+/// moment it picks up speed the packets run ahead of what is drawn, and a lead
+/// built on them is sent in front of the monster by the difference — further in
+/// front the faster it moves, which is exactly how the miss was reported.
+void TargetMotionIsMeasuredFromWhatTheClientDraws() {
+    brownie::game::TargetMotion motion;
+    float x = 0.0F;
+    float y = 0.0F;
+    std::uint64_t span = 0;
+
+    // One reading is a position, not a velocity.
+    motion.Observe(11, 0.0F, 0.0F, 0);
+    Check(!motion.VelocityOf(11, 0, x, y, span), "one reading names no velocity");
+
+    // Six tiles a second, east, a frame at a time.
+    for (std::uint64_t at = 16; at <= 400; at += 16) {
+        motion.Observe(11, 0.006F * static_cast<float>(at), 0.0F, at);
+    }
+    Check(motion.VelocityOf(11, 400, x, y, span), "a watched target has a velocity");
+    Check(std::abs(x - 0.006F) < 0.0005F && std::abs(y) < 0.0005F,
+          "and it is the speed the client is moving it at");
+    Check(span >= brownie::game::kMotionWindowMs, "measured over a window, not between two frames");
+
+    // **A monster that arrives in jumps is not measured at all**, and that is
+    // the deliberate half of the bargain. A jump inside the window is divided by
+    // the window, so one blink would read as twenty tiles a second for the fifth
+    // of a second after it — a lead of several tiles into empty floor, on
+    // exactly the chargers and blinkers that are hardest to hit anyway. Read as
+    // a reposition instead, which leaves the caller on the runtime's own rate:
+    // the same lead the feature had before any of this existed, rather than a
+    // worse one.
+    brownie::game::TargetMotion stepping;
+    for (std::uint64_t at = 0; at <= 800; at += 16) {
+        const float tiles = 1.2F * static_cast<float>(at / 200);
+        stepping.Observe(21, tiles, 0.0F, at);
+    }
+    Check(!stepping.VelocityOf(21, 800, x, y, span),
+          "a target that arrives in jumps names no velocity of its own");
+
+    // A reading taken before the window has filled is still worth having: a
+    // sixteenth of a second of the client's own positions beats the packets.
+    brownie::game::TargetMotion young;
+    for (std::uint64_t at = 0; at <= 96; at += 16) {
+        young.Observe(31, 0.006F * static_cast<float>(at), 0.0F, at);
+    }
+    Check(young.VelocityOf(31, 96, x, y, span), "a target only just picked up still has one");
+    Check(span < brownie::game::kMotionWindowMs && span >= brownie::game::kMotionMinWindowMs,
+          "measured over what there is of it");
+
+    // Where there is not enough of it, the caller keeps what the runtime sent
+    // rather than being handed a velocity out of two floats' last digits.
+    brownie::game::TargetMotion newborn;
+    newborn.Observe(41, 0.0F, 0.0F, 0);
+    newborn.Observe(41, 0.06F, 0.0F, 16);
+    Check(!newborn.VelocityOf(41, 16, x, y, span), "too short a span names no velocity");
+
+    // A velocity is only ever about the frame asking. A target the frame has
+    // stopped reading keeps its ring until the gap forgets it, and serving a
+    // velocity out of that would be the speed it had when it was last watched.
+    Check(!motion.VelocityOf(11, 600, x, y, span), "a target not read this frame has none");
+
+    // A teleport, a `GOTO`, the server putting a monster back where it belongs:
+    // the readings either side of one cannot be subtracted into a walk.
+    brownie::game::TargetMotion thrown;
+    for (std::uint64_t at = 0; at <= 400; at += 16) {
+        thrown.Observe(51, 0.006F * static_cast<float>(at), 0.0F, at);
+    }
+    thrown.Observe(51, 80.0F, 80.0F, 416);
+    Check(!thrown.VelocityOf(51, 416, x, y, span),
+          "a step nothing could have walked starts the target again");
+
+    // Two monsters a hair apart in range trade places every other plan, and a
+    // single slot would throw away each one's history as the other took it.
+    brownie::game::TargetMotion both;
+    for (std::uint64_t at = 0; at <= 400; at += 16) {
+        both.Observe(61, 0.006F * static_cast<float>(at), 0.0F, at);
+        both.Observe(62, 0.0F, -0.004F * static_cast<float>(at), at);
+    }
+    float other_x = 0.0F;
+    float other_y = 0.0F;
+    Check(both.VelocityOf(61, 400, x, y, span) &&
+              both.VelocityOf(62, 400, other_x, other_y, span),
+          "two targets are both measured");
+    Check(std::abs(x - 0.006F) < 0.0005F && std::abs(other_y + 0.004F) < 0.0005F,
+          "and neither one's readings are the other's");
+
+    both.Clear();
+    Check(!both.VelocityOf(61, 400, x, y, span), "and a realm change forgets all of them");
 }
 
 /// A text record carries its message whole, separators and all.
@@ -2964,6 +3123,7 @@ int main() {
     MoveRecordsAreReadStrictly();
     AimRecordsAreReadStrictly();
     AimPointsAreSolvedFromWhereTheShooterStands();
+    TargetMotionIsMeasuredFromWhatTheClientDraws();
     AimRedirectsOnlyWhatItWasGiven();
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();
