@@ -39,21 +39,29 @@ export {
   writeMessage,
   type PreparedMessage,
 } from './messages/codec.js';
-export { TELEMETRY_BYTES, decodeTelemetry, encodeTelemetry } from './messages/telemetry.js';
+export {
+  CLIENT_FRAME_BORN_BYTES,
+  CLIENT_FRAME_GONE_BYTES,
+  CLIENT_FRAME_HEADER_BYTES,
+  decodeClientFrame,
+  encodeClientFrame,
+} from './messages/clientFrame.js';
 export {
   MESSAGE_ORIGIN,
   MessageType,
   Origin,
   type AuthChallengeMessage,
   type AuthResultMessage,
+  type BornShot,
+  type ClientFrameMessage,
   type ControlActionMessage,
   type ControlRecordMessage,
+  type GoneShot,
   type HelloMessage,
   type HotkeyEventMessage,
   type IpcMessage,
   type OffsetHealthMessage,
   type PingMessage,
-  type PlayerTelemetryMessage,
   type PongMessage,
   type SetFeatureMessage,
   type UnknownMessage,

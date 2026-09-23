@@ -576,6 +576,62 @@ describe('projectiles', () => {
     );
     expect(catalog.projectile(1, 0)?.acceleration).toBe(80);
   });
+
+  // **Every gap is filled the way the client fills it.** A sine shot with no
+  // frequency weaves once per flight in the game, and a parametric one with no
+  // magnitude is three tiles across — nought for either is a different shot.
+  it('fills what the file leaves out with the client’s own defaults', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects><Object type="0x2" id="Plain"><Enemy />
+          <Projectile id="0"><Speed>100</Speed><LifetimeMS>1000</LifetimeMS></Projectile>
+        </Object></Objects>`),
+      ),
+    );
+    const plain = catalog.projectile(2, 0);
+    expect(plain?.frequency).toBe(1);
+    expect(plain?.magnitude).toBe(3);
+    expect(plain?.collisionMult).toBe(1);
+    expect(plain?.laserTiles).toBe(0);
+    expect(plain?.turnRate).toBe(0);
+  });
+
+  it('reads the beams, the turns and the circles the motion model flies', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects><Object type="0x3" id="Boss"><Enemy />
+          <Projectile id="0"><Speed>0</Speed><LifetimeMS>200</LifetimeMS><Laser>12</Laser></Projectile>
+          <Projectile id="1">
+            <Speed>80</Speed><LifetimeMS>3000</LifetimeMS>
+            <TurnRate>180</TurnRate><TurnRateDelay>200</TurnRateDelay>
+            <TurnAcceleration>30</TurnAcceleration><TurnAccelerationDelay>400</TurnAccelerationDelay>
+            <TurnClamp>360</TurnClamp><TurnStopTime>1500</TurnStopTime>
+          </Projectile>
+          <Projectile id="2">
+            <Speed>80</Speed><LifetimeMS>3000</LifetimeMS>
+            <CircleTurnAngle>360</CircleTurnAngle><CircleTurnDelay>600</CircleTurnDelay>
+          </Projectile>
+          <Projectile id="3"><Speed>90</Speed><LifetimeMS>900</LifetimeMS><MinDamage>40</MinDamage><MaxDamage>61</MaxDamage></Projectile>
+        </Object></Objects>`),
+      ),
+    );
+    expect(catalog.projectile(3, 0)?.laserTiles).toBe(12);
+
+    const turning = catalog.projectile(3, 1);
+    expect(turning?.turnRate).toBe(180);
+    expect(turning?.turnRateDelayMs).toBe(200);
+    expect(turning?.turnAcceleration).toBe(30);
+    expect(turning?.turnAccelerationDelayMs).toBe(400);
+    expect(turning?.turnClamp).toBe(360);
+    expect(turning?.turnStopTimeMs).toBe(1500);
+
+    const circling = catalog.projectile(3, 2);
+    expect(circling?.circleTurnAngle).toBe(360);
+    expect(circling?.circleTurnDelayMs).toBe(600);
+
+    // A range is ranked at its middle, rather than as a shot that costs nothing.
+    expect(catalog.projectile(3, 3)?.damage).toBe(51);
+  });
 });
 
 describe('how far a shot gets', () => {

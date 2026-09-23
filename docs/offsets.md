@@ -231,6 +231,9 @@ against:
 | `self.tileSpeedHere`     | `float GCFKGLKAPND()`                                | player noclip, through `PlayerTileSpeed` |
 | `self.applyTileSpeed`    | `void CNPNFDNDIJC()`                                 | player noclip, through `PlayerTileSpeed` |
 | `world.objects` / `world.objects.alt` | the world manager's two `Dictionary<int, MapObject>` fields | auto-aim, through `MapObjects` — where the *client* has a monster, which is what a shot is tested against |
+| `world.objects.pending`  | the world manager's list of objects made and not yet filed | the dodge, through `MapObjects` — a shot the frame it is made, a frame before either table has it |
+| `world.frameTime`        | the world manager's frame clock                      | the dodge, through `DodgeTelemetry` — the clock the client moves every shot by and stamps every new one with |
+| `shot.startX` … `shot.radius` | ten fields of the projectile, each read out of the client's spawn routine: start, angle, start time, owner, bullet id, whether it hurts players, the owner's speed multiplier, the lifetime and the collision half-side | the dodge, through `ClientShots` — what the client launched each enemy shot with |
 | `ui.MapObjectUIManager.ShowFloatingText` | `void ShowFloatingText(kind, string, …)` | floating text, through `FloatingText` |
 | `ui.MapObjectUIManager.ShowFloatingText.number` | `void ShowFloatingText(kind, int, …)` | the same, read for the style the game draws with |
 
@@ -242,7 +245,7 @@ class is built — which is rarely the same turn of the loop.
 The two collision methods are detoured too, and the opposite is true of them:
 **both or neither.** The inner one makes the square under a shot passable, the
 outer one puts it back, and half of that pair is a hole in somebody's map that
-nothing closes. It needs three field keys with it — `shot.active`,
+nothing closes. It needs three field keys with it — `shot.damagesEnemies`,
 `map.MapObject.tile` and `map.Tile.collisionLayer` — and refuses to install
 until every one of the five has answered.
 

@@ -80,6 +80,13 @@ struct WorldStatus {
     int blasts = 0;
     int blasts_confirmed = 0;
     int blasts_unmatched = 0;
+    /// Tracked shots the client said it made, and ones it said it destroyed —
+    /// what the dodge's reading off the client has done to the runtime's store.
+    /// Nought while the module is not reading the fight, which is how a dodge
+    /// planning from the client is told apart from one planning from packets.
+    bool client_shot_stats_known = false;
+    int shots_confirmed = 0;
+    int shots_ended = 0;
 };
 
 /// The item in the weapon slot, as the game's own data describes it.

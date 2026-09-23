@@ -10,10 +10,10 @@ import {
   framedSize,
   prepareMessage,
   writeMessage,
+  type ClientFrameMessage,
   type HotkeyEventMessage,
   type IpcMessage,
   type OffsetHealthMessage,
-  type PlayerTelemetryMessage,
   type PreparedMessage,
 } from '@brownie/ipc';
 import { isIPv4 } from 'node:net';
@@ -58,7 +58,8 @@ export interface NativeEvents {
    * would be an event nothing can act on.
    */
   onDisconnected(listener: (reason: string) => void): Unsubscribe;
-  onTelemetry(listener: (telemetry: PlayerTelemetryMessage) => void): Unsubscribe;
+  /** One frame of what the client sees, while `dodge.track` is claimed. */
+  onClientFrame(listener: (frame: ClientFrameMessage) => void): Unsubscribe;
   onOffsetHealth(listener: (health: OffsetHealthMessage) => void): Unsubscribe;
 }
 
@@ -121,7 +122,7 @@ export class NativeLink implements NativeApi, NativeEvents {
   readonly #disconnectedListeners = new Set<(reason: string) => void>();
   readonly #actionListeners = new Set<(action: string) => void>();
   readonly #hotkeyListeners = new Set<(event: HotkeyEventMessage) => void>();
-  readonly #telemetryListeners = new Set<(telemetry: PlayerTelemetryMessage) => void>();
+  readonly #frameListeners = new Set<(frame: ClientFrameMessage) => void>();
   readonly #offsetListeners = new Set<(health: OffsetHealthMessage) => void>();
   readonly #targetListeners = new Set<(host: string, port: number) => void>();
   #requestedHost: string | undefined;
@@ -236,8 +237,8 @@ export class NativeLink implements NativeApi, NativeEvents {
     return subscribe(this.#disconnectedListeners, listener);
   }
 
-  onTelemetry(listener: (telemetry: PlayerTelemetryMessage) => void): Unsubscribe {
-    return subscribe(this.#telemetryListeners, listener);
+  onClientFrame(listener: (frame: ClientFrameMessage) => void): Unsubscribe {
+    return subscribe(this.#frameListeners, listener);
   }
 
   onOffsetHealth(listener: (health: OffsetHealthMessage) => void): Unsubscribe {
@@ -358,9 +359,9 @@ export class NativeLink implements NativeApi, NativeEvents {
           for (const listener of this.#hotkeyListeners) listener(message);
         });
         return;
-      case 'playerTelemetry':
+      case 'clientFrame':
         this.#requireAuth(() => {
-          for (const listener of this.#telemetryListeners) listener(message);
+          for (const listener of this.#frameListeners) listener(message);
         });
         return;
       case 'offsetHealth':

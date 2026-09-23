@@ -3,6 +3,7 @@ import { CIPHER_OFFSET, CLIENT_KEY, Rc4, SERVER_KEY } from '@brownie/protocol';
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
 import { LogLevel, Logger, type LogRecord, type LogSink } from '../src/core/logging/Logger.js';
+import type { ProjectileDefinition } from '../src/gamedata/projectiles.js';
 import type { Transport } from '../src/proxy/Transport.js';
 
 /** A transport with no network behind it. */
@@ -226,4 +227,45 @@ export function immediateSend(
  */
 export function neverSends(): SessionView['sendToServer'] {
   return (): void => undefined;
+}
+
+/**
+ * A projectile definition as `objects.xml` would describe the plainest shot:
+ * straight, a tile a millisecond, a second of life — and every field the
+ * client reads, at the value the client defaults it to, so a test states only
+ * what it is about.
+ */
+export function projectileDefinition(
+  overrides: Partial<ProjectileDefinition> = {},
+): ProjectileDefinition {
+  return {
+    bulletType: 0,
+    speed: 10_000,
+    lifetimeMs: 1000,
+    damage: 50,
+    size: 100,
+    collisionMult: 1,
+    wavy: false,
+    parametric: false,
+    boomerang: false,
+    multiHit: false,
+    passesCover: false,
+    laserTiles: 0,
+    amplitude: 0,
+    frequency: 1,
+    magnitude: 3,
+    acceleration: 0,
+    accelerationDelayMs: 0,
+    speedClamp: 0,
+    turnRate: 0,
+    turnRateDelayMs: 0,
+    turnAcceleration: 0,
+    turnAccelerationDelayMs: 0,
+    turnClamp: 0,
+    turnStopTimeMs: 0,
+    circleTurnAngle: 0,
+    circleTurnDelayMs: 0,
+    debuffSeverity: 0,
+    ...overrides,
+  };
 }

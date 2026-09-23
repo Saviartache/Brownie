@@ -86,7 +86,16 @@ export class WorldState implements WorldView {
    * dodge has nothing in flight to avoid, and starved looks exactly like
    * broken. These counters are what tells the two apart.
    */
-  readonly shots = { announced: 0, noOwner: 0, noDefinition: 0, tracked: 0 };
+  readonly shots = {
+    announced: 0,
+    noOwner: 0,
+    noDefinition: 0,
+    tracked: 0,
+    /** Tracked shots the client has since said it made — see `ClientFrames`. */
+    confirmed: 0,
+    /** And tracked shots it has since said it destroyed. */
+    ended: 0,
+  };
 
   #map: MapInfo = NO_MAP;
   #connectedAtMs: number | undefined;
@@ -145,6 +154,14 @@ export class WorldState implements WorldView {
    */
   get gameTimeMs(): number {
     return this.#connectedAtMs === undefined ? 0 : this.#now() - this.#connectedAtMs;
+  }
+
+  /**
+   * Whether the game server has answered yet — which is when {@link gameTimeMs}
+   * starts counting, and so when a reading can be placed on it.
+   */
+  get connected(): boolean {
+    return this.#connectedAtMs !== undefined;
   }
 
   /**

@@ -16,12 +16,16 @@
  * some other cadence would force an interpolation on every one of those tests,
  * for an answer that is no more accurate.
  *
- * **Each sample carries its own hitbox, and it grows.** `positionAt` does not
- * model turn rate or the client's own clock, so a prediction 700 ms out is worth
- * less than one 70 ms out — and the honest shape of that error is a shot that
- * gets wider the further ahead it is asked about. A shot the model does not
- * claim to describe at all — the spirals that curl — is distrusted several times
- * as fast, which is what makes one dodgeable rather than confidently mistimed.
+ * **Each sample carries its own hitbox, and it grows.** The motion model is the
+ * client's own, but the moment it is measured from is an estimate unless the
+ * client has said, and a prediction 700 ms out carries that error ten times
+ * further than one 70 ms out — so the honest shape of it is a shot that gets
+ * wider the further ahead it is asked about.
+ *
+ * **A laser is a row of squares, not one.** Its beam is the damage and the shot
+ * never moves, so it is laid out as squares along the beam, spaced tightly
+ * enough that their union is the beam's own band — and only the part of the
+ * beam anybody could walk into is laid out at all. See {@link DodgeShot.beamTiles}.
  *
  * **What each shot *costs* travels with it**, which is what the scoring ladder
  * is built on: damage is a number the game states, and a shot carrying a
@@ -29,9 +33,8 @@
  * as one hit is a planner that will take a paralyse to avoid a pellet. See
  * `TrajectoryScore`.
  *
- * **The player's own half is folded in here**, so every downstream test is a
- * point against a square rather than a square against a square. That is also how
- * the game does it.
+ * **Every downstream test is a point against a square**, the player being the
+ * point — which is exactly how the game tests a shot. See `hitbox.ts`.
  *
  * **Nothing here allocates once it is warm.** The rows are typed arrays grown to
  * the busiest screen the session has seen; a thousand shots in flight is about a
@@ -60,10 +63,14 @@ export interface DodgeShot {
    */
   readonly expiresAtMs?: number;
   /**
-   * Whether the motion model describes this shot's whole path. Omitted means it
-   * is believed; false earns the extra distrust described above.
+   * How long its beam is, for a laser. Omitted or nought means a point.
+   *
+   * A beam reaches from {@link positionAt} along {@link angle} for this many
+   * tiles, and the whole of it hits.
    */
-  readonly motionModelled?: boolean;
+  readonly beamTiles?: number;
+  /** Which way it was fired, in radians. Only a beam reads it. */
+  readonly angle?: number;
   /** Greatest possible speed, when known. Enables a cheap early cull. */
   readonly maxSpeedTilesPerSecond?: number;
   /**
@@ -118,13 +125,17 @@ export const MAX_FIELD_SLICES = 33;
 export const UNKNOWN_SHOT_DAMAGE = 60;
 
 /**
- * How much less a shot the model does not fully describe is believed.
+ * How far apart the squares a beam is laid out as are, as a share of the
+ * beam's own half-width.
  *
- * A turning shot is predicted as though it went straight, so the error is not
- * noise — it is a curve the prediction has no term for, and it grows with how
- * far ahead it is asked.
+ * Half of it, so that between two neighbours the band loses at most a quarter
+ * of its width even across a diagonal — and the pad on every square is more
+ * than that.
  */
-const UNMODELLED_DRIFT_FACTOR = 3;
+const BEAM_SPACING_OF_HALF = 0.5;
+
+/** The narrowest spacing a beam is laid out at, in tiles, whatever its width. */
+const MIN_BEAM_SPACING_TILES = 0.1;
 
 /**
  * How far past everywhere the player could get a shot still counts, in tiles.
@@ -273,6 +284,7 @@ export class ShotField {
 
     const horizonMs = options.leadMs + options.ticks * options.tickMs;
     const keepWithin = options.reachTiles + CULL_MARGIN_TILES;
+    const drift = options.driftTilesPerSecond;
 
     for (const shot of shots) {
       this.#considered += 1;
@@ -290,15 +302,9 @@ export class ShotField {
       // world reports those briefly, and they are not danger.
       if (now === undefined) continue;
 
-      const drift =
-        options.driftTilesPerSecond * (shot.motionModelled === false ? UNMODELLED_DRIFT_FACTOR : 1);
-
-      const hereX = Math.abs(now.x - options.selfX);
-      const hereY = Math.abs(now.y - options.selfY);
-      const here = hereX > hereY ? hereX : hereY;
-
+      const beam = shot.beamTiles !== undefined && shot.beamTiles > 0 ? shot.beamTiles : 0;
       const top = shot.maxSpeedTilesPerSecond;
-      if (top !== undefined && Number.isFinite(top)) {
+      if (beam === 0 && top !== undefined && Number.isFinite(top)) {
         // The furthest it could possibly close, which is a bound and not a
         // guess: past it, no arrangement of turns brings it into reach.
         //
@@ -306,120 +312,199 @@ export class ShotField {
         // them are ten times the standard multiplier — five tiles from middle to
         // edge — so a bound read off the distance to the centre threw away shots
         // the player was standing inside of.
+        const hereX = Math.abs(now.x - options.selfX);
+        const hereY = Math.abs(now.y - options.selfY);
+        const here = hereX > hereY ? hereX : hereY;
         const widest =
           effectiveHalf(own, options.hitScale, options.padTiles) + (drift * horizonMs) / 1000;
         if (here - (top * horizonMs) / 1000 - widest > keepWithin) continue;
       }
 
-      if (this.#count >= this.#capacity) this.#reserve();
-      if (this.#sample(shot, this.#count, options, slices, keepWithin, own, drift)) {
-        this.#count += 1;
+      this.#sampleBase(shot, options, slices, own, drift);
+      if (this.#baseLiveTo < 0) continue;
+      if (beam === 0) {
+        this.#emit(shot, options, slices, keepWithin, 0, 0);
+      } else {
+        this.#emitBeam(shot, options, slices, keepWithin, beam, own);
       }
     }
   }
 
   /**
-   * Fills one shot's row, and says whether it was worth keeping.
+   * Where one shot is at every slice, before any row is written.
    *
-   * @returns false when the whole predicted path stays outside everywhere the
-   *   player could get to, which is most of what a busy screen is made of.
+   * Once per shot however many rows it becomes: a beam is dozens of squares
+   * that all move together, and asking the motion model once per square would
+   * be dozens of identical answers.
    */
-  #sample(
+  #sampleBase(
     shot: DodgeShot,
-    index: number,
     options: ShotFieldOptions,
     slices: number,
-    keepWithin: number,
     own: number,
     drift: number,
-  ): boolean {
-    const base = index * slices;
-
+  ): void {
     let liveTo = -1;
-    let near = false;
     for (let slice = 0; slice < slices; slice += 1) {
       const aheadMs = options.leadMs + slice * options.tickMs;
       const at = shot.positionAt(options.gameTimeMs + aheadMs);
       // Expired. Everything past here is absence, not a shot parked at its last
       // position — which is the difference between a wall and a memory.
       if (at === undefined) break;
-
-      const half =
+      this.#baseX[slice] = at.x;
+      this.#baseY[slice] = at.y;
+      this.#baseHalf[slice] =
         effectiveHalf(own, options.hitScale, options.padTiles) + (drift * aheadMs) / 1000;
-      this.#x[base + slice] = at.x;
-      this.#y[base + slice] = at.y;
-      this.#half[base + slice] = half;
       liveTo = slice;
-
-      if (!near) {
-        const dx = Math.abs(at.x - options.selfX);
-        const dy = Math.abs(at.y - options.selfY);
-        if ((dx > dy ? dx : dy) - half <= keepWithin) near = true;
-      }
     }
+    this.#baseLiveTo = liveTo;
+    this.#baseFraction = 0;
 
-    this.#liveTo[index] = liveTo;
-    const tailed = this.#writeTail(shot, index, options, liveTo, own, drift, slices);
-    if (tailed && !near) {
-      const dx = Math.abs(this.endXOf(index) - options.selfX);
-      const dy = Math.abs(this.endYOf(index) - options.selfY);
-      if ((dx > dy ? dx : dy) - this.endHalfOf(index) <= keepWithin) near = true;
-    }
-
-    this.#damage[index] = shot.damage === undefined ? UNKNOWN_SHOT_DAMAGE : shot.damage;
-    this.#debuff[index] = shot.debuffSeverity ?? 0;
-    this.#owner[index] = shot.ownerId ?? 0;
-
-    // A shot with nothing but a single sample has no segment to sweep — unless
-    // its end is known, which gives it the one it dies on — and one that never
-    // comes near cannot be walked into by any course this plan could choose.
-    return near && (liveTo >= 1 || tailed);
-  }
-
-  /**
-   * Records where a shot expires, when it does so part of the way through a
-   * step, and says whether there is anything there to sweep.
-   *
-   * The instant it stops existing is a position the horizon has no sample for:
-   * its clock is the planner's, and a shot's lifetime is its own. Asking
-   * `positionAt` once more at exactly that moment is what turns the last part of
-   * a flight from a step nothing looks at into a segment like any other.
-   */
-  #writeTail(
-    shot: DodgeShot,
-    index: number,
-    options: ShotFieldOptions,
-    liveTo: number,
-    own: number,
-    drift: number,
-    slices: number,
-  ): boolean {
-    const at = index * TAIL_STRIDE;
-    this.#tail[at + 3] = 0;
-    // Nothing to add when it never existed, or when the step it would die in is
-    // past the end of the horizon anyway.
-    if (liveTo < 0 || liveTo + 1 >= slices) return false;
-
+    // **The last tick of a flight, which the horizon has no sample for.** Its
+    // clock is the planner's and a shot's lifetime is its own, so asking the
+    // motion model once more at exactly the moment it stops is what turns the
+    // last part of a flight from a step nothing looks at into a segment like
+    // any other. Nothing to add when it never existed, or when the step it
+    // would die in is past the end of the horizon anyway.
+    if (liveTo < 0 || liveTo + 1 >= slices) return;
     const end = shot.expiresAtMs;
-    if (end === undefined || !Number.isFinite(end)) return false;
-
+    if (end === undefined || !Number.isFinite(end)) return;
     const endMs = end - options.gameTimeMs;
     const fraction = (endMs - (options.leadMs + liveTo * options.tickMs)) / options.tickMs;
     // Nought is a shot that expires on the sample itself, and a whole step means
     // its own prediction gave out before its stated end — which is a shot to
     // stop believing rather than one to extrapolate past.
-    if (!(fraction > 0) || fraction >= 1) return false;
-
+    if (!(fraction > 0) || fraction >= 1) return;
     const where = shot.positionAt(options.gameTimeMs + endMs);
-    if (where === undefined) return false;
-
-    this.#tail[at] = where.x;
-    this.#tail[at + 1] = where.y;
-    this.#tail[at + 2] =
+    if (where === undefined) return;
+    this.#baseEndX = where.x;
+    this.#baseEndY = where.y;
+    this.#baseEndHalf =
       effectiveHalf(own, options.hitScale, options.padTiles) + (drift * endMs) / 1000;
-    this.#tail[at + 3] = fraction;
-    return true;
+    this.#baseFraction = fraction;
   }
+
+  /**
+   * Lays a beam out as squares along the part of it anybody could walk into.
+   *
+   * The beam is clipped to the box around everywhere the player could get, at
+   * the slice it is nearest — a beam a hundred tiles long is otherwise four
+   * hundred rows, all but a handful of them across the room.
+   */
+  #emitBeam(
+    shot: DodgeShot,
+    options: ShotFieldOptions,
+    slices: number,
+    keepWithin: number,
+    beam: number,
+    own: number,
+  ): void {
+    const angle = shot.angle ?? 0;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    let from = beam;
+    let to = 0;
+    for (let slice = 0; slice <= this.#baseLiveTo; slice += 1) {
+      const reach = keepWithin + (this.#baseHalf[slice] ?? 0);
+      const span = this.#span;
+      const inside = segmentInBox(
+        (this.#baseX[slice] ?? 0) - options.selfX,
+        (this.#baseY[slice] ?? 0) - options.selfY,
+        cos,
+        sin,
+        beam,
+        reach,
+        span,
+      );
+      if (!inside) continue;
+      if (span.from < from) from = span.from;
+      if (span.to > to) to = span.to;
+    }
+    if (!(to >= from)) return;
+
+    const spacing = Math.max(MIN_BEAM_SPACING_TILES, own * BEAM_SPACING_OF_HALF);
+    const squares = Math.ceil((to - from) / spacing);
+    for (let i = 0; i <= squares; i += 1) {
+      const along = Math.min(to, from + i * spacing);
+      this.#emit(shot, options, slices, keepWithin, cos * along, sin * along);
+    }
+  }
+
+  /**
+   * Writes one row from the sampled shot, moved by an offset, and keeps it if
+   * it could matter.
+   *
+   * A row is dropped when the whole predicted path stays outside everywhere the
+   * player could get to, which is most of what a busy screen is made of — and
+   * when it has nothing to sweep: a single sample has no segment, unless its end
+   * is known, which gives it the one it dies on.
+   */
+  #emit(
+    shot: DodgeShot,
+    options: ShotFieldOptions,
+    slices: number,
+    keepWithin: number,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    const liveTo = this.#baseLiveTo;
+    const tailed = this.#baseFraction > 0;
+    if (liveTo < 1 && !tailed) return;
+
+    if (this.#count >= this.#capacity) this.#reserve();
+    const index = this.#count;
+    const base = index * slices;
+
+    let near = false;
+    for (let slice = 0; slice <= liveTo; slice += 1) {
+      const x = (this.#baseX[slice] ?? 0) + offsetX;
+      const y = (this.#baseY[slice] ?? 0) + offsetY;
+      const half = this.#baseHalf[slice] ?? 0;
+      this.#x[base + slice] = x;
+      this.#y[base + slice] = y;
+      this.#half[base + slice] = half;
+      if (!near) {
+        const dx = Math.abs(x - options.selfX);
+        const dy = Math.abs(y - options.selfY);
+        if ((dx > dy ? dx : dy) - half <= keepWithin) near = true;
+      }
+    }
+    this.#liveTo[index] = liveTo;
+
+    const tail = index * TAIL_STRIDE;
+    this.#tail[tail + 3] = 0;
+    if (tailed) {
+      const x = this.#baseEndX + offsetX;
+      const y = this.#baseEndY + offsetY;
+      this.#tail[tail] = x;
+      this.#tail[tail + 1] = y;
+      this.#tail[tail + 2] = this.#baseEndHalf;
+      this.#tail[tail + 3] = this.#baseFraction;
+      if (!near) {
+        const dx = Math.abs(x - options.selfX);
+        const dy = Math.abs(y - options.selfY);
+        if ((dx > dy ? dx : dy) - this.#baseEndHalf <= keepWithin) near = true;
+      }
+    }
+    if (!near) return;
+
+    this.#damage[index] = shot.damage === undefined ? UNKNOWN_SHOT_DAMAGE : shot.damage;
+    this.#debuff[index] = shot.debuffSeverity ?? 0;
+    this.#owner[index] = shot.ownerId ?? 0;
+    this.#count += 1;
+  }
+
+  /** One shot's samples, before they become rows. See {@link #sampleBase}. */
+  readonly #baseX = new Float64Array(MAX_FIELD_SLICES);
+  readonly #baseY = new Float64Array(MAX_FIELD_SLICES);
+  readonly #baseHalf = new Float64Array(MAX_FIELD_SLICES);
+  #baseLiveTo = -1;
+  #baseFraction = 0;
+  #baseEndX = 0;
+  #baseEndY = 0;
+  #baseEndHalf = 0;
+  /** Where a beam crosses the reachable box. See {@link segmentInBox}. */
+  readonly #span: Span = { from: 0, to: 0 };
 
   /**
    * Makes room for twice as many shots.
@@ -458,4 +543,47 @@ export class ShotField {
     tail.set(this.#tail);
     this.#tail = tail;
   }
+}
+
+/** A stretch of a segment, as distances along it from its start. */
+interface Span {
+  from: number;
+  to: number;
+}
+
+/**
+ * Which stretch of a segment lies inside a square centred on the origin.
+ *
+ * The segment starts at `(x, y)` and runs `length` along `(cos, sin)`; the
+ * square reaches `reach` either way on both axes. Clipped one axis at a time,
+ * which is exact for a box and is all a beam needs: the part of it that could
+ * be walked into.
+ *
+ * Written into `span` rather than returned, so that laying a beam out
+ * allocates nothing — see the file note.
+ *
+ * @returns whether any of it is inside.
+ */
+function segmentInBox(
+  x: number,
+  y: number,
+  cos: number,
+  sin: number,
+  length: number,
+  reach: number,
+  span: Span,
+): boolean {
+  span.from = 0;
+  span.to = length;
+  return clipAxis(x, cos, reach, span) && clipAxis(y, sin, reach, span) && span.from <= span.to;
+}
+
+/** One axis of {@link segmentInBox}: narrows `span` to where it is within reach. */
+function clipAxis(start: number, step: number, reach: number, span: Span): boolean {
+  if (Math.abs(step) < 1e-9) return Math.abs(start) <= reach;
+  const enter = (-reach - start) / step;
+  const leave = (reach - start) / step;
+  span.from = Math.max(span.from, Math.min(enter, leave));
+  span.to = Math.min(span.to, Math.max(enter, leave));
+  return true;
 }

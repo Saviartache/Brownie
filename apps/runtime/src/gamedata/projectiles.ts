@@ -8,12 +8,30 @@ import { childText, elementText, hasChild, parseGameNumber, scanElementsIn } fro
  * shots by index, and `ENEMYSHOOT` names one by `bulletType`. Without this, a
  * shot's speed and lifetime are unknown and where it will be cannot be
  * predicted at all.
+ *
+ * **Every default below is the client's, not a guess.** The game reads these
+ * elements into its own `ProjectileProperties`, and where an element is absent
+ * it substitutes a value of its own — a parametric figure three tiles across, a
+ * sine wave that completes one cycle, a turn that lasts the whole flight. A
+ * reader that filled the gaps with nought described different shots from the
+ * ones on the screen: a sine shot with no `<Frequency>` flew dead straight here
+ * and wove in the game. The values were read out of the client's own loader;
+ * `state/projectiles/ShotMotion.ts` says how each one is used.
  */
 export interface ProjectileDefinition {
   /** Index within its owner, which is what `bulletType` names. */
   readonly bulletType: number;
+  /** Tenths of a tile per second, as the file writes it. */
   readonly speed: number;
   readonly lifetimeMs: number;
+  /**
+   * What one of these takes off, when the file states a single figure.
+   *
+   * **Only a stand-in for an enemy's shot**, which announces the damage it
+   * rolled in its own `ENEMYSHOOT`. A definition that states only a range is
+   * given the middle of it, so a shot the packet did not describe is still
+   * ranked roughly where it belongs.
+   */
   readonly damage: number;
   readonly size: number;
   /**
@@ -40,23 +58,50 @@ export interface ProjectileDefinition {
   readonly multiHit: boolean;
   /** Whether it survives hitting a wall, for the same reason. */
   readonly passesCover: boolean;
+  /**
+   * How long the beam is, in tiles, for a laser. Nought for everything else.
+   *
+   * **A laser is not a point.** `<Laser>` is how far the beam reaches from where
+   * it was fired, and the shot itself never moves — `<Speed>0` — so a model that
+   * drew it as a bullet put the whole beam at its emitter and let a player stand
+   * in the middle of it. Only a few dozen projectiles declare one, and every one
+   * of them is a wall of damage for a fifth of a second.
+   */
+  readonly laserTiles: number;
+  /** Tiles of sideways swing. Nought for a shot that does not swing. */
   readonly amplitude: number;
+  /** Whole swings per lifetime. **One when the file does not say**, as in the game. */
   readonly frequency: number;
+  /** Tiles across a parametric figure. **Three when the file does not say.** */
   readonly magnitude: number;
-  /** Speed units added per second after {@link accelerationDelayMs}. */
+  /** Tenths of a tile per second, gained each second once the delay is over. */
   readonly acceleration: number;
   readonly accelerationDelayMs: number;
+  /** The speed acceleration stops at, in tenths of a tile per second. */
   readonly speedClamp: number;
   /**
-   * Degrees a second the shot curves. Parsed, and **not applied** either.
+   * How far the shot turns, in degrees.
    *
-   * Nine hundred of the game's projectiles turn — every spiral that curls as it
-   * travels — and predicting one as a straight line is not "slightly off", it is
-   * a different path. Recorded so that {@link motionModelled} can say so, which
-   * is what lets a planner leave room around what it cannot predict instead of
-   * committing to a place the shot was never going to be.
+   * **A total over `turnStopTimeMs`, not a rate** — the game divides one by the
+   * other. Nine hundred of the game's projectiles turn, and they are every
+   * spiral that curls as it travels.
    */
   readonly turnRate: number;
+  readonly turnRateDelayMs: number;
+  /** In the file's own unit; the game uses it without converting it. */
+  readonly turnAcceleration: number;
+  readonly turnAccelerationDelayMs: number;
+  /** Degrees. */
+  readonly turnClamp: number;
+  /**
+   * How long the turn lasts, or nought when the file does not say — in which
+   * case the game turns for the whole flight, or until the circling begins.
+   */
+  readonly turnStopTimeMs: number;
+  /** Degrees swept per `turnStopTimeMs` once a circling shot starts circling. */
+  readonly circleTurnAngle: number;
+  /** When a circling shot stops flying outward and starts going round. */
+  readonly circleTurnDelayMs: number;
   /**
    * How bad the worst condition this one applies is, from nought to one.
    *
@@ -70,30 +115,26 @@ export interface ProjectileDefinition {
 }
 
 /**
- * Whether the motion model describes this kind of shot's whole path.
+ * The figure the game gives a parametric shot that states no `<Magnitude>`.
  *
- * False for the ones that turn. `positionAt` covers acceleration, wavy,
- * parametric, boomerang and the lateral amplitude, but has no term for turning.
+ * Read out of the client's loader. Filling the gap with nought, or with one,
+ * drew a figure a third the size of the one the game flies.
  */
-export function motionModelled(definition: ProjectileDefinition): boolean {
-  return definition.turnRate === 0;
-}
+const DEFAULT_MAGNITUDE_TILES = 3;
+
+/** And the sine shot that states no `<Frequency>`: one swing per flight. */
+const DEFAULT_FREQUENCY = 1;
 
 /**
- * How far one of these travels in a millisecond.
+ * How far one of these travels in a millisecond, before anything multiplies it.
  *
- * The file stores speed in units of a ten-thousandth of a tile per
- * millisecond, which is the game's own encoding and not a rounding of
- * anything. Kept here rather than written out wherever a shot is predicted, so
- * the two places that predict one cannot disagree about it.
+ * The file stores speed in tenths of a tile per second, which is the game's own
+ * encoding and not a rounding of anything. Kept here rather than written out
+ * wherever a shot is predicted, so the two places that predict one cannot
+ * disagree about it.
  */
 export function speedTilesPerMs(definition: ProjectileDefinition): number {
   return definition.speed / 10_000;
-}
-
-/** The greatest speed this definition can reach, including its acceleration clamp. */
-export function maxSpeedTilesPerSecond(definition: ProjectileDefinition): number {
-  return Math.max(Math.abs(definition.speed), Math.abs(definition.speedClamp)) / 10;
 }
 
 /**
@@ -123,31 +164,57 @@ export function readProjectiles(objectElement: string): ProjectileDefinition[] {
 
   for (const element of scanElementsIn(objectElement, 'Projectile')) {
     const bulletType = parseGameNumber(attributeOf(element, 'id')) ?? definitions.length;
+    const number = (name: string): number | undefined => parseGameNumber(childText(element, name));
     definitions.push({
       bulletType,
-      speed: parseGameNumber(childText(element, 'Speed')) ?? 0,
-      lifetimeMs: parseGameNumber(childText(element, 'LifetimeMS')) ?? 0,
-      damage: parseGameNumber(childText(element, 'Damage')) ?? 0,
-      size: parseGameNumber(childText(element, 'Size')) ?? 100,
+      speed: number('Speed') ?? 0,
+      lifetimeMs: number('LifetimeMS') ?? 0,
+      damage: damageOf(number('Damage'), number('MinDamage'), number('MaxDamage')),
+      size: number('Size') ?? 100,
       // One is what the game assumes for a projectile that does not say.
-      collisionMult: parseGameNumber(childText(element, 'CollisionMult')) ?? 1,
+      collisionMult: number('CollisionMult') ?? 1,
       wavy: hasChild(element, 'Wavy'),
       multiHit: hasChild(element, 'MultiHit'),
       passesCover: hasChild(element, 'PassesCover'),
       parametric: hasChild(element, 'Parametric'),
       boomerang: hasChild(element, 'Boomerang'),
-      amplitude: parseGameNumber(childText(element, 'Amplitude')) ?? 0,
-      frequency: parseGameNumber(childText(element, 'Frequency')) ?? 0,
-      magnitude: parseGameNumber(childText(element, 'Magnitude')) ?? 0,
-      acceleration: parseGameNumber(childText(element, 'Acceleration')) ?? 0,
-      accelerationDelayMs: parseGameNumber(childText(element, 'AccelerationDelay')) ?? 0,
-      speedClamp: parseGameNumber(childText(element, 'SpeedClamp')) ?? 0,
-      turnRate: parseGameNumber(childText(element, 'TurnRate')) ?? 0,
+      laserTiles: Math.max(0, number('Laser') ?? 0),
+      amplitude: number('Amplitude') ?? 0,
+      frequency: number('Frequency') ?? DEFAULT_FREQUENCY,
+      magnitude: number('Magnitude') ?? DEFAULT_MAGNITUDE_TILES,
+      acceleration: number('Acceleration') ?? 0,
+      accelerationDelayMs: number('AccelerationDelay') ?? 0,
+      speedClamp: number('SpeedClamp') ?? 0,
+      turnRate: number('TurnRate') ?? 0,
+      turnRateDelayMs: number('TurnRateDelay') ?? 0,
+      turnAcceleration: number('TurnAcceleration') ?? 0,
+      turnAccelerationDelayMs: number('TurnAccelerationDelay') ?? 0,
+      turnClamp: number('TurnClamp') ?? 0,
+      turnStopTimeMs: number('TurnStopTime') ?? 0,
+      circleTurnAngle: number('CircleTurnAngle') ?? 0,
+      circleTurnDelayMs: number('CircleTurnDelay') ?? 0,
       debuffSeverity: debuffSeverityOf(conditionsIn(element)),
     });
   }
 
   return definitions;
+}
+
+/**
+ * What a definition says one of its shots takes off.
+ *
+ * `<Damage>` where it is stated. Two thousand of the game's projectiles state a
+ * range instead, and ranking every one of those as harmless would have the
+ * planner walk into a boss's shotgun to avoid a pellet.
+ */
+function damageOf(
+  exact: number | undefined,
+  least: number | undefined,
+  most: number | undefined,
+): number {
+  if (exact !== undefined) return exact;
+  if (least !== undefined && most !== undefined) return Math.round((least + most) / 2);
+  return least ?? most ?? 0;
 }
 
 /**

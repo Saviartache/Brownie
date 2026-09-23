@@ -36,6 +36,7 @@ import {
 import { SelfBlastKeepouts } from '../src/features/dodge/SelfBlastKeepouts.js';
 import { PLAYER_HALF_TILES } from '../src/features/dodge/hitbox.js';
 import { WorldState } from '../src/state/WorldState.js';
+import { projectileDefinition } from './fakes.js';
 
 const registry: PacketRegistry = createBundledRegistry();
 const FROM_SERVER: PacketContext = { origin: PacketOrigin.Server, sessionId: 's1' };
@@ -100,28 +101,7 @@ function telegraph(at: { x: number; y: number }, thrower = BLASTER_ID): MutableP
 
 /** A catalog that can describe one shot, for the stationary-field path. */
 function shooter(overrides: Partial<ProjectileDefinition> = {}): ObjectCatalog {
-  const definition: ProjectileDefinition = {
-    bulletType: 0,
-    speed: 0,
-    lifetimeMs: 4000,
-    damage: 10,
-    size: 100,
-    collisionMult: 1,
-    wavy: false,
-    multiHit: false,
-    passesCover: false,
-    parametric: false,
-    boomerang: false,
-    amplitude: 0,
-    frequency: 0,
-    magnitude: 0,
-    acceleration: 0,
-    accelerationDelayMs: 0,
-    speedClamp: 0,
-    turnRate: 0,
-    debuffSeverity: 0,
-    ...overrides,
-  };
+  const definition = projectileDefinition({ speed: 0, lifetimeMs: 4000, damage: 10, ...overrides });
   return {
     isPlayer: () => false,
     isEnemy: () => true,

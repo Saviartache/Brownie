@@ -20,8 +20,8 @@ import {
   Origin,
   createNonce,
   decodeMessage,
+  encodeClientFrame,
   encodeMessage,
-  encodeTelemetry,
   sign,
 } from '@brownie/ipc';
 import { MutablePacket } from '@brownie/plugin-api';
@@ -258,17 +258,6 @@ function buildTickFrame(registry) {
 
 // ── The link: Node → native ──────────────────────────────────────────────────
 
-const telemetry = {
-  alive: true,
-  x: 123.5,
-  y: 64.25,
-  hp: 812,
-  maxHp: 1100,
-  defense: 35,
-  defenseKnown: true,
-  uptimeMs: 60_000,
-};
-
 measure('encode controlRecord', 200_000, (i) =>
   encodeMessage({ kind: 'controlRecord', record: SETTING_RECORD }, (i % 0xffff_fffe) + 1),
 );
@@ -279,15 +268,35 @@ measure('encode setFeature', 200_000, (i) =>
 
 // ── The link: native → Node, once per game frame ─────────────────────────────
 
-const telemetryFrame = encodeMessage({ kind: 'playerTelemetry', ...telemetry }, 1);
-const telemetryReader = new FrameReader();
+// A busy frame: a boss's volley made and the last one's shots ending, which is
+// what the dodge's reading carries at its heaviest.
+const clientFrame = {
+  kind: 'clientFrame',
+  player: { x: 123.5, y: 64.25 },
+  frameTimeMs: 60_000,
+  scanned: true,
+  born: Array.from({ length: 24 }, (_, i) => ({
+    ownerId: 4012,
+    bulletId: i,
+    ageMs: 3,
+    x: 120.5,
+    y: 60.75,
+    angle: (i * Math.PI) / 12,
+    speedMultiplier: 1,
+    lifetimeMs: 1800,
+    halfTiles: 0.5,
+  })),
+  gone: Array.from({ length: 24 }, (_, i) => ({ ownerId: 4012, bulletId: 100 + i })),
+};
+const clientFrameBytes = encodeMessage(clientFrame, 1);
+const clientFrameReader = new FrameReader();
 
-measure('decode telemetry frame', 200_000, () => {
-  telemetryReader.push(telemetryFrame);
-  decodeMessage(telemetryReader.next(), Origin.Native);
+measure('decode client frame', 200_000, () => {
+  clientFrameReader.push(clientFrameBytes);
+  decodeMessage(clientFrameReader.next(), Origin.Native);
 });
 
-measure('encode telemetry payload', 500_000, () => encodeTelemetry(telemetry));
+measure('encode client frame payload', 200_000, () => encodeClientFrame(clientFrame));
 
 // ── One full overlay sync, through the real link ─────────────────────────────
 

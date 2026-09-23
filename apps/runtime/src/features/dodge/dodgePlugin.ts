@@ -439,13 +439,29 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         orbiting = orbit.radiusTiles > 0;
       };
 
+      /**
+       * Where the player is, which every plan and every picture starts from.
+       *
+       * **The client's own reading when the module is giving one**, because the
+       * packets' is a moment old and a moment is the whole problem: a plan that
+       * does not see its own step land commands it again, and the character
+       * overshoots the gap and walks back into the shot. The packets' reading
+       * is what is left when the module is not there to ask.
+       */
+      const whereIs = (session: SessionView): Position => {
+        const here = inputs.player.at(session);
+        return here ?? { x: session.self.x, y: session.self.y };
+      };
+
       const dodge = (session: SessionView, nowMs: number): void => {
+        const here = whereIs(session);
+
         // **Before the chord, so that a key pressed during one still names the
         // place it was pressed at.** The switch is armed and there is nowhere
         // held yet, which happens once per press and never again until the next
         // one.
         if (anchor === undefined && controls.anchor.get()) {
-          anchor = { x: session.self.x, y: session.self.y };
+          anchor = { x: here.x, y: here.y };
         }
 
         // **A stamp compared, not a flag consumed**, because auto-follow answers
@@ -476,7 +492,7 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         }
 
         const planning = planningSettings(controls);
-        scene.observe(session, controls, planning);
+        scene.observe(session, here, controls, planning);
 
         const self = session.self;
         const map = session.world;
@@ -485,8 +501,8 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
 
         const plan = planner.plan(
           {
-            x: self.x,
-            y: self.y,
+            x: here.x,
+            y: here.y,
             intentX: intent?.x ?? 0,
             intentY: intent?.y ?? 0,
             speedTilesPerSecond: speed,
@@ -561,7 +577,15 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
         const session = context.sessions.current();
         if (session === undefined) return;
         planNow(session);
-        picture.publish(session, scene, controls, Date.now(), anchor, orbiting ? orbit : undefined);
+        picture.publish(
+          session,
+          whereIs(session),
+          scene,
+          controls,
+          Date.now(),
+          anchor,
+          orbiting ? orbit : undefined,
+        );
       }, PLAN_INTERVAL_MS);
 
       // **The one packet that changes the answer by arriving**, and it changes it

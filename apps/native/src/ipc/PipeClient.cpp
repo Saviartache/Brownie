@@ -111,7 +111,8 @@ Status PipeClient::Send(const std::byte* data, std::size_t size) {
     return {};
 }
 
-Result<std::size_t> PipeClient::Receive(std::byte* out, std::size_t capacity, DWORD timeout_ms) {
+Result<std::size_t> PipeClient::Receive(std::byte* out, std::size_t capacity, DWORD timeout_ms,
+                                        HANDLE wake) {
     if (!connected()) return Error{ErrorCode::kNotReady, "the pipe is not connected"};
     if (out == nullptr || capacity == 0) {
         return Error{ErrorCode::kInvalidArgument, "no room to receive into"};
@@ -129,10 +130,11 @@ Result<std::size_t> PipeClient::Receive(std::byte* out, std::size_t capacity, DW
         return SystemError(ErrorCode::kIo, "the pipe refused a read");
     }
 
-    const std::array<HANDLE, 2> waits{read_done_.get(), cancel_.get()};
-    const DWORD signalled = ::WaitForMultipleObjects(2, waits.data(), FALSE, timeout_ms);
+    const std::array<HANDLE, 3> waits{read_done_.get(), cancel_.get(), wake};
+    const DWORD count = wake != nullptr ? 3 : 2;
+    const DWORD signalled = ::WaitForMultipleObjects(count, waits.data(), FALSE, timeout_ms);
     if (signalled != WAIT_OBJECT_0) {
-        // A timeout, or cancellation. Either way the read is not left
+        // A timeout, a wake or cancellation. Either way the read is not left
         // outstanding against a buffer the caller may reuse — an overlapped read
         // still writing into a dead stack frame is precisely the corruption this
         // class exists to make impossible.
@@ -152,8 +154,12 @@ Result<std::size_t> PipeClient::Receive(std::byte* out, std::size_t capacity, DW
         if (::GetOverlappedResult(pipe_.get(), &overlapped, &moved, TRUE) != FALSE && moved > 0) {
             return static_cast<std::size_t>(moved);
         }
-        return Error{ErrorCode::kNotReady,
-                     signalled == WAIT_TIMEOUT ? "no data yet" : "the read was cancelled"};
+        if (signalled == WAIT_TIMEOUT) {
+            return Error{ErrorCode::kNotReady, "no data yet"};
+        }
+        return Error{ErrorCode::kNotReady, signalled == WAIT_OBJECT_0 + 2
+                                               ? "woken to send"
+                                               : "the read was cancelled"};
     }
 
     if (::GetOverlappedResult(pipe_.get(), &overlapped, &moved, FALSE) == FALSE) {

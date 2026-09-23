@@ -8,17 +8,40 @@ import {
   MessageError,
   MessageType,
   Origin,
+  decodeClientFrame,
   decodeMessage,
-  decodeTelemetry,
+  encodeClientFrame,
   encodeMessage,
-  encodeTelemetry,
   framedSize,
   prepareMessage,
   writeHeader,
   writeMessage,
+  type ClientFrameMessage,
   type Frame,
   type IpcMessage,
 } from '../src/index.js';
+
+/** A frame with one of everything, in values a float carries exactly. */
+const FULL_FRAME: ClientFrameMessage = {
+  kind: 'clientFrame',
+  player: { x: 123.5, y: -64.25 },
+  frameTimeMs: 90_000,
+  scanned: true,
+  born: [
+    {
+      ownerId: 4012,
+      bulletId: 32766,
+      ageMs: 12,
+      x: 120.5,
+      y: -60.75,
+      angle: 1.5,
+      speedMultiplier: 1.25,
+      lifetimeMs: 1800,
+      halfTiles: 0.375,
+    },
+  ],
+  gone: [{ ownerId: 4012, bulletId: 7 }],
+};
 
 /** Encodes a message and reads it back through the framer, as the pipe would. */
 function roundTrip(message: IpcMessage, from: Origin): IpcMessage {
@@ -68,37 +91,16 @@ describe('message codec', () => {
       { kind: 'hotkeyEvent', pluginId: 'auto-dodge', slot: 'anchor', action: 'hold', value: false },
       { kind: 'offsetHealth', unresolved: ['HBEAKBIHANL', 'KDAJOMOFMJB'] },
       { kind: 'serverTarget', host: '18.194.220.13', port: 2050 },
-      {
-        kind: 'playerTelemetry',
-        alive: true,
-        x: 123.5,
-        y: -64.25,
-        hp: 640,
-        maxHp: 770,
-        defense: 25,
-        uptimeMs: 90_000,
-      },
+      FULL_FRAME,
     ];
     for (const message of messages) {
       expect(roundTrip(message, Origin.Native), message.kind).toEqual(message);
     }
   });
 
-  it('marks telemetry binary and keeps everything else JSON', () => {
-    const telemetry = encodeMessage(
-      {
-        kind: 'playerTelemetry',
-        alive: false,
-        x: 0,
-        y: 0,
-        hp: 0,
-        maxHp: 0,
-        defense: undefined,
-        uptimeMs: 0,
-      },
-      1,
-    );
-    expect(telemetry.readUInt16LE(8) & FrameFlags.Binary).toBe(FrameFlags.Binary);
+  it('marks a client frame binary and keeps everything else JSON', () => {
+    const frame = encodeMessage(FULL_FRAME, 1);
+    expect(frame.readUInt16LE(8) & FrameFlags.Binary).toBe(FrameFlags.Binary);
 
     const control = encodeMessage({ kind: 'controlAction', action: 'x' }, 1);
     expect(control.readUInt16LE(8) & FrameFlags.Binary).toBe(0);
@@ -171,10 +173,30 @@ describe('message codec', () => {
       });
     }
 
-    it('truncated telemetry', () => {
-      const frame = rawFrame(MessageType.PlayerTelemetry, Buffer.alloc(8), FrameFlags.Binary);
-      expect(() => decodeMessage(frame, Origin.Native)).toThrow(/expected 24/);
+    it('a client frame shorter than its header', () => {
+      const frame = rawFrame(MessageType.ClientFrame, Buffer.alloc(8), FrameFlags.Binary);
+      expect(() => decodeMessage(frame, Origin.Native)).toThrow(MessageError);
     });
+
+    it('a client frame whose counts and length disagree', () => {
+      const payload = encodeClientFrame(FULL_FRAME);
+      for (const cut of [
+        payload.subarray(0, payload.length - 1),
+        Buffer.concat([payload, Buffer.alloc(8)]),
+      ]) {
+        const frame = rawFrame(MessageType.ClientFrame, cut, FrameFlags.Binary);
+        expect(() => decodeMessage(frame, Origin.Native)).toThrow(MessageError);
+      }
+    });
+  });
+
+  it('refuses a client frame from the runtime', () => {
+    const frame = rawFrame(
+      MessageType.ClientFrame,
+      encodeClientFrame(FULL_FRAME),
+      FrameFlags.Binary,
+    );
+    expect(() => decodeMessage(frame, Origin.Runtime)).toThrow(LinkError);
   });
 
   it('keeps a message type it does not know, rather than failing', () => {
@@ -223,53 +245,77 @@ describe('message codec', () => {
   });
 });
 
-describe('telemetry', () => {
-  it('is exactly 24 bytes regardless of content', () => {
-    const encoded = encodeTelemetry({
-      kind: 'playerTelemetry',
-      alive: true,
-      x: 1,
-      y: 2,
-      hp: 3,
-      maxHp: 4,
-      defense: 5,
-      uptimeMs: 6,
-    });
-    expect(encoded).toHaveLength(24);
+describe('client frame', () => {
+  it('is its header, 36 bytes a shot made and 8 a shot gone', () => {
+    expect(encodeClientFrame(FULL_FRAME)).toHaveLength(20 + 36 + 8);
+    const empty: ClientFrameMessage = {
+      kind: 'clientFrame',
+      player: undefined,
+      frameTimeMs: undefined,
+      scanned: false,
+      born: [],
+      gone: [],
+    };
+    expect(encodeClientFrame(empty)).toHaveLength(20);
+    expect(decodeClientFrame(encodeClientFrame(empty))).toEqual(empty);
   });
 
-  it('distinguishes "no defense" from "defense is zero"', () => {
-    const base = {
-      kind: 'playerTelemetry',
-      alive: true,
-      x: 0,
-      y: 0,
-      hp: 1,
-      maxHp: 1,
-      uptimeMs: 0,
-    } as const;
-    expect(
-      decodeTelemetry(encodeTelemetry({ ...base, defense: undefined })).defense,
-    ).toBeUndefined();
-    expect(decodeTelemetry(encodeTelemetry({ ...base, defense: 0 })).defense).toBe(0);
+  it('is laid out as the module packs it', () => {
+    // Written by hand, byte by byte, as `DodgeTelemetry.cpp` writes it — so the
+    // two ends are checked against the document rather than against each other.
+    const payload = Buffer.alloc(20 + 36 + 8);
+    payload.writeUInt8(0b111, 0);
+    payload.writeUInt16LE(1, 2);
+    payload.writeUInt16LE(1, 4);
+    payload.writeInt32LE(90_000, 8);
+    payload.writeFloatLE(123.5, 12);
+    payload.writeFloatLE(-64.25, 16);
+    payload.writeInt32LE(4012, 20);
+    payload.writeUInt16LE(32766, 24);
+    payload.writeInt32LE(12, 28);
+    payload.writeFloatLE(120.5, 32);
+    payload.writeFloatLE(-60.75, 36);
+    payload.writeFloatLE(1.5, 40);
+    payload.writeFloatLE(1.25, 44);
+    payload.writeFloatLE(1800, 48);
+    payload.writeFloatLE(0.375, 52);
+    payload.writeInt32LE(4012, 56);
+    payload.writeUInt16LE(7, 60);
+    expect(decodeClientFrame(payload)).toEqual(FULL_FRAME);
   });
 
-  it('clamps values that cannot fit rather than throwing on a hot path', () => {
-    const decoded = decodeTelemetry(
-      encodeTelemetry({
-        kind: 'playerTelemetry',
-        alive: true,
-        x: Number.NaN,
-        y: 0,
-        hp: 1e12,
-        maxHp: -1e12,
-        defense: 99_999,
-        uptimeMs: 0,
+  it('keeps "no player" apart from a player at the origin, and the same for the clock', () => {
+    const decoded = decodeClientFrame(
+      encodeClientFrame({ ...FULL_FRAME, player: undefined, scanned: false, born: [], gone: [] }),
+    );
+    expect(decoded.player).toBeUndefined();
+    expect(decoded.frameTimeMs).toBe(90_000);
+
+    const origin = decodeClientFrame(
+      encodeClientFrame({ ...FULL_FRAME, player: { x: 0, y: 0 }, frameTimeMs: 0 }),
+    );
+    expect(origin.player).toEqual({ x: 0, y: 0 });
+    expect(origin.frameTimeMs).toBe(0);
+  });
+
+  it('refuses a scan with no clock to age it by', () => {
+    const payload = encodeClientFrame({ ...FULL_FRAME, frameTimeMs: undefined });
+    expect(() => decodeClientFrame(payload)).toThrow(/without a clock/);
+  });
+
+  it('refuses shots in a frame that says it did not scan', () => {
+    const payload = encodeClientFrame(FULL_FRAME);
+    payload.writeUInt8(0b011, 0);
+    expect(() => decodeClientFrame(payload)).toThrow(/did not scan/);
+  });
+
+  it('carries a shot that is not a number through, for its reader to drop', () => {
+    const decoded = decodeClientFrame(
+      encodeClientFrame({
+        ...FULL_FRAME,
+        born: [{ ...FULL_FRAME.born[0]!, angle: Number.NaN }],
       }),
     );
-    expect(Number.isNaN(decoded.x)).toBe(true);
-    expect(decoded.hp).toBe(0x7fff_ffff);
-    expect(decoded.maxHp).toBe(-0x8000_0000);
-    expect(decoded.defense).toBe(0x7fff);
+    expect(Number.isNaN(decoded.born[0]?.angle)).toBe(true);
   });
 });

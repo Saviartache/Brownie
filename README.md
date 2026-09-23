@@ -199,6 +199,12 @@ information than any planner.
   same monster. Clicking bare ground lets go.
 - **Sidestep instantly when there is no time to walk** — a short emergency hop
   for shots that arrive faster than walking can answer.
+- **Plans from what the client sees**, not from the packets: where the character
+  is on this frame, when the client started each shot and how its owner sped it
+  up, and which shots the client has already destroyed against a wall. Every
+  shot is flown with the game's own motion code and hit-tested with the game's
+  own square — the *extra margin* setting is the one place any padding is added.
+  Needs the native module; without it the dodge plans from the packets.
 - *Advanced, grouped:* **Reaction** (how far ahead to look, planning step,
   how urgent trouble must be, directions considered, thinking budget),
   **Safety** (caution, extra margin, distrust of far predictions, wall and

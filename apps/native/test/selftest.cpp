@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/DodgeTelemetry.h"
 #include "app/HotkeyWatch.h"
 #include "app/Inspection.h"
 #include "app/PlayerControl.h"
@@ -32,6 +33,7 @@
 #include "game/AimSolver.h"
 #include "game/ArcaneStyle.h"
 #include "game/ClassCatalog.h"
+#include "game/ClientShots.h"
 #include "game/GlowFields.h"
 #include "game/HealthBarTint.h"
 #include "game/OffsetTable.h"
@@ -406,6 +408,13 @@ void WorldRecordsCarryBlastCounts() {
     Check(brownie::overlay::ParseWorldRecord("world|640|770|0|0|0|0|41|3|0|0", older),
           "a record without them still parses");
     Check(!older.blast_stats_known, "and says it does not know rather than reading nought");
+    Check(!status.client_shot_stats_known, "nor does one that stops after the blasts");
+
+    brownie::overlay::WorldStatus newer;
+    Check(brownie::overlay::ParseWorldRecord("world|640|770|0|0|0|0|41|3|0|0|2|7|1|12|5", newer),
+          "a record with the client's shot counts parses");
+    Check(newer.client_shot_stats_known && newer.shots_confirmed == 12 && newer.shots_ended == 5,
+          "and both survive");
 }
 
 void WeaponRecordsCarryTheName() {
@@ -1850,6 +1859,355 @@ void TwoKeysOnOnePluginAreTwoBinds() {
     Check(log.Take() == "auto-dodge.anchor:hold:0", "and losing one slot releases only that one");
 }
 
+// ── What the dodge reads off the client ─────────────────────────────────────
+//
+// The scan walks the game's own tables through `ReadRaw`, which reads this
+// process's memory as readily as the game's — so the world below is laid out
+// the way the game lays one out, and read exactly as the game's would be.
+
+/// One managed object's worth of memory, at an address that does not move.
+struct FakeObject {
+    alignas(16) std::array<std::byte, 0x200> bytes{};
+
+    template <typename T>
+    void Put(std::uint32_t at, T value) {
+        std::memcpy(bytes.data() + at, &value, sizeof(T));
+    }
+    [[nodiscard]] const void* address() const { return bytes.data(); }
+};
+
+constexpr std::uint32_t kFakeIdAt = 0x40;
+constexpr std::uint32_t kFakeXAt = 0x44;
+constexpr std::uint32_t kFakeYAt = 0x48;
+constexpr std::uint32_t kFakeObjectsAt = 0x20;
+constexpr std::uint32_t kFakePendingAt = 0x30;
+constexpr std::uint32_t kFakeFrameTimeAt = 0x38;
+constexpr std::uint32_t kFakeStartXAt = 0x100;
+constexpr std::uint32_t kFakeStartYAt = 0x104;
+constexpr std::uint32_t kFakeAngleAt = 0x108;
+constexpr std::uint32_t kFakeStartTimeAt = 0x10C;
+constexpr std::uint32_t kFakeOwnerAt = 0x110;
+constexpr std::uint32_t kFakeBulletAt = 0x114;
+constexpr std::uint32_t kFakeDamagesPlayersAt = 0x118;
+constexpr std::uint32_t kFakeSpeedAt = 0x11C;
+constexpr std::uint32_t kFakeLifetimeAt = 0x120;
+constexpr std::uint32_t kFakeRadiusAt = 0x124;
+
+/// Three class pointers: only ever compared, so any three addresses will do.
+const int kFakeShotClass = 0;
+const int kFakePooledClass = 0;
+const int kFakeOtherClass = 0;
+
+/// A world manager with one object table and a pending list, laid out as
+/// `MapObjects.cpp` reads them: a dictionary's entries at `0x18` and its count
+/// at `0x20`, 24-byte entries with the key at 8 and the value at 16; a list's
+/// items at `0x10` and its size at `0x18`; an array's length at `0x18` and its
+/// elements from `0x20`.
+class FakeWorld {
+  public:
+    FakeWorld() {
+        world_.Put(kFakeObjectsAt, dictionary_.address());
+        Pend({});
+    }
+
+    /// Files these objects in the table. A null object is a slot that was
+    /// removed, which is what `Dictionary.Remove` leaves behind.
+    void File(const std::vector<std::pair<std::int32_t, const void*>>& slots) {
+        entries_.assign(0x20 + slots.size() * 24, std::byte{0});
+        const std::uint64_t length = slots.size();
+        std::memcpy(entries_.data() + 0x18, &length, sizeof(length));
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            std::byte* entry = entries_.data() + 0x20 + i * 24;
+            std::memcpy(entry + 8, &slots[i].first, sizeof(std::int32_t));
+            std::memcpy(entry + 16, &slots[i].second, sizeof(const void*));
+        }
+        dictionary_.Put<const void*>(0x18, entries_.data());
+        dictionary_.Put(0x20, static_cast<std::int32_t>(slots.size()));
+    }
+
+    /// Made and not filed yet.
+    void Pend(const std::vector<const void*>& objects) {
+        items_.assign(0x20 + objects.size() * sizeof(void*), std::byte{0});
+        const std::uint64_t length = objects.size();
+        std::memcpy(items_.data() + 0x18, &length, sizeof(length));
+        for (std::size_t i = 0; i < objects.size(); ++i) {
+            std::memcpy(items_.data() + 0x20 + i * sizeof(void*), &objects[i], sizeof(void*));
+        }
+        list_.Put<const void*>(0x10, items_.data());
+        list_.Put(0x18, static_cast<std::int32_t>(objects.size()));
+        world_.Put(kFakePendingAt, list_.address());
+    }
+
+    /// Points the table at memory nobody can read, as a table being torn down
+    /// under the walk would.
+    void Break() { dictionary_.Put<const void*>(0x18, reinterpret_cast<const void*>(0x10)); }
+
+    [[nodiscard]] const void* address() const { return world_.address(); }
+
+  private:
+    FakeObject world_;
+    FakeObject dictionary_;
+    FakeObject list_;
+    std::vector<std::byte> entries_;
+    std::vector<std::byte> items_;
+};
+
+brownie::game::ClientShotRoute FakeShotRoute() {
+    static const int singleton = 0;
+    brownie::game::ClientShotRoute route;
+    // Never read by a scan, which is handed the world rather than finding it;
+    // only there so the route counts as complete.
+    route.objects.world.singleton = &singleton;
+    route.objects.world.world_manager_at = 0x08;
+    route.objects.objects_at = kFakeObjectsAt;
+    route.objects.object_id_at = kFakeIdAt;
+    route.objects.x_at = kFakeXAt;
+    route.objects.y_at = kFakeYAt;
+    route.pending_at = kFakePendingAt;
+    route.frame_time_at = kFakeFrameTimeAt;
+    route.shot_class = &kFakeShotClass;
+    route.shot_subclass = &kFakePooledClass;
+    route.start_x_at = kFakeStartXAt;
+    route.start_y_at = kFakeStartYAt;
+    route.angle_at = kFakeAngleAt;
+    route.start_time_at = kFakeStartTimeAt;
+    route.owner_at = kFakeOwnerAt;
+    route.bullet_id_at = kFakeBulletAt;
+    route.damages_players_at = kFakeDamagesPlayersAt;
+    route.speed_multiplier_at = kFakeSpeedAt;
+    route.lifetime_at = kFakeLifetimeAt;
+    route.radius_at = kFakeRadiusAt;
+    return route;
+}
+
+void MakeShot(FakeObject& shot, const void* klass, std::int32_t id, std::int32_t owner,
+              std::uint32_t bullet, std::int32_t started, bool enemy) {
+    shot.Put(0, klass);
+    shot.Put(kFakeIdAt, id);
+    shot.Put(kFakeStartXAt, 10.5F);
+    shot.Put(kFakeStartYAt, -4.25F);
+    shot.Put(kFakeAngleAt, 1.5F);
+    shot.Put(kFakeStartTimeAt, started);
+    shot.Put(kFakeOwnerAt, owner);
+    shot.Put(kFakeBulletAt, bullet);
+    shot.Put(kFakeDamagesPlayersAt, static_cast<std::uint8_t>(enemy ? 1 : 0));
+    shot.Put(kFakeSpeedAt, 1.25F);
+    shot.Put(kFakeLifetimeAt, 1800.0F);
+    shot.Put(kFakeRadiusAt, 0.4F);
+}
+
+void AScanReportsAShotOnceAndItsEndAfterTwoMisses() {
+    const auto route = FakeShotRoute();
+    FakeObject enemy;
+    MakeShot(enemy, &kFakePooledClass, 101, 7, 3, 990, true);
+    FakeObject friendly;
+    MakeShot(friendly, &kFakeShotClass, 102, 1, 4, 995, false);
+    FakeObject wall;
+    wall.Put<const void*>(0, &kFakeOtherClass);
+    wall.Put(kFakeIdAt, std::int32_t{103});
+
+    FakeWorld world;
+    world.File({{101, enemy.address()}, {102, friendly.address()}, {103, wall.address()}});
+
+    brownie::game::ClientShotScanner scanner;
+    brownie::game::ShotScan scan;
+    Check(scanner.Scan(world.address(), 1000, route, scan), "a whole world is walked");
+    Check(scan.born.size() == 1 && scan.gone.empty(), "only an enemy's shot is news");
+    if (scan.born.size() == 1) {
+        const auto& shot = scan.born[0];
+        Check(shot.owner_id == 7 && shot.bullet_id == 3, "a shot is named as the client names it");
+        Check(shot.age_ms == 10, "and aged on the client's own clock");
+        Check(shot.start_x == 10.5F && shot.start_y == -4.25F && shot.angle == 1.5F,
+              "where it started and which way are read as written");
+        Check(shot.speed_multiplier == 1.25F && shot.lifetime_ms == 1800.0F &&
+                  shot.half_tiles == 0.4F,
+              "and so are its multiplier, its life and its size");
+    }
+
+    Check(scanner.Scan(world.address(), 1016, route, scan) && scan.born.empty() &&
+              scan.gone.empty(),
+          "a shot is news once");
+
+    // Removed as `Dictionary.Remove` removes: the slot stays, emptied.
+    world.File({{0, nullptr}, {102, friendly.address()}, {103, wall.address()}});
+    Check(scanner.Scan(world.address(), 1032, route, scan) && scan.gone.empty(),
+          "gone once is not gone");
+    Check(scanner.Scan(world.address(), 1048, route, scan) && scan.gone.size() == 1 &&
+              scan.gone[0].owner_id == 7 && scan.gone[0].bullet_id == 3,
+          "gone twice is gone, and named as it was born");
+    Check(scanner.Scan(world.address(), 1064, route, scan) && scan.gone.empty(),
+          "and it is said once");
+
+    // A shot missing for one scan and back on the next was never gone.
+    world.File({{101, enemy.address()}, {102, friendly.address()}});
+    (void)scanner.Scan(world.address(), 1080, route, scan);
+    world.File({{102, friendly.address()}});
+    (void)scanner.Scan(world.address(), 1096, route, scan);
+    world.File({{101, enemy.address()}, {102, friendly.address()}});
+    Check(scanner.Scan(world.address(), 1112, route, scan) && scan.born.empty() &&
+              scan.gone.empty(),
+          "a table caught mid-rearrangement costs nothing");
+}
+
+void AShotNotYetFiledIsFoundWhereItWaits() {
+    const auto route = FakeShotRoute();
+    FakeObject shot;
+    MakeShot(shot, &kFakeShotClass, 201, 9, 12, 2000, true);
+
+    FakeWorld world;
+    world.File({});
+    world.Pend({shot.address()});
+
+    brownie::game::ClientShotScanner scanner;
+    brownie::game::ShotScan scan;
+    Check(scanner.Scan(world.address(), 2000, route, scan) && scan.born.size() == 1 &&
+              scan.born[0].age_ms == 0,
+          "a shot made this frame is found the frame it was made");
+
+    // Filed on the next update, and the same shot as far as anybody can tell.
+    world.Pend({});
+    world.File({{201, shot.address()}});
+    Check(scanner.Scan(world.address(), 2016, route, scan) && scan.born.empty() &&
+              scan.gone.empty(),
+          "moving from the list to a table is not a new shot");
+}
+
+void AWalkThatFailsSaysNothingAndStartsAgain() {
+    const auto route = FakeShotRoute();
+    FakeObject shot;
+    MakeShot(shot, &kFakeShotClass, 301, 5, 1, 3000, true);
+
+    FakeWorld world;
+    world.File({{301, shot.address()}});
+
+    brownie::game::ClientShotScanner scanner;
+    brownie::game::ShotScan scan;
+    (void)scanner.Scan(world.address(), 3000, route, scan);
+
+    world.Break();
+    Check(!scanner.Scan(world.address(), 3016, route, scan), "a table that cannot be read fails");
+    Check(scan.born.empty() && scan.gone.empty(),
+          "and a failed walk reports nothing — least of all everything as gone");
+
+    world.File({{301, shot.address()}});
+    Check(scanner.Scan(world.address(), 3032, route, scan) && scan.born.size() == 1,
+          "the walk after it reports every shot again, which only re-times them");
+
+    // A table longer than any walk goes is as unknown past its bound as one
+    // whose read failed: the shot filed last is not visited, and must not be
+    // taken for gone.
+    std::vector<std::pair<std::int32_t, const void*>> crowded(brownie::game::kMaxMapObjects,
+                                                               {0, nullptr});
+    crowded.emplace_back(301, shot.address());
+    world.File(crowded);
+    Check(!scanner.Scan(world.address(), 3048, route, scan) && scan.gone.empty(),
+          "a table longer than the walk says nothing about what is past its end");
+}
+
+void ANonsenseShotIsFiledAndNeverReported() {
+    const auto route = FakeShotRoute();
+    FakeObject lost;
+    MakeShot(lost, &kFakeShotClass, 401, 5, 1, 4000, true);
+    lost.Put(kFakeAngleAt, std::numeric_limits<float>::quiet_NaN());
+    FakeObject early;
+    MakeShot(early, &kFakeShotClass, 402, 5, 2, 4100, true);
+    FakeObject stranger;
+    MakeShot(stranger, &kFakeShotClass, 403, 5, 3, 4000, true);
+
+    FakeWorld world;
+    // The last one is filed under an id it does not carry: a table read with
+    // the wrong layout hands over exactly this.
+    world.File({{401, lost.address()}, {402, early.address()}, {999, stranger.address()}});
+
+    brownie::game::ClientShotScanner scanner;
+    brownie::game::ShotScan scan;
+    Check(scanner.Scan(world.address(), 4016, route, scan) && scan.born.empty(),
+          "a shot that is not a number, not born yet or not itself is never reported");
+    Check(scanner.Scan(world.address(), 4032, route, scan) && scan.born.empty(),
+          "nor on the frame after");
+}
+
+void AClientFrameIsPackedAsDocumented() {
+    std::vector<brownie::game::ClientShot> born(1);
+    born[0].owner_id = 7;
+    born[0].bullet_id = 513;
+    born[0].age_ms = 12;
+    born[0].start_x = 1.5F;
+    born[0].start_y = 2.5F;
+    born[0].angle = 3.0F;
+    born[0].speed_multiplier = 1.25F;
+    born[0].lifetime_ms = 900.0F;
+    born[0].half_tiles = 0.35F;
+    const std::vector<brownie::game::GoneShot> gone{{8, 21}};
+
+    brownie::app::ClientFrameView view;
+    view.player_known = true;
+    view.player_x = 30.5F;
+    view.player_y = -2.25F;
+    view.clock_known = true;
+    view.frame_time_ms = 123456;
+    view.born = &born;
+    view.gone = &gone;
+
+    std::vector<std::byte> out(3, std::byte{0xEE});
+    const std::size_t size = brownie::app::AppendClientFrame(view, out);
+    Check(size == 20 + 36 + 8, "a frame is its header, its shots and its ends");
+    Check(out.size() == 3 + size, "and is appended after what was already there");
+
+    const auto read = [&out](std::size_t at, auto value) {
+        std::memcpy(&value, out.data() + 3 + at, sizeof(value));
+        return value;
+    };
+    Check(read(0, std::uint8_t{}) == 7, "player, clock and scan are all flagged");
+    Check(read(2, std::uint16_t{}) == 1 && read(4, std::uint16_t{}) == 1, "both lists are counted");
+    Check(read(8, std::int32_t{}) == 123456, "the frame clock is carried");
+    Check(read(12, float{}) == 30.5F && read(16, float{}) == -2.25F, "so is the player");
+    Check(read(20, std::int32_t{}) == 7 && read(24, std::uint16_t{}) == 513 &&
+              read(28, std::int32_t{}) == 12,
+          "a shot is its owner, its number and its age");
+    Check(read(32, float{}) == 1.5F && read(36, float{}) == 2.5F && read(40, float{}) == 3.0F &&
+              read(44, float{}) == 1.25F && read(48, float{}) == 900.0F &&
+              read(52, float{}) == 0.35F,
+          "then how the client launched it");
+    Check(read(56, std::int32_t{}) == 8 && read(60, std::uint16_t{}) == 21,
+          "and an end is its owner and its number");
+
+    brownie::app::ClientFrameView unscanned;
+    unscanned.clock_known = true;
+    unscanned.frame_time_ms = 77;
+    std::vector<std::byte> clock_only;
+    Check(brownie::app::AppendClientFrame(unscanned, clock_only) == 20,
+          "a frame with nothing scanned is its header alone");
+    std::uint8_t flags = 0;
+    std::memcpy(&flags, clock_only.data(), sizeof(flags));
+    Check(flags == brownie::app::kClientFrameClock,
+          "and says it has a clock and no scan, rather than a scan that found nothing");
+}
+
+void TheDodgeClaimIsALease() {
+    brownie::app::DodgeTelemetry telemetry;
+    Check(!telemetry.Wanted(1000), "nothing is read until somebody asks");
+    telemetry.Claim(true, 1000);
+    Check(telemetry.Wanted(3999) && !telemetry.Wanted(4000), "a claim lapses on its own");
+    telemetry.Claim(false, 1500);
+    Check(!telemetry.Wanted(1600), "and ends the moment it is withdrawn");
+
+    brownie::game::PlayerLocation player;
+    player.x = 4.0F;
+    player.y = 5.0F;
+    Check(!telemetry.Capture(&player, 5000), "an unclaimed frame packs nothing");
+    telemetry.Claim(true, 5000);
+    Check(telemetry.Capture(&player, 5001),
+          "a claimed frame with no game bound still says where the player is");
+
+    // Not connected: what was packed is let go of rather than kept for a link
+    // that may come back with a different runtime on the other end.
+    brownie::ipc::Session session{1};
+    telemetry.Flush(session);
+    Check(telemetry.Capture(nullptr, 5002) == false,
+          "a frame that knows nothing is not worth waking anybody for");
+}
+
 void ActionQueueHandsInteractionsOver() {
     brownie::overlay::ActionQueue queue;
     queue.Push("toggle|a|1");
@@ -3153,6 +3511,12 @@ int main() {
     TwoKeysOnOnePluginAreTwoBinds();
     DodgePictureCommitsWholeSetsAndExpires();
     DodgePictureTakesShapesAndShotSizes();
+    AScanReportsAShotOnceAndItsEndAfterTwoMisses();
+    AShotNotYetFiledIsFoundWhereItWaits();
+    AWalkThatFailsSaysNothingAndStartsAgain();
+    ANonsenseShotIsFiledAndNeverReported();
+    AClientFrameIsPackedAsDocumented();
+    TheDodgeClaimIsALease();
     ActionQueueHandsInteractionsOver();
     ActionQueueKeepsTheNewestWhenFull();
     InputQueueHandsMessagesOver();

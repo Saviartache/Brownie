@@ -1,6 +1,8 @@
 import type { MutablePacket } from '@brownie/plugin-api';
+import { StatType } from '../../constants/StatType.js';
 import { projectileHalfTiles } from '../../features/dodge/hitbox.js';
-import { maxSpeedTilesPerSecond, type ProjectileDefinition } from '../../gamedata/projectiles.js';
+import type { ProjectileDefinition } from '../../gamedata/projectiles.js';
+import { clientBulletId, statMultiplier, staysPut } from '../../state/projectiles/ShotMotion.js';
 import { DEFAULT_EFFECT_SECONDS, isBlastEffect } from '../../state/blasts/BlastStore.js';
 import {
   isSelfBlast,
@@ -254,10 +256,22 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
         // ground is permanently painful to stand on and only the tower's *type*
         // says so. Learned here rather than traced, because the announcement is
         // the one moment the owner and the shot are both known. See
-        // `learnStationaryShot`.
-        if (owner.isEnemy && maxSpeedTilesPerSecond(definition) === 0) {
+        // `learnStationaryShot`. A laser is not one: it never moves either, but
+        // its damage is the beam, not the ground under its emitter.
+        if (owner.isEnemy && staysPut(definition)) {
           learnStationaryShot(world, owner.objectType, owner.x, owner.y, definition, x, y);
         }
+
+        // **What the owner does to its own shots, read off the owner.** The
+        // client hands every shot two multipliers taken from the monster that
+        // fired it — stats 102 and 103 — and they make it faster and longer
+        // lived than its data says. See `ShotMotion`.
+        const speedMultiplier = statMultiplier(owner.stat(StatType.ProjectileSpeedMultiplier));
+        const lifetimeMultiplier = statMultiplier(
+          owner.stat(StatType.ProjectileLifetimeMultiplier),
+        );
+        // What the server rolled for this volley, which is what will be charged.
+        const damage = packet.number('damage');
 
         // A volley arrives as one packet: consecutive bullet ids fanned out by
         // a fixed angle step. Recording only the first would leave the rest
@@ -269,12 +283,17 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
           if (
             world.projectileStore.add(definition, {
               ownerId,
-              bulletId: bulletId + i,
+              // The client's own number for it, which is what its phase and
+              // every acknowledgement of it use. See `clientBulletId`.
+              bulletId: clientBulletId(bulletId, i),
               bulletType,
               x,
               y,
               angle: angle + angleStep * i,
               firedAtMs,
+              speedMultiplier,
+              lifetimeMultiplier,
+              damage: damage !== undefined && damage > 0 ? damage : undefined,
             })
           ) {
             world.shots.tracked += 1;

@@ -40,6 +40,7 @@ import { readSpriteTypes } from './gamedata/spriteIndex.js';
 import { EMPTY_COSMETIC_CATALOG, type CosmeticCatalog } from './gamedata/cosmetics.js';
 import { EquippedWeapon } from './gamedata/EquippedWeapon.js';
 import { Logger, type LogSink } from './core/logging/Logger.js';
+import { ClientFrames } from './native/ClientFrames.js';
 import { CursorTracker } from './native/CursorTracker.js';
 import { NativeLink } from './native/NativeLink.js';
 import { NativePipeServer } from './native/NativePipeServer.js';
@@ -128,6 +129,15 @@ const CURSOR_TRACK_FEATURE = 'cursor.track';
  * forty times a second.
  */
 const CURSOR_CLAIM_INTERVAL_MS = 1000;
+
+/** The module's switch for reading the fight off the client every frame. */
+const DODGE_TRACK_FEATURE = 'dodge.track';
+
+/**
+ * How often that claim is restated while the dodge is reading it — on the
+ * cursor's second and inside the same three-second lease, for the same reasons.
+ */
+const DODGE_TRACK_CLAIM_INTERVAL_MS = 1000;
 
 /**
  * How long a Shift+left-click is still worth answering.
@@ -267,6 +277,16 @@ export class Application {
   /// Read through {@link Application.#pickAt}, which is what stops a press
   /// nobody was running to answer being acted on much later.
   #pickAtMs = 0;
+
+  /// What the client sees of the fight: where the player is this frame, and
+  /// which shots the client made or destroyed — applied to the session it
+  /// belongs to as it arrives. Owned here for the reason the cursor is: it is a
+  /// reading off the link, and the link is the composition root's.
+  readonly #clientFrames = new ClientFrames();
+
+  /// When the claim behind those frames was last restated. See
+  /// {@link Application.#clientPlayer}.
+  #dodgeTrackClaimedAtMs = 0;
 
   /// Whether the module is drawing the dodge picture, and therefore wants it.
   ///
@@ -412,6 +432,13 @@ export class Application {
       else if (kind === 'pick' && first === '1') this.#pickAtMs = Date.now();
     });
 
+    // What the client sees, a frame at a time while the dodge claims it. Applied
+    // as it arrives rather than when somebody asks: a shot the client made is a
+    // correction to the store every reader of it wants, not only the dodge.
+    this.#native.onClientFrame((frame) => {
+      this.#clientFrames.accept(frame);
+    });
+
     // A module that has just connected is holding nothing and pointing nowhere.
     // Both let go on their own, but a reconnect inside that window would
     // otherwise open the session acting on what the previous one was told.
@@ -421,6 +448,9 @@ export class Application {
       this.#steer.release();
       this.#dodgeView = false;
       this.#pickAtMs = 0;
+      // And a module that has just connected may be in a game that has just
+      // started, whose frame clock started again with it.
+      this.#clientFrames.reset();
     });
 
     // The proxy is the plugin host's session source and the host supplies the
@@ -466,31 +496,40 @@ export class Application {
         blastRadii: this.#blastRadii,
         selfBlasts: this.#selfBlasts,
       },
-      buildStages: (session: SessionView, world: WorldState) => [
-        // The census is first, so a packet a later stage drops is still
-        // counted: the question it answers is what the game sent, not what
-        // survived our handling of it.
-        this.#census.stage(),
-        // After the state stage, so what the overlay shows is the world as of
-        // this packet rather than the one before it.
-        new WorldStatusStage(world, {
-          publish: (record) => {
-            this.#native.publishRecord(record);
-          },
-          // The same resolution the dodge planner reads its range from, so what
-          // the overlay shows is the figure actually in use rather than a
-          // second computation that could quietly disagree with it.
-          weapon: (objectType) => this.#weapon.of(objectType),
-        }),
-        ...(holder.plugins === undefined
-          ? []
-          : [
-              new PluginStage(holder.plugins, session),
-              // After the plugins, so a handler watching chat still sees the
-              // line that invoked a command before this stage drops it.
-              new CommandStage(holder.plugins, session),
-            ]),
-      ],
+      buildStages: (session: SessionView, world: WorldState) => {
+        // Not a stage, but this is the one moment a session's world is in hand:
+        // what the client says from now on is about the session it has just
+        // opened. Let go of when it closes, below.
+        this.#clientFrames.attach(session, world);
+        return [
+          // The census is first, so a packet a later stage drops is still
+          // counted: the question it answers is what the game sent, not what
+          // survived our handling of it.
+          this.#census.stage(),
+          // After the state stage, so what the overlay shows is the world as of
+          // this packet rather than the one before it.
+          new WorldStatusStage(world, {
+            publish: (record) => {
+              this.#native.publishRecord(record);
+            },
+            // The same resolution the dodge planner reads its range from, so
+            // what the overlay shows is the figure actually in use rather than a
+            // second computation that could quietly disagree with it.
+            weapon: (objectType) => this.#weapon.of(objectType),
+          }),
+          ...(holder.plugins === undefined
+            ? []
+            : [
+                new PluginStage(holder.plugins, session),
+                // After the plugins, so a handler watching chat still sees the
+                // line that invoked a command before this stage drops it.
+                new CommandStage(holder.plugins, session),
+              ]),
+        ];
+      },
+    });
+    this.#proxy.onDisconnected((session) => {
+      this.#clientFrames.detach(session);
     });
     // The host tells the overlay when something changed, and the overlay reads
     // the host to say what. Same shape as above, same reason: the callback is
@@ -598,6 +637,24 @@ export class Application {
       this.#native.setFeature(CURSOR_TRACK_FEATURE, true);
     }
     return this.#cursor.point();
+  }
+
+  /**
+   * Where the client has the player right now, and the claim that keeps the
+   * answer coming.
+   *
+   * **Asking is the claim, as it is for the cursor.** The module reads the fight
+   * off the client only while the runtime says it wants it — a walk over every
+   * object in the world, every frame — and the dodge is what wants it. A dodge
+   * that is switched off stops asking, and the lease runs out on its own.
+   */
+  #clientPlayer(session: SessionView): Position | undefined {
+    const now = Date.now();
+    if (now - this.#dodgeTrackClaimedAtMs >= DODGE_TRACK_CLAIM_INTERVAL_MS) {
+      this.#dodgeTrackClaimedAtMs = now;
+      this.#native.setFeature(DODGE_TRACK_FEATURE, true);
+    }
+    return this.#clientFrames.playerAt(session);
   }
 
   /**
@@ -732,6 +789,10 @@ export class Application {
         // are asking for, so the planner can leave it alone while it is safe
         // and cancel it when it is not.
         steer: { direction: () => this.#steer.direction() },
+        // Where the character actually is, from the client's own frame rather
+        // than the last `MOVE` — which is what every plan starts from, and
+        // what the shots are dodged relative to.
+        player: { at: (session) => this.#clientPlayer(session) },
         // And whether anybody is looking at the result. Nothing is predicted
         // for the picture while the box is unticked.
         view: { wanted: () => this.#dodgeView },

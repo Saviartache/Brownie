@@ -236,15 +236,19 @@ export interface ProjectileView extends Position {
    */
   readonly collisionHalfTiles: number;
   /**
-   * Whether {@link positionAt} describes this shot's whole path.
+   * How long its beam is, in tiles, for a laser — nought for every other shot.
    *
-   * False for the ones that turn — the spirals that curl as they travel — where
-   * the prediction is a straight line for something that is not one. Anything
-   * acting on a prediction should leave room around one of these
-   * in proportion to how far ahead it asked, rather than believing it exactly.
+   * A laser never moves: what it hits is the whole segment from where it is,
+   * along {@link angle}, this far. Anything treating one as a point is standing
+   * in the middle of it.
    */
-  readonly motionModelled: boolean;
-  /** Greatest speed this shot can reach, including its acceleration clamp. */
+  readonly beamTiles: number;
+  /** Which way it was fired, in radians. */
+  readonly angle: number;
+  /**
+   * Greatest speed this shot can cross the ground at, or `Infinity` for one
+   * whose path curves — an orbit's rim outruns its own launch speed.
+   */
   readonly maxSpeedTilesPerSecond: number;
   /**
    * How bad the worst condition this shot applies is, from nought to one.

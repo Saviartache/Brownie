@@ -7,8 +7,9 @@
 // signatures, every answer resolved from the game that is running, and no
 // constant anywhere.
 //
-// One feature reads this table: `ProjectileNoclip.h`, which lets the player's
-// own shots cross walls.
+// Two features read this table: `ProjectileNoclip.h`, which lets the player's
+// own shots cross walls, and `ClientShots.h`, which tells the dodge what the
+// client made of every enemy shot.
 //
 // **The reference implementation kept fallback offsets for two of these three
 // fields**, and used them whenever the lookup failed. That is the failure mode
@@ -78,6 +79,64 @@ inline constexpr std::string_view kShotDamagesEnemies = "shot.damagesEnemies";
 /// decides whether it stops.
 inline constexpr std::string_view kMapObjectTile = "map.MapObject.tile";
 inline constexpr std::string_view kTileCollisionLayer = "map.Tile.collisionLayer";
+
+/// What the dodge reads off an enemy shot the client has made.
+///
+/// **The client's own answer to every question the runtime otherwise
+/// reconstructs from a packet.** Where the shot was fired from and which way,
+/// the moment the client started its clock, the two multipliers its owner gave
+/// it, how long it will live and how big its collision square is. Every one of
+/// them was read out of the client's spawn routine, which writes them once and
+/// never again — so reading them once, the first frame a shot is seen, is
+/// reading all there is. See `ClientShots.h`.
+///
+/// `shot.startTime` is on the client's frame clock, the same one
+/// `world.frameTime` reads; the difference between the two is how old the shot
+/// is. `shot.bulletId` is the client's own number for the shot — the one every
+/// acknowledgement it sends names.
+inline constexpr std::string_view kShotStartX = "shot.startX";
+inline constexpr std::string_view kShotStartY = "shot.startY";
+inline constexpr std::string_view kShotAngle = "shot.angle";
+inline constexpr std::string_view kShotStartTime = "shot.startTime";
+inline constexpr std::string_view kShotOwner = "shot.ownerId";
+inline constexpr std::string_view kShotBulletId = "shot.bulletId";
+inline constexpr std::string_view kShotDamagesPlayers = "shot.damagesPlayers";
+inline constexpr std::string_view kShotSpeedMultiplier = "shot.speedMultiplier";
+inline constexpr std::string_view kShotLifetime = "shot.lifetime";
+inline constexpr std::string_view kShotRadius = "shot.radius";
+
+/// The client's frame clock, on the world manager.
+///
+/// **Written once a frame, after every map object has been moved**, with the
+/// time that frame moved them by — `realtimeSinceStartup` in milliseconds. It
+/// is also what the client stamps a new shot's start with, so it is the clock
+/// every shot's age is measured on.
+inline constexpr std::string_view kWorldFrameTime = "world.frameTime";
+
+/// Map objects the world manager has made and not yet filed.
+///
+/// A new shot goes here first and into one of the two object tables on the
+/// next update, so a scan that looked only at the tables would see every shot
+/// a frame late.
+inline constexpr std::string_view kWorldObjectsPending = "world.objects.pending";
+
+/// The projectile class, and the subclass the game pools nearly every shot as.
+///
+/// **What tells a shot from everything else in the world's tables.** Every
+/// managed object starts with a pointer to its exact class, so an object whose
+/// first word is one of these two is a shot — a comparison, never a call, and
+/// never a pointer followed. See `ClientShots.h`.
+///
+/// Either may be null: IL2CPP answers a lookup by name for a class it has not
+/// built yet, and a build that stops pooling shots has no subclass to find.
+struct ShotClasses {
+    ClassRef shot = nullptr;
+    ClassRef pooled = nullptr;
+};
+
+/// Looks both classes up by name. **IPC thread**, like every other lookup: it
+/// attaches the calling thread to the runtime for the length of the call.
+[[nodiscard]] ShotClasses FindShotClasses(const MetadataSource& metadata);
 
 /// Resolves whatever is still missing, and is cheap once nothing is.
 ///

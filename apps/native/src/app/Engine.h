@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "app/Cadence.h"
+#include "app/DodgeTelemetry.h"
 #include "app/GameBinding.h"
 #include "app/HotkeyWatch.h"
 #include "app/PlayerControl.h"
@@ -37,6 +38,7 @@
 #include "core/Colour.h"
 #include "core/Result.h"
 #include "core/Snapshot.h"
+#include "core/WinHandle.h"
 #include "game/PlayerNoclip.h"
 #include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
@@ -129,13 +131,6 @@ class Engine {
     [[nodiscard]] bool connected() const noexcept {
         return connected_.load(std::memory_order_acquire);
     }
-
-    /// The session, for the render thread to send telemetry through.
-    ///
-    /// Valid only while `running()`. Sending from another thread is safe in the
-    /// sense the pipe makes it safe — one writer at a time — which is why the
-    /// render thread and the connect reporter may both reach it.
-    [[nodiscard]] ipc::Session& session() noexcept { return session_; }
 
   private:
     void Run();
@@ -632,6 +627,20 @@ class Engine {
     /// anything has been said at all on this connection.
     bool sent_dodge_view_ = false;
     bool dodge_view_stated_ = false;
+
+    /// What the client sees of the fight, sent a frame at a time while the
+    /// dodge asks. Claimed and flushed on the IPC thread, read on the render
+    /// thread — see `DodgeTelemetry` for who touches what.
+    DodgeTelemetry dodge_telemetry_;
+
+    /// The loop's doorbell: the render thread rings it when a frame is packed,
+    /// so the poll returns and the frame goes out now rather than when the
+    /// wait runs out. Auto-reset, so one ring is one turn and a ring while the
+    /// loop is busy is kept for its next wait rather than lost.
+    ///
+    /// Made in `Start` and closed in `Stop`, after the overlay that rings it is
+    /// gone and the thread that waits on it has been joined.
+    WinHandle wake_;
 
     /// When the runtime's claim on the cursor reading runs out.
     ///

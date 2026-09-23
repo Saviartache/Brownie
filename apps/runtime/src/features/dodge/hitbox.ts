@@ -1,16 +1,26 @@
 /**
  * What counts as being hit, and how close a near miss was.
  *
- * **Realm projectile collision is an axis-aligned square, not a circle.** The
- * game's own test (`FUN_18015be50` in the dumped client) is
- * `|dx| < r && |dy| < r` — Chebyshev distance. A circle is not a rounder
- * approximation of that; it is a different shape, and it disagrees exactly at
- * the corners, which is where a shot grazes. A planner built on a circle dodges
- * shots that would have missed and stands in shots that will land.
+ * **Realm projectile collision is an axis-aligned square, not a circle, and the
+ * square belongs to the shot.** The client's own test, read out of the build
+ * that is installed, is
  *
- * These constants come from the reference implementation's `DodgeHit.h`, which
- * took them from the client. They are the one part of four dodge generations
- * worth carrying over unchanged.
+ * ```text
+ * |character.x − shot.x| < r  &&  |character.y − shot.y| < r,   r = collisionMult × 0.5
+ * ```
+ *
+ * where `r` is a field the shot is given when it is spawned. The character is
+ * a *point* in it: nothing about the player's own size enters. A circle is not a
+ * rounder approximation of that; it is a different shape, and it disagrees
+ * exactly at the corners, which is where a shot grazes.
+ *
+ * **The previous model added a player half-extent on top**, a constant carried
+ * over from the reference implementation, and it made every shot 0.21 tiles
+ * wider on each side than the game's — two fifths of a standard shot, and
+ * nearly double a small one. That was a planner that saw gaps closed which were
+ * open and dodged shots that were never going to land, and the smaller the
+ * shot the worse it got; margin for what the model does not know is the pad's
+ * job, and it is the player's to set.
  *
  * **Distance, not a boolean, is what the planner actually needs.** "Was I hit"
  * answers one question; "how much room did I have" answers the one that decides
@@ -19,11 +29,12 @@
  */
 
 /**
- * The player's collision half-extent against *shots*, in tiles.
+ * The player's body, in tiles from its middle to its side.
  *
- * Deliberately distinct from {@link PLAYER_ENVIRONMENT_HALF_TILES} — the two
- * tests are different tests, and using one for the other is wrong in both
- * directions.
+ * **Not part of a shot's hit test** — see the file note — but still the right
+ * size for everything that *is* about a body: another body touching it, a blast
+ * disc reaching it, and the square drawn for it. Deliberately distinct from
+ * {@link PLAYER_ENVIRONMENT_HALF_TILES}, which is what the map collides with.
  */
 export const PLAYER_HALF_TILES = 0.2139;
 
@@ -89,10 +100,10 @@ export function projectileHalfTiles(collisionMultiplier: number): number {
 }
 
 /**
- * The half-side of the square to test a player position against.
+ * The half-side of the square to test a player's position against.
  *
- * Folds three things into one number, which is how the game does it: the
- * projectile's own extent, the player's, and a pad.
+ * The shot's own extent, scaled, and a pad. **Nothing for the player's size**:
+ * the game tests a point against the shot's square. See the file note.
  *
  * @param padTiles Margin for everything the model does not know — see
  *   `ShotField`'s drift term, which is where most of it now lives. It has no
@@ -103,7 +114,7 @@ export function effectiveHalf(
   hitScale: number,
   padTiles: number,
 ): number {
-  return projectileHalfTiles * hitScale + PLAYER_HALF_TILES + padTiles;
+  return projectileHalfTiles * hitScale + padTiles;
 }
 
 /** Whether a player at `player` overlaps a shot centred at `bullet`. */

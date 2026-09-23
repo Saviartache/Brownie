@@ -1,7 +1,7 @@
 import { LinkError, MessageError } from '../errors.js';
 import { FrameFlags, HEADER_BYTES, IPC_VERSION, writeHeader } from '../frame/header.js';
 import type { Frame } from '../frame/FrameReader.js';
-import { decodeTelemetry, encodeTelemetry } from './telemetry.js';
+import { decodeClientFrame, encodeClientFrame } from './clientFrame.js';
 import { MESSAGE_ORIGIN, MessageType, Origin, type IpcMessage } from './types.js';
 
 /**
@@ -118,8 +118,8 @@ function encodePayload(message: IpcMessage): PreparedMessage {
       return json(MessageType.OffsetHealth, { unresolved: [...message.unresolved] });
     case 'serverTarget':
       return json(MessageType.ServerTarget, { host: message.host, port: message.port });
-    case 'playerTelemetry':
-      return binary(MessageType.PlayerTelemetry, encodeTelemetry(message));
+    case 'clientFrame':
+      return binary(MessageType.ClientFrame, encodeClientFrame(message));
     case 'unknown':
       return binary(message.type, message.payload);
   }
@@ -160,7 +160,7 @@ export function decodeMessage(frame: Frame, from: Origin): IpcMessage {
     );
   }
 
-  if (type === MessageType.PlayerTelemetry) return decodeTelemetry(frame.payload);
+  if (type === MessageType.ClientFrame) return decodeClientFrame(frame.payload);
 
   const body = parseJson(frame.payload, type);
   switch (type) {

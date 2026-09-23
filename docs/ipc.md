@@ -213,7 +213,10 @@ side per five seconds.
 | `0x0202` | `controlAction` | native | `{ action }` — one overlay interaction |
 | `0x0300` | `hotkeyEvent` | native | `{ pluginId, slot, action, value }` |
 | `0x0301` | `offsetHealth` | native | `{ unresolved: string[] }` |
-| `0x0400` | `playerTelemetry` | native | binary, 24 bytes (below) |
+| `0x0401` | `clientFrame` | native | binary, `20 + 36·born + 8·gone` bytes (below) |
+
+`0x0400` was a player telemetry message that nothing ever sent. It is retired
+rather than reused, so no build can read one as the other.
 
 Two rules make the set extensible in both directions:
 
@@ -258,6 +261,7 @@ The resolved keys include:
 | `scene.healthBarTint`       | `true` / `false`     | hold the local player's health bar at a colour of ours       |
 | `scene.healthBarTintColour` | `#rrggbbaa` / `rainbow` | what to hold it at, refused if it is neither              |
 | `shots.noclip`              | `true` / `false`     | let the player's own shots cross walls                       |
+| `dodge.track`               | `true` / `false`     | read the fight off the client every frame, as [`clientFrame`](#clientframe) |
 
 The boolean switches and the cosmetic selections are leases. These belong
 to plugins or runtime readers that can be disabled, fail, unload, or disappear;
@@ -401,26 +405,82 @@ fires while the player is typing that letter into it. Nothing on this link can
 tell the difference, which is why nothing is bound by default and why the keys
 worth binding are the ones chat never produces.
 
-### `playerTelemetry`
+### `clientFrame`
+
+What the client sees of the fight, one message per game frame, sent only while
+the runtime claims `dodge.track` — a three-second lease the dodge restates each
+second while it is planning, like every other claim on this link.
 
 ```
- 0  u8   flags      bit 0 = alive, bit 1 = defense is known
+ 0  u8   flags        bit 0 = player, bit 1 = clock, bit 2 = shots scanned
  1  u8   reserved
- 2  i16  defense
- 4  f32  x
- 8  f32  y
-12  i32  hp
-16  i32  maxHp
-20  u32  uptimeMs   milliseconds since the module attached, monotonic
+ 2  u16  born         shots the client made since the last frame
+ 4  u16  gone         shots the client destroyed since the last frame
+ 6  u16  reserved
+ 8  i32  frameTimeMs  the client's frame clock
+12  f32  x            where the player is on this frame
+16  f32  y
+20  born × 36, then gone × 8:
+
+  born   0 i32 ownerId    4 u16 bulletId   6 u16 reserved   8 i32 ageMs
+        12 f32 x         16 f32 y         20 f32 angle     24 f32 speedMultiplier
+        28 f32 lifetimeMs                  32 f32 halfTiles
+  gone   0 i32 ownerId    4 u16 bulletId   6 u16 reserved
 ```
 
-Binary because it arrives every game frame. A separate "defense is known" bit
-exists so *unknown* stays distinguishable from *zero* — the runtime's survival
-logic must not read a failed memory read as "no armour".
+**Why it exists.** Everything the dodge plans from used to be the packet
+stream's, and three things about that are a moment behind or a guess:
 
-Out-of-range values are clamped rather than rejected: this is a hot path fed by
-memory reads that can transiently return nonsense, and dropping the connection
-over one bad frame would be worse than reporting a clamped one.
+- *where the player is* arrives in `MOVE` and `NEWTICK`, five times a second,
+  while the character walks every frame — a planner that does not see its own
+  step land commands it again and overshoots the gap it chose;
+- *when a shot started* is when `ENEMYSHOOT` passed through the proxy, while the
+  client starts it on the frame it reads the packet and flies it with its own
+  copy of the owner's multipliers;
+- *that a shot has ended* is said by no packet at all when a wall takes it.
+
+The module reads all three off the client. The player's position is the one
+the frame ends on, read after the module's own step. The frame clock is the
+world manager's, the one the client moves every map object by and stamps every
+new shot with. The shots are found by walking the world's two object tables and
+its list of objects made and not yet filed, recognising a shot by its class
+pointer and reading the fields the client's spawn routine wrote — see
+`apps/native/src/game/ClientShots.h`.
+
+Rules:
+
+* **`frameTimeMs` and `ageMs` are on the client's clock**, which is real time
+  from when the game started. The runtime puts them on its own by the smallest
+  `arrival − frameTimeMs` over the last second or two: a frame is never early,
+  so the quickest one is the closest to the offset itself. A shot started
+  `frameTimeMs − ageMs`.
+* **A shot is `born` once**, the first frame the module sees it, with
+  everything the client launched it with: the start, the angle, the owner's
+  speed multiplier, the lifetime with the owner's multiplier already applied,
+  and the half-side of the square it hits with. `bulletId` is the client's own
+  number for it, `(id + index) mod 32767`, which is what the runtime keys its
+  shots by too.
+* **A shot is `gone` once it has been missing from two scans in a row**, so a
+  table caught mid-rearrangement never ends a bullet that is still flying. A
+  frame late for a shot that really went; never early for one that did not.
+* **The scan starts again** — and the next frame reports every live shot as
+  `born` — when a runtime has just authenticated, when the claim lapsed and was
+  made again, when a walk of the tables failed part of the way through, and
+  when frames were dropped because the runtime stopped reading. A shot reported
+  twice is only re-timed; one never reported keeps the runtime's own timing.
+* **Bit 2 clear means the lists say nothing**, not that nothing happened: the
+  clock resolves as soon as a realm is built and the projectile's fields only
+  once something has shot. Counts must then be zero, and a scan without a clock
+  is refused.
+* **Out-of-range values are the reader's to drop.** The module reports only a
+  shot whose numbers are finite and believable, and the runtime checks them
+  again before it believes them; the framing is refused only when the counts and
+  the length disagree.
+
+The module sends each frame the moment it is packed: the render thread rings an
+event the IPC thread's wait includes, so a frame is not held for the rest of a
+poll. Frames the IPC thread has not sent within 256 KB are dropped, and the scan
+restarts so the next one carries every shot again.
 
 ## Overlay records
 
@@ -519,7 +579,7 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 
 | record  | fields                                            | meaning                                                                                               |
 | ------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `world` | hp, maxHp, x·100, y·100, entities, shots, defense | what the server last said — for the overlay, and for the module to check its own memory reads against |
+| `world` | hp, maxHp, x·100, y·100, entities, shots, defense, announced, noOwner, noDefinition, blasts, blastsConfirmed, blastsUnmatched, clientConfirmed, clientEnded | what the server last said — for the overlay, and for the module to check its own memory reads against. Everything after `defense` was appended in threes and twos, and a reader stops early rather than refusing: why announced shots were not tracked, how the thrown-bomb telegraphs compared with their detonations, and how many tracked shots the client has confirmed and ended through [`clientFrame`](#clientframe) — nought for both while the module is not reading the fight |
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
 | `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100, vx·100, vy·100, turn·1000, shotSpeed·100, maxFlightMs, lead‰, trimMs | point the shots the player fires at here, for this long unless replaced. `objectId` and the two positions after it name the enemy the point leads and where the *runtime* had that enemy — so the module can look it up in the game's own tables. The six after those say how the enemy moves (tiles a second, and radians a second for the turn), how fast the shot travels, how long it has to hit something with, and how much of the lead to apply — everything the module needs to solve the meeting again from the game's own positions. Each group is all or none: a shift needs somewhere to be measured from, and five sixths of a solution is not one. Absent is an aim used exactly as sent. `trimMs` rides after the group on its own, because a record that stops before it wants no trim — which is a perfectly good aim, unlike a record that stops before the velocity |

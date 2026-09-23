@@ -54,11 +54,17 @@ class PipeClient {
     /// connection is finished.
     Status Send(const std::byte* data, std::size_t size);
 
-    /// Reads whatever has arrived, waiting up to `timeout_ms`.
+    /// Reads whatever has arrived, waiting up to `timeout_ms` — or until `wake`
+    /// is signalled, when there is one.
     ///
-    /// Returns the byte count, `kNotReady` on a timeout — which is the normal
-    /// idle case — or an error when the pipe is gone.
-    Result<std::size_t> Receive(std::byte* out, std::size_t capacity, DWORD timeout_ms);
+    /// Returns the byte count, `kNotReady` on a timeout or a wake — which are
+    /// the normal idle cases — or an error when the pipe is gone.
+    ///
+    /// `wake` is the caller's and outlives the call; this only waits on it. It
+    /// is how another thread with something to send gets the loop round
+    /// without the loop having to poll for it.
+    Result<std::size_t> Receive(std::byte* out, std::size_t capacity, DWORD timeout_ms,
+                                HANDLE wake = nullptr);
 
     /// Wakes any thread waiting in `Send` or `Receive` and keeps it woken.
     ///

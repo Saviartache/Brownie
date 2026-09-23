@@ -172,19 +172,6 @@ describe('where the shots will be', () => {
     expect(predicted.halfOf(0, 5) - predicted.halfOf(0, 0)).toBeCloseTo(0.5, 6);
   });
 
-  it('distrusts a shot the model does not claim to describe several times as fast', () => {
-    const straight = fieldOf([straightShot({ x: 10, y: 4 }, Math.PI / 2, 10, 0, 900)], {
-      driftTilesPerSecond: 0.2,
-    });
-    const curling = fieldOf(
-      [straightShot({ x: 10, y: 4 }, Math.PI / 2, 10, 0, 900, { motionModelled: false })],
-      { driftTilesPerSecond: 0.2 },
-    );
-
-    const grown = (field: ShotField): number => field.halfOf(0, 8) - field.halfOf(0, 0);
-    expect(grown(curling.predicted)).toBeGreaterThan(grown(straight.predicted) * 2.5);
-  });
-
   it('stops where the shot stops existing', () => {
     const { predicted } = fieldOf([straightShot({ x: 10, y: 4 }, Math.PI / 2, 10, 0, 350)]);
 
@@ -194,6 +181,37 @@ describe('where the shots will be', () => {
     // Half of the step it dies in, which is the tile a monster's range ends on.
     expect(predicted.endFractionOf(0)).toBeCloseTo(0.5, 6);
     expect(predicted.endYOf(0)).toBeCloseTo(7.5, 6);
+  });
+
+  // **A laser never moves; its beam is what hits.** Read as a point it was a
+  // square at the emitter, and the player standing in the middle of the beam
+  // was standing in the open.
+  it('lays a laser out along its beam, as far as anybody could walk into it', () => {
+    const laser = straightShot({ x: 10, y: 4 }, Math.PI / 2, 0, 0, 900, {
+      beamTiles: 40,
+      angle: Math.PI / 2,
+      collisionHalfTiles: 0.5,
+      maxSpeedTilesPerSecond: 0,
+    });
+    const { predicted } = fieldOf([laser]);
+
+    const along: number[] = [];
+    for (let row = 0; row < predicted.count; row += 1) {
+      // Every square on the beam's own line, from the emitter out.
+      expect(predicted.xOf(row, 0)).toBeCloseTo(10, 6);
+      along.push(predicted.yOf(row, 0));
+    }
+    along.sort((a, b) => a - b);
+    expect(along[0]).toBeCloseTo(4, 6);
+    // Close enough together that their union is the beam's band, with no gap a
+    // point could stand in — the player at (10, 10) among them.
+    for (let i = 1; i < along.length; i += 1) {
+      expect((along[i] ?? 0) - (along[i - 1] ?? 0)).toBeLessThanOrEqual(0.25 + 1e-9);
+    }
+    // And no further than anybody could get this plan: forty tiles of beam are
+    // not a hundred and sixty rows.
+    expect(along[along.length - 1]).toBeLessThanOrEqual(10 + 6 + 1 + 0.5 + 0.25);
+    expect(along[along.length - 1]).toBeGreaterThan(10 + 6);
   });
 
   it('carries what each shot costs, and what it does besides', () => {
@@ -734,7 +752,7 @@ describe('the optimizer', () => {
     // {@link TrajectoryPlanner}'s note on the delayed hold — so what this
     // measures is only the case where something has to happen now.
     const { danger } = fieldOf([
-      straightShot({ x: 10, y: 8.8 }, Math.PI / 2, 10, 0, 900, { collisionHalfTiles: 0.15 }),
+      straightShot({ x: 10, y: 8.8 }, Math.PI / 2, 10, 0, 900, { collisionHalfTiles: 0.36 }),
     ]);
     const answer = new TrajectoryPlanner().run(planFor({ danger }));
 

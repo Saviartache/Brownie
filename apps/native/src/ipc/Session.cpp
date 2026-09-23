@@ -1,6 +1,5 @@
 #include "ipc/Session.h"
 
-#include <array>
 #include <cstring>
 
 #include "ipc/Json.h"
@@ -18,23 +17,6 @@ namespace {
 /// four kilobytes is the runtime's own batch ceiling and an unremarkable resident
 /// allocation in someone else's game.
 constexpr std::size_t kReceiveBytes = 64u * 1024u;
-
-/// Telemetry, packed. Binary because it goes out on every game frame.
-constexpr std::size_t kTelemetryBytes = 24;
-constexpr std::uint8_t kAlive = 1U << 0U;
-constexpr std::uint8_t kDefenseKnown = 1U << 1U;
-
-void PutU16(std::byte* at, std::uint16_t value) noexcept {
-    at[0] = static_cast<std::byte>(value & 0xFFU);
-    at[1] = static_cast<std::byte>((value >> 8U) & 0xFFU);
-}
-
-void PutU32(std::byte* at, std::uint32_t value) noexcept {
-    at[0] = static_cast<std::byte>(value & 0xFFU);
-    at[1] = static_cast<std::byte>((value >> 8U) & 0xFFU);
-    at[2] = static_cast<std::byte>((value >> 16U) & 0xFFU);
-    at[3] = static_cast<std::byte>((value >> 24U) & 0xFFU);
-}
 
 }  // namespace
 
@@ -133,15 +115,16 @@ Status Session::Send(MessageType type, std::string_view payload, bool binary) {
     return pipe_.Send(send_buffer_.data(), total);
 }
 
-Status Session::Poll(std::uint32_t timeout_ms) {
+Status Session::Poll(std::uint32_t timeout_ms, HANDLE wake) {
     if (state_.load(std::memory_order_acquire) == SessionState::kDisconnected) {
         return Error{ErrorCode::kNotReady, "the session is not connected"};
     }
 
-    auto received = pipe_.Receive(receive_buffer_.data(), receive_buffer_.size(), timeout_ms);
+    auto received =
+        pipe_.Receive(receive_buffer_.data(), receive_buffer_.size(), timeout_ms, wake);
     if (!received.ok()) {
-        // A timeout is the idle case and leaves the session alone; anything
-        // else means the pipe is gone.
+        // A timeout or a wake is the idle case and leaves the session alone;
+        // anything else means the pipe is gone.
         if (received.error().code() == ErrorCode::kNotReady) {
             return received.error();
         }
@@ -274,32 +257,9 @@ Status Session::SendServerTarget(std::string_view host, std::uint16_t port) {
     return Send(MessageType::kServerTarget, payload, false);
 }
 
-Status Session::SendTelemetry(bool alive, float x, float y, std::int32_t hp, std::int32_t max_hp,
-                              std::int32_t defense, bool defense_known,
-                              std::uint32_t uptime_ms) {
-    std::array<std::byte, kTelemetryBytes> packed{};
-    std::uint8_t flags = 0;
-    if (alive) flags |= kAlive;
-    // A separate bit, so "unknown" stays distinguishable from "zero": the
-    // runtime's survival logic must not read a failed memory read as no armour.
-    if (defense_known) flags |= kDefenseKnown;
-
-    packed[0] = static_cast<std::byte>(flags);
-    packed[1] = std::byte{0};
-    PutU16(packed.data() + 2, static_cast<std::uint16_t>(static_cast<std::int16_t>(defense)));
-
-    std::uint32_t bits = 0;
-    std::memcpy(&bits, &x, sizeof(bits));
-    PutU32(packed.data() + 4, bits);
-    std::memcpy(&bits, &y, sizeof(bits));
-    PutU32(packed.data() + 8, bits);
-
-    PutU32(packed.data() + 12, static_cast<std::uint32_t>(hp));
-    PutU32(packed.data() + 16, static_cast<std::uint32_t>(max_hp));
-    PutU32(packed.data() + 20, uptime_ms);
-
-    return Send(MessageType::kPlayerTelemetry,
-                std::string_view{reinterpret_cast<const char*>(packed.data()), packed.size()}, true);
+Status Session::SendClientFrame(std::span<const std::byte> frame) {
+    return Send(MessageType::kClientFrame,
+                std::string_view{reinterpret_cast<const char*>(frame.data()), frame.size()}, true);
 }
 
 }  // namespace brownie::ipc

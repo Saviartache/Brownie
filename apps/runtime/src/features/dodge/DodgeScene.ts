@@ -16,7 +16,7 @@
  * feature allocated.
  */
 
-import type { BlastView, EntityView, SessionView, WorldView } from '@brownie/plugin-api';
+import type { BlastView, EntityView, Position, SessionView, WorldView } from '@brownie/plugin-api';
 import { StatType } from '../../constants/StatType.js';
 import { bodyTilesFromPercent } from '../../gamedata/GameCatalogs.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
@@ -248,11 +248,21 @@ export class DodgeScene {
     this.#sightedAtMs = now;
   }
 
-  /** Looks at the fight the planner is about to search through. */
-  observe(session: SessionView, controls: DodgeControls, planning: DodgeSettings): void {
-    const self = session.self;
+  /**
+   * Looks at the fight the planner is about to search through.
+   *
+   * @param here Where the player is — the client's own reading when there is
+   *   one, which is the position the plan will start from. Everything measured
+   *   around the player here is measured from the same place.
+   */
+  observe(
+    session: SessionView,
+    here: Position,
+    controls: DodgeControls,
+    planning: DodgeSettings,
+  ): void {
     const map = session.world;
-    this.#ground.aim(map, self.x, self.y, map.gameTimeMs);
+    this.#ground.aim(map, here.x, here.y, map.gameTimeMs);
 
     this.#wallsMatter = controls.walls.avoid.get();
     // **The margin is dropped when the player is already inside it.** Demanding
@@ -263,7 +273,7 @@ export class DodgeScene {
     // leave.
     const wallClearance = controls.walls.clearanceTiles.get();
     this.#clearance =
-      wallClearance > 0 && this.#ground.canStand(self.x, self.y, wallClearance) ? wallClearance : 0;
+      wallClearance > 0 && this.#ground.canStand(here.x, here.y, wallClearance) ? wallClearance : 0;
 
     this.#damagingMatters = controls.hazards.avoid.get();
     // **The margin around lava is not dropped, and that is what changed.** It
@@ -279,7 +289,7 @@ export class DodgeScene {
     // the answer is "nothing near", and it is what one query costs.
     this.#hazardClearance = Math.max(0, controls.hazards.clearanceTiles.get());
     this.#onDamagingGround =
-      this.#damagingMatters && (map.tileAt(self.x, self.y)?.damaging ?? false);
+      this.#damagingMatters && (map.tileAt(here.x, here.y)?.damaging ?? false);
 
     this.#minding = controls.spacing.mindMonsters.get();
     if (!this.#minding) this.#bodies.clear();
@@ -309,8 +319,8 @@ export class DodgeScene {
         1000;
       this.#bodies.collect(
         map.enemies(),
-        self.x,
-        self.y,
+        here.x,
+        here.y,
         searchTiles + ENEMY_SEARCH_MARGIN_TILES,
         this.#read,
       );
@@ -326,8 +336,8 @@ export class DodgeScene {
       const reach = (planning.leadMs + planning.horizonMs) / 1000;
       this.#keepOuts.collect(
         map.enemies(),
-        self.x,
-        self.y,
+        here.x,
+        here.y,
         walkSpeedOf(session, controls) * reach + MAX_SELF_BLAST_TILES,
         this.#readKeepOut,
       );

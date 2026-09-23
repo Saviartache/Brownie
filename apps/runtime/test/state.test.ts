@@ -31,6 +31,7 @@ import { StatType } from '../src/constants/StatType.js';
 import type { TileCatalog } from '../src/state/TileMap.js';
 import { WorldState } from '../src/state/WorldState.js';
 import { bareName } from '../src/state/playerName.js';
+import { projectileDefinition } from './fakes.js';
 
 const registry: PacketRegistry = createBundledRegistry();
 
@@ -388,58 +389,42 @@ describe('StateStage', () => {
     ]);
   });
 
+  /** An enemy that fires one straight, ordinary shot. */
+  function shooter(overrides: Partial<ProjectileDefinition> = {}): ObjectCatalog {
+    const definition = projectileDefinition({
+      speed: 1000,
+      lifetimeMs: 4000,
+      damage: 10,
+      ...overrides,
+    });
+    return {
+      isPlayer: () => false,
+      isEnemy: () => true,
+      isPet: () => false,
+      isInvincible: () => false,
+      isQuest: () => false,
+      occupies: () => false,
+      isScenery: () => false,
+      isPortal: () => false,
+      isDungeonPortal: () => false,
+      dungeonPortals: () => [],
+      items: () => [],
+      bodyTiles: () => undefined,
+      displayName: () => undefined,
+      projectile: () => definition,
+      hasShots: () => true,
+      item: () => undefined,
+      container: () => undefined,
+      statMaxima: () => undefined,
+    };
+  }
+
   // A lifetime says when a shot runs out, not when it stops existing — and most
   // shots stop early, by landing. The client is what decides a bullet has hit,
   // so the acknowledgement it sends is the only word the runtime ever gets that
   // one is gone. Without this the model carries spent bullets for the rest of
   // their declared life and the dodge avoids things nobody can see.
   describe('shots that have already landed', () => {
-    /** An enemy that fires one straight, ordinary shot. */
-    function shooter(overrides: Partial<ProjectileDefinition> = {}): ObjectCatalog {
-      const definition: ProjectileDefinition = {
-        bulletType: 0,
-        speed: 1000,
-        lifetimeMs: 4000,
-        damage: 10,
-        size: 100,
-        collisionMult: 1,
-        wavy: false,
-        multiHit: false,
-        passesCover: false,
-        parametric: false,
-        boomerang: false,
-        amplitude: 0,
-        frequency: 0,
-        magnitude: 0,
-        acceleration: 0,
-        accelerationDelayMs: 0,
-        speedClamp: 0,
-        turnRate: 0,
-        debuffSeverity: 0,
-        ...overrides,
-      };
-      return {
-        isPlayer: () => false,
-        isEnemy: () => true,
-        isPet: () => false,
-        isInvincible: () => false,
-        isQuest: () => false,
-        occupies: () => false,
-        isScenery: () => false,
-        isPortal: () => false,
-        isDungeonPortal: () => false,
-        dungeonPortals: () => [],
-        items: () => [],
-        bodyTiles: () => undefined,
-        displayName: () => undefined,
-        projectile: () => definition,
-        hasShots: () => true,
-        item: () => undefined,
-        container: () => undefined,
-        statMaxima: () => undefined,
-      };
-    }
-
     function fired(catalog: ObjectCatalog): { world: WorldState; feed: typeof feedInto } {
       const world = new WorldState({ objects: catalog });
       const stage = new StateStage(world);
@@ -558,6 +543,68 @@ describe('StateStage', () => {
       const { world, feed } = fired(shooter());
       feed(packetOf('PLAYERHIT', { bulletId: 7, objectId: 42 }), FROM_SERVER);
       expect(world.projectileStore.size).toBe(1);
+    });
+  });
+
+  // **What the client does with an announcement that the packet does not say.**
+  // It hands every shot two multipliers read off the monster that fired it —
+  // stats 102 and 103, in thousandths — and numbers a volley its own way. A shot
+  // flown without either is a different shot from the one on screen.
+  describe('shots as the client flies them', () => {
+    function volley(ownerStats: PacketFields[], fields: Record<string, unknown> = {}): WorldState {
+      const { world, feed } = harness(shooter({ speed: 100, lifetimeMs: 1000 }));
+      feed(
+        packetOf('UPDATE', {
+          position: { x: 0, y: 0 },
+          levelType: 0,
+          tiles: [],
+          newObjs: [{ objectType: 1000, status: status(42, 0, 0, ownerStats) }],
+          drops: [],
+        }),
+      );
+      feed(
+        packetOf('ENEMYSHOOT', {
+          bulletId: 7,
+          ownerId: 42,
+          bulletType: 0,
+          position: { x: 0, y: 0 },
+          angle: 0,
+          damage: 10,
+          numShots: 1,
+          angleInc: 0,
+          ...fields,
+        }),
+      );
+      return world;
+    }
+
+    it('flies a shot as fast and as long as its owner makes it', () => {
+      const world = volley([
+        stat(StatType.ProjectileSpeedMultiplier, 1500),
+        stat(StatType.ProjectileLifetimeMultiplier, 2000),
+      ]);
+      const [shot] = [...world.projectileStore.values(0)];
+      expect(shot?.maxSpeedTilesPerSecond).toBeCloseTo(15);
+      expect(shot?.expiresAtMs).toBe(2000);
+    });
+
+    it('flies it as its data says when the owner says nothing', () => {
+      const [shot] = [...volley([]).projectileStore.values(0)];
+      expect(shot?.maxSpeedTilesPerSecond).toBeCloseTo(10);
+      expect(shot?.expiresAtMs).toBe(1000);
+    });
+
+    it('charges the damage the server rolled for the volley', () => {
+      const [shot] = [...volley([], { damage: 130 }).projectileStore.values(0)];
+      expect(shot?.damage).toBe(130);
+    });
+
+    // Its phase and every acknowledgement of it are read off this number, and
+    // the client's wraps at 32 767 rather than at sixteen bits.
+    it('numbers a volley the way the client does, round the wrap', () => {
+      const world = volley([], { bulletId: 32766, numShots: 3, angleInc: 0.1 });
+      const ids = [...world.projectileStore.values(0)].map((shot) => shot.bulletId);
+      expect(ids.sort((a, b) => a - b)).toEqual([0, 1, 32766]);
     });
   });
 });

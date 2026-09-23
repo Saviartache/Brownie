@@ -21,12 +21,11 @@
  *
  * **So it is computed instead, once, when the shot is announced.** Where the
  * walls are is known — it is the same tile map the walking is planned on — and
- * where the shot will be is `positionAt`, which is the game's own formula.
- * Walking the two together says which square the bullet dies in, and capping
- * the shot's life there means every reader is fixed at once: `positionAt`
- * answers `undefined` past it, the drawn path ends at the wall, the threat
- * field stops sampling, and the store prunes it. Nothing downstream had to
- * learn a new concept.
+ * where the shot will be is the client's own motion model. Walking the two
+ * together says which square the bullet dies in, and capping the shot's life
+ * there means every reader is fixed at once: `positionAt` answers `undefined`
+ * past it, the drawn path ends at the wall, the threat field stops sampling,
+ * and the store prunes it. Nothing downstream had to learn a new concept.
  *
  * **Once, and not per read.** A flight is 600–2000 ms and the planner runs
  * fifty times a second, so re-deciding this on every read would answer the same
@@ -37,12 +36,9 @@
  * slightly too long, which is the safe one.
  */
 
-import {
-  maxSpeedTilesPerSecond,
-  motionModelled,
-  type ProjectileDefinition,
-} from '../../gamedata/projectiles.js';
-import { positionAt, type ShotOrigin } from './positionAt.js';
+import type { Position } from '@brownie/plugin-api';
+import type { ProjectileDefinition } from '../../gamedata/projectiles.js';
+import type { ShotMotion } from './ShotMotion.js';
 
 /**
  * Whether a shot entering this square is stopped by it.
@@ -71,54 +67,49 @@ const STEP_TILES = 0.25;
  * **A bound on how far along the path is looked at, never on how finely.**
  * Coarsening the step to fit a long flight into a fixed budget is what lets a
  * bullet step straight over a one-tile wall, so the step stays put and this
- * ends the walk instead: sixteen tiles of travel are checked, and a shot still
- * going after that is handed the rest of its life. Nothing reads a shot that
- * far off — the threat field drops one long before it — so the only thing lost
- * is an answer nobody asked for.
+ * ends the walk instead: sixty-four tiles of travel, or six seconds of a curve,
+ * are checked, and a shot still going after that is handed the rest of its
+ * life. Paid once per shot, when it is announced.
  */
-const MAX_STEPS = 64;
+const MAX_STEPS = 256;
 
 /**
- * The fewest, for a path that speed says nothing about.
+ * How often a curving shot is looked at, at most, in milliseconds.
  *
- * A parametric shot has no forward speed at all: it sweeps a closed figure the
- * size of its magnitude, and a magnitude of nothing would otherwise ask for a
- * single sample.
+ * A curve's length is not its speed times its life — a circling shot goes round
+ * and round a ring it never leaves — so it is sampled by time as well as by
+ * distance, and whichever asks for more samples wins.
  */
-const MIN_STEPS = 8;
-
-/** How many times its own width a parametric figure's curve runs. */
-const PARAMETRIC_PATH_MULTIPLE = 6;
+const CURVE_STEP_MS = 25;
 
 /**
  * How long this shot is really in the air, in milliseconds since it was fired.
  *
- * Its declared lifetime, or the moment it meets something that stops it,
- * whichever comes first.
+ * Its lifetime, or the moment it meets something that stops it, whichever comes
+ * first. A shot that passes through cover is handed its full lifetime without
+ * being walked, which is what `PassesCover` means and the whole reason `retire`
+ * asks which sort of hit it heard about. So is a laser: its beam is drawn the
+ * instant it fires and the shot itself never moves, so nothing along the way is
+ * a wall it meets later.
  *
- * Two kinds of shot are handed back their full lifetime without being walked at
- * all. One passes through cover, which is what `PassesCover` means and the
- * whole reason `retire` asks which sort of hit it heard about. The other is the
- * shot whose curve is not modelled — the ones that turn — where
- * the path this would walk is not the path the bullet takes, so a wall found
- * along it is a wall the shot was never going to reach. Believing a shot for
- * too long costs a dodge; deleting a live one costs the run.
+ * @param from Where it was fired — the square that never stops it.
  */
 export function flightEndMs(
+  motion: ShotMotion,
   definition: ProjectileDefinition,
-  origin: ShotOrigin,
+  from: Position,
   stopsShots: StopsShots,
 ): number {
-  const lifetime = definition.lifetimeMs;
-  if (lifetime <= 0) return 0;
-  if (definition.passesCover || !motionModelled(definition)) return lifetime;
+  const lifetime = motion.lifetimeMs;
+  if (!(lifetime > 0)) return 0;
+  if (definition.passesCover || definition.laserTiles > 0) return lifetime;
 
-  const stepMs = lifetime / sampleCount(definition);
+  const stepMs = lifetime / sampleCount(motion, definition);
   // The square it was fired from never stops it. Monsters stand in doorways,
   // on the far side of destructibles and inside the objects they guard, and a
   // shot deleted at its own muzzle is a shot nothing ever dodges.
-  const muzzleX = Math.floor(origin.x);
-  const muzzleY = Math.floor(origin.y);
+  const muzzleX = Math.floor(from.x);
+  const muzzleY = Math.floor(from.y);
 
   let clearMs = 0;
   for (let step = 1; step <= MAX_STEPS; step += 1) {
@@ -126,7 +117,7 @@ export function flightEndMs(
     // the end of the life instead of a rounding short of it.
     const at = step * stepMs;
     if (at > lifetime) break;
-    const point = positionAt(definition, origin, at);
+    const point = motion.positionAt(at);
     if (point === undefined) break;
     const tileX = Math.floor(point.x);
     const tileY = Math.floor(point.y);
@@ -141,9 +132,14 @@ export function flightEndMs(
   return lifetime;
 }
 
-/** How many samples this shot's path is worth, from how long that path is. */
-function sampleCount(definition: ProjectileDefinition): number {
-  return Math.max(MIN_STEPS, Math.ceil(pathTiles(definition) / STEP_TILES));
+/** How many samples this shot's path is worth. */
+function sampleCount(motion: ShotMotion, definition: ProjectileDefinition): number {
+  const lifetime = motion.lifetimeMs;
+  const byDistance = Math.ceil(pathTiles(motion, definition) / STEP_TILES);
+  const byTime = Number.isFinite(motion.maxSpeedTilesPerSecond)
+    ? 0
+    : Math.ceil(lifetime / CURVE_STEP_MS);
+  return Math.max(8, byDistance, byTime);
 }
 
 /**
@@ -155,7 +151,7 @@ function sampleCount(definition: ProjectileDefinition): number {
  * Only ever used to pick a sampling rate, so being a little generous costs a
  * few samples and being short would cost a wall.
  */
-function pathTiles(definition: ProjectileDefinition): number {
-  if (definition.parametric) return PARAMETRIC_PATH_MULTIPLE * definition.magnitude;
-  return (maxSpeedTilesPerSecond(definition) * definition.lifetimeMs) / 1000;
+function pathTiles(motion: ShotMotion, definition: ProjectileDefinition): number {
+  if (definition.parametric) return 6 * definition.magnitude;
+  return Math.abs(motion.distanceAt(motion.lifetimeMs));
 }

@@ -59,7 +59,9 @@ enum class MessageType : std::uint16_t {
     kOffsetHealth = 0x0301,
     kServerTarget = 0x0302,
 
-    kPlayerTelemetry = 0x0400,
+    /// `0x0400` was a player telemetry message that nothing ever sent. Retired
+    /// rather than reused, so no build can read one as the other.
+    kClientFrame = 0x0401,
 };
 
 struct FrameHeader {

@@ -87,4 +87,45 @@ struct MapObjectRoute {
 [[nodiscard]] bool FindMapObject(const Il2CppRuntime& game, const MapObjectRoute& route,
                                  std::int32_t object_id, float& x, float& y) noexcept;
 
+/// Something that wants to see every map object, one at a time.
+///
+/// An interface rather than a template so that the walk stays in one
+/// translation unit with the layout it assumes. A call per object costs
+/// nothing beside the system calls the walk is made of.
+class MapObjectVisitor {
+  public:
+    /// One object, under the id it is filed by. `false` stops the walk.
+    ///
+    /// The object is the game's own pointer, read this frame: it may only be
+    /// read through `ReadField`/`ReadRaw`, never dereferenced.
+    virtual bool Visit(std::int32_t object_id, const void* object) noexcept = 0;
+
+  protected:
+    MapObjectVisitor() = default;
+    MapObjectVisitor(const MapObjectVisitor&) = default;
+    MapObjectVisitor& operator=(const MapObjectVisitor&) = default;
+    ~MapObjectVisitor() = default;
+};
+
+/// Walks every object in both tables, and then the ones not yet filed in
+/// either.
+///
+/// **An object may be met twice** — a table is not told which is the live one,
+/// and a new object can sit in the pending list for a frame after it has been
+/// filed — so a visitor that counts must recognise one it has already seen.
+///
+/// @param world The live world manager — see `FindWorldManager`. Taken rather
+///   than found, because a caller walking the objects usually wants something
+///   else off the same object and should not pay for the hops twice.
+/// @param pending_at Where the world manager keeps the objects it has made and
+///   not yet filed, or nought to skip them. Their ids are read off the objects
+///   themselves, since a list files nothing by id.
+/// @returns false when the walk could not see the whole world — nothing to
+///   walk, a read that failed part of the way, or a table longer than any walk
+///   goes. What was visited was real; what was not is not known to be absent.
+///
+/// **Game thread only**, for the reason `FindMapObject` gives.
+[[nodiscard]] bool ForEachMapObject(const void* world, const MapObjectRoute& route,
+                                    std::uint32_t pending_at, MapObjectVisitor& visitor) noexcept;
+
 }  // namespace brownie::game

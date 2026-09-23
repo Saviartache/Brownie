@@ -75,9 +75,13 @@ export class DodgePictureFeed {
    * from the picture is a body missing from the decision, which is the one thing
    * a debug view has to be able to say. Empty when the spacing group is switched
    * off, which is honest: it is then not minding the monsters at all.
+   *
+   * @param here Where the plan put the player, so the circles drawn around them
+   *   are the ones it measured from.
    */
   publish(
     session: SessionView,
+    here: Position,
     scene: DodgeScene,
     controls: DodgeControls,
     nowMs: number,
@@ -95,12 +99,11 @@ export class DodgePictureFeed {
     this.#showing = true;
 
     const world = session.world;
-    const self = session.self;
     this.#output.showPicture(
       shotPaths(world.gameTimeMs, world.projectiles(), MAX_DRAWN_SHOTS),
       dodgeMarks({
-        selfX: self.x,
-        selfY: self.y,
+        selfX: here.x,
+        selfY: here.y,
         gameTimeMs: world.gameTimeMs,
         // **The ground the character can reach before trouble becomes this
         // moment's problem**, which is what the planner's reaction window

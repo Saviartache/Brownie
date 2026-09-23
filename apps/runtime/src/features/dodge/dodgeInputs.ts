@@ -8,7 +8,7 @@
  * plugin. See `dodgePlugin.ts` for why the dodge is one at all.
  */
 
-import type { Position } from '@brownie/plugin-api';
+import type { Position, SessionView } from '@brownie/plugin-api';
 import type { DodgeMark } from './DodgeMarks.js';
 import type { ShotPath } from './ShotPaths.js';
 
@@ -83,6 +83,26 @@ export interface CursorWalkInput {
 export interface SteerInput {
   /** A unit direction, or nothing when the player is not steering. */
   direction(): Position | undefined;
+}
+
+/**
+ * Where the character is, as the client has it this frame.
+ *
+ * **The position every plan starts from, and only the module can say it.** The
+ * packets say where the player was when the client last wrote a `MOVE` — five
+ * times a second, a moment old — while the character walks every frame. A plan
+ * built on that thinks the step it just commanded has not happened yet and
+ * commands it again, and the character is carried a tile and a half past the
+ * gap it chose and then walked back into the shot it was avoiding. The module
+ * reads the character off the client every frame while this is being asked —
+ * asking is the claim — and nothing comes back once it stops.
+ */
+export interface ClientPlayerInput {
+  /**
+   * Where the player is now, or nothing when the module has not said lately —
+   * in which case the packets are all there is, and the plan uses them.
+   */
+  at(session: SessionView): Position | undefined;
 }
 
 /**
@@ -202,6 +222,7 @@ export interface DodgeInputs extends DodgeCatalog {
    */
   readonly cursorWalk: CursorWalkInput;
   readonly steer: SteerInput;
+  readonly player: ClientPlayerInput;
   readonly view: DodgeView;
   /**
    * Where the player is pointing, for resolving a pick.

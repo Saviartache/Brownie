@@ -647,6 +647,14 @@ describe('WorldStatusStage', () => {
     expect(h.records).toHaveLength(1);
   });
 
+  it('says how many shots the client confirmed and ended, last', () => {
+    const h = harness();
+    h.world.shots.confirmed = 12;
+    h.world.shots.ended = 5;
+    h.stage.handle(newtick(), context);
+    expect(h.records[0]).toMatch(/\|12\|5$/);
+  });
+
   it('says so again as soon as something does change', () => {
     const h = harness();
     h.stage.handle(newtick(), context);

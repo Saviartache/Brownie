@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,12 +85,14 @@ class Session {
     }
     [[nodiscard]] bool ready() const noexcept { return state() == SessionState::kReady; }
 
-    /// Reads what has arrived and acts on it, waiting up to `timeout_ms`.
+    /// Reads what has arrived and acts on it, waiting up to `timeout_ms` — or
+    /// until `wake` is signalled, when there is one.
     ///
     /// A timeout is not an error — it is the idle case, and the caller loops.
+    /// Nor is being woken, which is somebody else having something to send.
     /// Anything else has already disconnected by the time it returns: every
     /// failure this can report means the conversation is over.
-    Status Poll(std::uint32_t timeout_ms);
+    Status Poll(std::uint32_t timeout_ms, HANDLE wake = nullptr);
 
     /// One overlay interaction, travelling back.
     Status SendControlAction(std::string_view action);
@@ -105,9 +108,9 @@ class Session {
     /// game's `connect` is blocked behind it.
     Status SendServerTarget(std::string_view host, std::uint16_t port);
 
-    /// Per-frame player state, packed. See `docs/ipc.md` for the layout.
-    Status SendTelemetry(bool alive, float x, float y, std::int32_t hp, std::int32_t max_hp,
-                         std::int32_t defense, bool defense_known, std::uint32_t uptime_ms);
+    /// One frame of what the client sees, already packed — see
+    /// `app/DodgeTelemetry.h` and `docs/ipc.md` for the layout.
+    Status SendClientFrame(std::span<const std::byte> frame);
 
   private:
     Status Send(MessageType type, std::string_view payload, bool binary);

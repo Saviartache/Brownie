@@ -223,9 +223,12 @@ describe('the hit test', () => {
     expect(Math.hypot(0.45, 0.45)).toBeGreaterThan(half);
   });
 
-  it('folds the projectile, the player and the pad into one half-extent', () => {
-    expect(effectiveHalf(0.5, 1, 0)).toBeCloseTo(0.5 + PLAYER_HALF_TILES, 6);
-    expect(effectiveHalf(0.5, 2, 0.1)).toBeCloseTo(1 + PLAYER_HALF_TILES + 0.1, 6);
+  // The client's own test: the square is the shot's and the character is a
+  // point in it. Nothing of the player's body enters — adding it made every
+  // shot a fifth of a tile wider on each side than the one that lands.
+  it('folds the projectile and the pad into one half-extent, and nothing of the player', () => {
+    expect(effectiveHalf(0.5, 1, 0)).toBeCloseTo(0.5, 6);
+    expect(effectiveHalf(0.5, 2, 0.1)).toBeCloseTo(1.1, 6);
   });
 
   // A boss's shot can be several times the width of a rat's, and the game says
@@ -519,9 +522,10 @@ describe('how far it moves to get out of the way', () => {
       for (const shot of shots) {
         const where = shot.positionAt(at);
         if (where === undefined) continue;
+        // The client's hit test: a square the size of the shot's, around a
+        // character that is a point.
         const gap =
-          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) -
-          (PLAYER_HALF_TILES + DEFAULT_PROJECTILE_HALF_TILES);
+          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) - DEFAULT_PROJECTILE_HALF_TILES;
         if (gap < closest) closest = gap;
       }
     }
@@ -697,9 +701,10 @@ describe('the ground the player named', () => {
       for (const shot of shots) {
         const where = shot.positionAt(at);
         if (where === undefined) continue;
+        // The client's hit test: a square the size of the shot's, around a
+        // character that is a point.
         const gap =
-          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) -
-          (PLAYER_HALF_TILES + DEFAULT_PROJECTILE_HALF_TILES);
+          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) - DEFAULT_PROJECTILE_HALF_TILES;
         if (gap < closest) closest = gap;
       }
     }
@@ -1954,6 +1959,11 @@ describe('when the plugin decides', () => {
     notices: string[];
     /** Which way the module says the player is walking, driven by hand. */
     steer: { direction: Position | undefined };
+    /**
+     * Where the module says the client has the character, driven by hand —
+     * nothing while it says nothing, which leaves the packets' reading.
+     */
+    client: { at: Position | undefined };
     /** Whether the module says it is drawing the shot paths. */
     view: { on: boolean };
     showPicture: ReturnType<typeof vi.fn>;
@@ -2022,6 +2032,7 @@ describe('when the plugin decides', () => {
     const notices: string[] = [];
     const enemies: EntityView[] = [...(map.enemies ?? [])];
     const steer: { direction: Position | undefined } = { direction: undefined };
+    const client: { at: Position | undefined } = { at: undefined };
     const view = { on: false };
     // Fired ten tiles west of the player and travelling east at eight tiles a
     // second, so it reaches them a little over a second later.
@@ -2077,6 +2088,7 @@ describe('when the plugin decides', () => {
         output: { moveBy, showPicture },
         cursorWalk: { target: () => cursor.target },
         steer: { direction: () => steer.direction },
+        player: { at: () => client.at },
         view: { wanted: () => view.on },
         isObstacle: () => false,
         isInvincible: () => false,
@@ -2117,6 +2129,7 @@ describe('when the plugin decides', () => {
       enemies,
       notices,
       steer,
+      client,
       view,
       clock,
       plan: () => {
@@ -2167,6 +2180,24 @@ describe('when the plugin decides', () => {
     const { commands, plan } = underFire(900);
     plan();
     expect(commands().length).toBeGreaterThan(0);
+  });
+
+  // **The live report: it dodged, overshot, and walked back into the shot.**
+  // The packets put the player where the client last wrote a `MOVE` — up to a
+  // fifth of a second and a tile and a half ago — so a plan built on them never
+  // saw its own step land. The client's reading is the one that decides a hit.
+  it('plans from where the client has the character, not from the last packet', () => {
+    const h = underFire(900);
+    // The packets still have them in the lane; the client has already walked
+    // them three tiles clear of it.
+    h.client.at = { x: 10, y: 13 };
+    h.plan();
+    expect(h.moveBy).not.toHaveBeenCalled();
+
+    // And the packets are what is left once the module stops saying.
+    h.client.at = undefined;
+    h.plan();
+    expect(h.commands().length).toBeGreaterThan(0);
   });
 
   it('leaves a shot that is still far off alone', () => {
@@ -2222,6 +2253,23 @@ describe('when the plugin decides', () => {
 
     // Shoved three tiles east, with nothing in the air worth answering.
     h.self.x = 13;
+    h.moveBy.mockClear();
+    h.plan();
+
+    const asked = h.commands();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[asked.length - 1]?.[0], 'walked west, back onto it').toBeLessThan(0);
+  });
+
+  it('holds the ground the client had them on, when the client says', () => {
+    const h = underFire(0, { shot: ELSEWHERE as unknown as ProjectileView });
+    h.client.at = { x: 20, y: 20 };
+    anchorKey(h.host, true);
+    h.plan();
+
+    // Shoved three tiles east of it — as far as the client is concerned, which
+    // is the only reading that has moved.
+    h.client.at = { x: 23, y: 20 };
     h.moveBy.mockClear();
     h.plan();
 
@@ -2913,14 +2961,15 @@ describe('when the plugin decides', () => {
     });
 
     it('plans on the preset it was given', () => {
-      const relaxed = underFire(750);
+      const relaxed = underFire(825);
       relaxed.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Relaxed);
       relaxed.plan();
-      // Three hundred milliseconds of window: at 750 ms the shot is four tiles
-      // out and half a second from landing, which is nobody's problem yet.
+      // Three hundred milliseconds of window: at 825 ms the shot is three and a
+      // half tiles out and well over that from reaching the square it hits
+      // with, which is nobody's problem yet.
       expect(relaxed.commands()).toHaveLength(0);
 
-      const cautious = underFire(750);
+      const cautious = underFire(825);
       cautious.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Cautious);
       cautious.plan();
       expect(cautious.commands().length).toBeGreaterThan(0);
@@ -3120,6 +3169,7 @@ describe('the hit redirect', () => {
         },
         cursorWalk: { target: () => undefined },
         steer: { direction: () => undefined },
+        player: { at: () => undefined },
         view: { wanted: () => false },
         isObstacle: () => false,
         isInvincible: () => false,

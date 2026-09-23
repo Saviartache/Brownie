@@ -23,7 +23,9 @@ export const MessageType = {
   OffsetHealth: 0x0301,
   ServerTarget: 0x0302,
 
-  PlayerTelemetry: 0x0400,
+  // `0x0400` was a player telemetry message that nothing ever sent. Retired
+  // rather than reused, so no build can read one as the other.
+  ClientFrame: 0x0401,
 } as const;
 
 export type MessageType = (typeof MessageType)[keyof typeof MessageType];
@@ -51,7 +53,7 @@ export const MESSAGE_ORIGIN: Readonly<Record<number, Origin>> = {
   [MessageType.HotkeyEvent]: Origin.Native,
   [MessageType.OffsetHealth]: Origin.Native,
   [MessageType.ServerTarget]: Origin.Native,
-  [MessageType.PlayerTelemetry]: Origin.Native,
+  [MessageType.ClientFrame]: Origin.Native,
 };
 
 // ── Payloads ────────────────────────────────────────────────────────────────
@@ -157,18 +159,55 @@ export interface ServerTargetMessage {
   readonly port: number;
 }
 
-/** Per-frame player state, packed binary. See `telemetry.ts`. */
-export interface PlayerTelemetryMessage {
-  readonly kind: 'playerTelemetry';
-  readonly alive: boolean;
+/** An enemy shot the client has made, as it made it. */
+export interface BornShot {
+  readonly ownerId: number;
+  /** The client's own number for it — the one every acknowledgement names. */
+  readonly bulletId: number;
+  /** How long before the frame the client started it, on its frame clock. */
+  readonly ageMs: number;
+  /** Where it started. */
   readonly x: number;
   readonly y: number;
-  readonly hp: number;
-  readonly maxHp: number;
-  /** `undefined` when the native module could not read it. */
-  readonly defense: number | undefined;
-  /** Milliseconds since the native module attached; monotonic. */
-  readonly uptimeMs: number;
+  /** Which way it was fired, in radians. */
+  readonly angle: number;
+  /** What its owner's stat made of its speed. */
+  readonly speedMultiplier: number;
+  /** How long it lives, the owner's multiplier already applied. */
+  readonly lifetimeMs: number;
+  /** Half the side of the square the client hits with, in tiles. */
+  readonly halfTiles: number;
+}
+
+/** An enemy shot the client had and has destroyed. */
+export interface GoneShot {
+  readonly ownerId: number;
+  readonly bulletId: number;
+}
+
+/**
+ * One frame of what the client sees, packed binary. See `clientFrame.ts`.
+ *
+ * Sent while the runtime claims `dodge.track`, because the runtime's own idea
+ * of where the player is — five packets a second — is a moment behind a
+ * character that walks every frame, and its idea of when a shot started is the
+ * packet passing through rather than the frame the client read it on.
+ */
+export interface ClientFrameMessage {
+  readonly kind: 'clientFrame';
+  /** Where the player is on this frame, or nothing when there is no player. */
+  readonly player: { readonly x: number; readonly y: number } | undefined;
+  /** The client's frame clock, in milliseconds, when it could be read. */
+  readonly frameTimeMs: number | undefined;
+  /**
+   * Whether the shots were scanned this frame. `false` means the two lists say
+   * nothing — not that nothing happened.
+   */
+  readonly scanned: boolean;
+  /** Shots the client made since the last frame. */
+  readonly born: readonly BornShot[];
+  /** Shots the client destroyed since the last frame. */
+  readonly gone: readonly GoneShot[];
 }
 
 /**
@@ -195,5 +234,5 @@ export type IpcMessage =
   | HotkeyEventMessage
   | OffsetHealthMessage
   | ServerTargetMessage
-  | PlayerTelemetryMessage
+  | ClientFrameMessage
   | UnknownMessage;

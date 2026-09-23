@@ -22,6 +22,7 @@
 #include <string_view>
 #include <vector>
 
+#include "game/ClientShots.h"
 #include "game/Il2CppReady.h"
 #include "game/Il2CppRuntime.h"
 #include "game/MapFields.h"
@@ -29,6 +30,7 @@
 #include "game/OffsetTable.h"
 #include "game/PlayerHandle.h"
 #include "game/PlayerRoute.h"
+#include "game/ProjectileFields.h"
 #include "overlay/Ui.h"
 
 namespace brownie::app {
@@ -91,6 +93,19 @@ class GameBinding {
     /// player working. See `game/MapObjects.h`.
     [[nodiscard]] std::optional<game::MapObjectRoute> MapObjectRoute() const;
 
+    /// The same walk again, carried on to the client's shots and its frame
+    /// clock. See `game/ClientShots.h`.
+    ///
+    /// Handed over as soon as the object tables are known, with whatever of
+    /// the rest has resolved so far: the clock is on the world manager and
+    /// comes early, the shot's fields only once something has shot, and the
+    /// reader asks `ClientShotRoute::usable` before it scans.
+    ///
+    /// Not `const`, because the two classes are looked up by name and kept
+    /// once found — a lookup attaches this thread to the runtime, and the
+    /// answer cannot change for the run.
+    [[nodiscard]] std::optional<game::ClientShotRoute> ClientShotRoute();
+
     /// Every `bool(float, float)` the world manager declares, found once and
     /// kept — see `game/MapFields.h` for why it is a shape and not a name.
     ///
@@ -125,6 +140,8 @@ class GameBinding {
     game::PlayerHandle player_;
     overlay::MemoryReading reading_;
     std::vector<game::WalkabilityPredicate> walkability_;
+    /// The projectile class and its pooled subclass, once each has been found.
+    game::ShotClasses shot_classes_;
 };
 
 }  // namespace brownie::app

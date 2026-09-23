@@ -22,12 +22,19 @@ constexpr std::string_view kGlobalNamespace{};
 /// is asking — a build that renames it leaves both keys unresolved and visible
 /// in the overlay's report, which is what that report is for.
 constexpr std::string_view kProjectileClass = "HBEAKBIHANL";
+/// The projectile's one subclass: what the game's shot pool hands out, so the
+/// class nearly every live shot is an instance of. The two fields it adds are
+/// about drawing and everything read off a shot is inherited, which is why
+/// nothing is resolved on it — it is only ever compared against.
+constexpr std::string_view kPooledProjectileClass = "BJLDGDKMPFL";
 constexpr std::string_view kMapObjectClass = "KJMONHENJEN";
 constexpr std::string_view kTileClass = "BGAIOPJMHLO";
+constexpr std::string_view kWorldManagerClass = "HJMBOMEHGDJ";
 
 constexpr ClassQuery kProjectile{kGlobalNamespace, kProjectileClass, {}};
 constexpr ClassQuery kMapObject{kGlobalNamespace, kMapObjectClass, {}};
 constexpr ClassQuery kTile{kGlobalNamespace, kTileClass, {}};
+constexpr ClassQuery kWorldManager{kGlobalNamespace, kWorldManagerClass, {}};
 
 /// `bool (int, int)`, which both collision methods are.
 ///
@@ -70,9 +77,38 @@ constexpr std::array kFields{
     KeyedFieldQuery{kShotDamagesEnemies, FieldQuery{kProjectile, "NPMECLDKGEF", {}}},
     KeyedFieldQuery{kMapObjectTile, FieldQuery{kMapObject, "EOKJOGFPLOA", {}}},
     KeyedFieldQuery{kTileCollisionLayer, FieldQuery{kTile, "EBCLNFDKKEH", {}}},
+
+    // What the dodge reads, each named as the client's spawn routine writes it:
+    // the start position through the move it makes right after spawning, the
+    // angle normalised, the start time from the world manager's frame clock,
+    // the owner and the bullet id as the key it files the shot under, the
+    // multiplier the owner's stat handed it, the lifetime already multiplied,
+    // and the square's half-side as `CollisionMult × 0.5`. By name alone, for
+    // the reason given above.
+    KeyedFieldQuery{kShotStartX, FieldQuery{kProjectile, "AADLFLPIDGF", {}}},
+    KeyedFieldQuery{kShotStartY, FieldQuery{kProjectile, "EPFDHJLACEC", {}}},
+    KeyedFieldQuery{kShotAngle, FieldQuery{kProjectile, "FFFFKPDHEFP", {}}},
+    KeyedFieldQuery{kShotStartTime, FieldQuery{kProjectile, "GLEGBLDBOJF", {}}},
+    KeyedFieldQuery{kShotOwner, FieldQuery{kProjectile, "BOEOHMKEFIG", {}}},
+    KeyedFieldQuery{kShotBulletId, FieldQuery{kProjectile, "<HBAKILABEBJ>k__BackingField", {}}},
+    // The byte before `NPMECLDKGEF`, set from the owner's own "is an enemy".
+    KeyedFieldQuery{kShotDamagesPlayers, FieldQuery{kProjectile, "IIJFKHOLODP", {}}},
+    KeyedFieldQuery{kShotSpeedMultiplier, FieldQuery{kProjectile, "KDAJOMOFMJB", {}}},
+    KeyedFieldQuery{kShotLifetime, FieldQuery{kProjectile, "JMAJPIEPBGK", {}}},
+    KeyedFieldQuery{kShotRadius, FieldQuery{kProjectile, "HHFDCMIIIHF", {}}},
+
+    KeyedFieldQuery{kWorldFrameTime, FieldQuery{kWorldManager, "IBAFDFNDNBN", {}}},
+    KeyedFieldQuery{kWorldObjectsPending, FieldQuery{kWorldManager, "ONABHKFOJNE", {}}},
 };
 
 }  // namespace
+
+ShotClasses FindShotClasses(const MetadataSource& metadata) {
+    ShotClasses classes;
+    classes.shot = metadata.FindClass(kGlobalNamespace, kProjectileClass).value_or(nullptr);
+    classes.pooled = metadata.FindClass(kGlobalNamespace, kPooledProjectileClass).value_or(nullptr);
+    return classes;
+}
 
 std::size_t ResolveProjectileMethods(OffsetTable& table) {
     std::size_t resolved = 0;

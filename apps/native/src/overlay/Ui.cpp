@@ -512,6 +512,15 @@ void DrawWorld(const OverlayModel& model) {
         row("blasts", server, client);
     }
 
+    // What the client's own reading has done to the shots, entirely in the
+    // client column. Shown once the runtime reports it at all, noughts included:
+    // two noughts in a fight are the dodge planning from packets alone.
+    if (model.world.client_shot_stats_known) {
+        std::snprintf(client, sizeof(client), "%d confirmed, %d ended",
+                      model.world.shots_confirmed, model.world.shots_ended);
+        row("shots from client", "", client);
+    }
+
     // The equipped weapon, entirely in the server column: all of it comes out
     // of the game's own data files, and the module reads none of it. Shown so
     // that the range the dodge planner keeps the player inside can be checked

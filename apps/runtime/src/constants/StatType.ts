@@ -59,6 +59,18 @@ export const StatType = {
   Skin: 75,
   /** Second condition-effect bitmask — bits 31+. Not tracked by state yet. */
   Effects2: 95,
+  /**
+   * How much faster than its data this character's shots fly, in thousandths.
+   *
+   * **Read out of the client, and it disagrees with `stat-types.json`**, which
+   * calls 102 `Supporter` and puts the projectile speeds a slot later. The
+   * client's own stat handler stores 102 ÷ 1000 on the character and hands it
+   * to every shot the character fires as its speed multiplier; 103 is the same
+   * for the lifetime. Unstated means one. See `state/projectiles/ShotMotion.ts`.
+   */
+  ProjectileSpeedMultiplier: 102,
+  /** And how much longer they live, in thousandths. */
+  ProjectileLifetimeMultiplier: 103,
 } as const;
 
 export type StatTypeName = keyof typeof StatType;

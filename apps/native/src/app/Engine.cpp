@@ -181,6 +181,7 @@ constexpr std::string_view kArcaneStyleFeature = "player.arcaneStyle";
 constexpr std::string_view kSkinFeature = "player.skin";
 constexpr std::string_view kGlowFeature = "player.glow";
 constexpr std::string_view kGlowColourFeature = "player.glowColour";
+constexpr std::string_view kDodgeTrackFeature = "dodge.track";
 constexpr std::string_view kFeatureOn = "true";
 
 /// The one thing a colour key carries that is not a colour: hold the bar at a
@@ -306,6 +307,12 @@ Status Engine::Start() {
     stopping_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
 
+    // Before the overlay, which is what rings it, and before the thread that
+    // waits on it. A doorbell that could not be made leaves the dodge's frames
+    // going out at the loop's own pace, which is late rather than wrong — the
+    // runtime drops a frame that arrives late.
+    wake_.reset(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
+
     // MinHook comes up first: the overlay is not the only thing that needs it —
     // the IL2CPP readiness watcher hooks on its own account.
     if (auto hooks = hooks::HookEngine::Create(); hooks.ok()) {
@@ -352,6 +359,9 @@ void Engine::Stop() noexcept {
     if (thread_.joinable()) {
         thread_.join();
     }
+    // Last: the overlay that rings it is out and the thread that waited on it
+    // has been joined, so nothing can be holding it any more.
+    wake_.reset();
     running_.store(false, std::memory_order_release);
     connected_.store(false, std::memory_order_release);
 }
@@ -498,6 +508,10 @@ void Engine::AcceptFeature(std::string_view key, std::string_view value) {
     }
     if (key == kGlowFeature) {
         glow_until_ms_.store(on ? now + kGlowLeaseMs : 0, std::memory_order_relaxed);
+        return;
+    }
+    if (key == kDodgeTrackFeature) {
+        dodge_telemetry_.Claim(on, now);
     }
 }
 
@@ -620,7 +634,12 @@ void Engine::Turn() {
     WatchHotkeys();
     PollHotkeys(NowMs());
 
-    const auto polled = session_.Poll(PollBudgetMs(NowMs()));
+    // What the render thread packed since the last turn — which is usually one
+    // frame, because the frame that packed it is also what woke this turn.
+    dodge_telemetry_.Flush(session_);
+
+    const auto polled =
+        session_.Poll(PollBudgetMs(NowMs()), wake_.valid() ? wake_.get() : nullptr);
     if (!polled.ok() && polled.error().code() != ErrorCode::kNotReady) {
         // The link is gone. The loop reconnects on its next turn; the runtime
         // replays every feature key when it does, so there is nothing here to
@@ -628,7 +647,13 @@ void Engine::Turn() {
         connected_.store(false, std::memory_order_release);
         return;
     }
-    connected_.store(session_.ready(), std::memory_order_release);
+    const bool ready = session_.ready();
+    const bool was_ready = connected_.exchange(ready, std::memory_order_acq_rel);
+    if (ready && !was_ready) {
+        // A runtime that has just authenticated has heard of no shot at all, so
+        // the next frame starts the scan again and reports every one as new.
+        dodge_telemetry_.RequestReset();
+    }
 }
 
 void Engine::AdvanceSetup() {
@@ -685,6 +710,15 @@ void Engine::AdvanceSetup() {
     // second flag saying whether it has been done.
     if (const auto objects = binding_.MapObjectRoute()) {
         control_.BindMapObjects(*objects);
+    }
+
+    // The same walk carried on to the client's shots and its clock, handed to
+    // the dodge's reader on every pass for the same reason: a copy of a few
+    // numbers, against a flag saying whether it has been done. The reader asks
+    // whether the route is complete before it scans, so a pass that has only
+    // the clock hands over the clock.
+    if (const auto shots = binding_.ClientShotRoute()) {
+        dodge_telemetry_.Bind(DodgeTelemetryBinding{binding_.runtime(), *shots});
     }
 
     // Each is bound on its own, so a method that is never found leaves the
@@ -1428,6 +1462,17 @@ void Engine::DrawFrame() {
     // one that may call into it.
     const std::uint64_t now = NowMs();
     control_.Apply(now);
+
+    // What the dodge plans from, read after the step so the position is the one
+    // this frame ends on — and only while the dodge is asking, because the scan
+    // is a walk over every object in the world.
+    {
+        game::PlayerLocation player;
+        const bool located = dodge_telemetry_.Wanted(now) && control_.Locate(player);
+        if (dodge_telemetry_.Capture(located ? &player : nullptr, now) && wake_.valid()) {
+            ::SetEvent(wake_.get());
+        }
+    }
 
     // The same argument once more, for the chord that walks to the cursor: it
     // is held while the player is looking at the game, not at a panel over it.

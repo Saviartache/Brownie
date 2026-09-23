@@ -86,6 +86,12 @@ bool ParseWorldRecord(std::string_view record, WorldStatus& out) noexcept {
                             ParseInt(TakeField(rest), blasts_confirmed) &&
                             ParseInt(TakeField(rest), blasts_unmatched);
 
+    // Appended after those, and read the same way: both or neither.
+    int shots_confirmed = 0;
+    int shots_ended = 0;
+    const bool has_client_shots = has_blasts && ParseInt(TakeField(rest), shots_confirmed) &&
+                                  ParseInt(TakeField(rest), shots_ended);
+
     // Assigned only once every field has parsed, so a malformed record cannot
     // leave a half-updated status on screen.
     out.known = true;
@@ -105,6 +111,9 @@ bool ParseWorldRecord(std::string_view record, WorldStatus& out) noexcept {
     out.blasts = has_blasts ? blasts : 0;
     out.blasts_confirmed = has_blasts ? blasts_confirmed : 0;
     out.blasts_unmatched = has_blasts ? blasts_unmatched : 0;
+    out.client_shot_stats_known = has_client_shots;
+    out.shots_confirmed = has_client_shots ? shots_confirmed : 0;
+    out.shots_ended = has_client_shots ? shots_ended : 0;
     return true;
 }
 

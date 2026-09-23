@@ -177,7 +177,7 @@ the rest, and the lifetimes differ per store because the questions do:
 | `SelfState` | the player's latest stats | never, within a session |
 | `EntityStore` | objects in view | `UPDATE.drops`, or the map changes |
 | `TileMap` | ground the server has sent | the map changes |
-| `ProjectileStore` | shots **still in flight** | their flight ends, or the map changes |
+| `ProjectileStore` | shots **still in flight** | their flight ends, the client destroys them, or the map changes |
 
 ### The client's timeline: two clocks, one direction
 
@@ -398,6 +398,38 @@ Anti-debuffs learned this the expensive way. It read the world model from its
 `PLAYERHIT` handler, which looked like exactly the reuse to prefer, type-checked
 and passed its tests against a fake world — and in a real session refused
 precisely nothing, silently, because the shot was never there to find.
+
+### A shot is flown the way the client flies it
+
+Every enemy shot in the store is a `ShotMotion`: the client's own projectile
+code, ported branch for branch and checked against the installed build rather
+than modelled. That includes the two multipliers the client reads off the
+monster that fired — stats 102 and 103, which make a shot faster and longer
+lived than its data says — the turning and circling shots, acceleration that
+only ever *reaches* its clamp, and lasers, whose beam is the damage. The hit
+test is the client's too: a square the size of the *shot's* collision square
+around a player who is a point. Adding the player's own body on top, as the
+reference implementation did, made every shot a fifth of a tile wider on each
+side than the one that lands.
+
+### What the client sees outranks what the packets say
+
+The packets are a reconstruction, and for dodging three parts of it are a moment
+behind or a guess: where the player is (a `MOVE` five times a second, from a
+character that walks every frame), when a shot started (when `ENEMYSHOOT`
+passed through, rather than the frame the client read it on), and whether a
+shot still exists (no packet says a wall took it). A planner that cannot see its
+own step land commands it again, and walks the character past the gap it chose
+and back into the shot.
+
+So while the dodge asks, the module reads all three off the client every frame
+and sends them as one `clientFrame` message — see [`docs/ipc.md`](./ipc.md#clientframe).
+`native/ClientFrames` puts the client's clock on the session's, keeps the
+player's position and velocity for the dodge to plan from, and applies the
+shots to the session's own store as they arrive: a shot the client made is
+flown from the moment and with the launch the client gave it, and a shot the
+client destroyed is forgotten outright. Without the module the packets' reading
+is still there, and the dodge falls back to it.
 
 ## Plugins
 
@@ -914,6 +946,8 @@ looks exactly like a broken one.
 | Sources discovered from disk for the native build | Removes an entire class of bug (project file drifting from disk) that the old tree needed two tools to police | explicit source list, `.vcxproj` as source of truth |
 | One planner survives the dodge port, and it lives in the runtime, not the module | A dodge planner is arithmetic over game state, and the game state is already there; what must be in-process is reading memory and drawing, not deciding | keep all four "in case"; keep it in C++ because that is where it was |
 | The hit test is a square (Chebyshev), not a circle | It is what the game does; a circle disagrees exactly at the corners, which is where a shot grazes | distance comparison, "close enough" |
+| The square is the shot's alone; the player is a point in it | Read out of the client's hit test. The player's body added on top was a fifth of a tile of phantom on every side of every shot, and the planner dodged gaps that were open | a body-sized margin built into the hit test, where the pad setting cannot see it |
+| The dodge plans from the client's frame, not from the packets | The packets' position is up to a fifth of a second old; a plan that cannot see its own step land repeats it and overshoots. The module reads the client's position, clock and shots every frame while the dodge claims them | planning from `MOVE`, and correcting the overshoot after it has happened |
 | The module is installed as `d3d11.dll` | Measured: `version.dll` and `winhttp.dll` kill this Exalt build about a second in — even as Microsoft's own unmodified DLLs, and even as the old project's own proxy rebuilt from source. `d3d11.dll` is tolerated | `version.dll`, `winhttp.dll` — the obvious names, and the ones the old tree used |
 | A claim about the game is settled by measuring it, never by reading its crash stack | Four diagnoses argued from that stack were each wrong; an exit code and a launched PID both lied about whether the game was alive — sample by process name instead | reasoning from the stack trace |
 | IL2CPP reached only through its exported C API | Removes the generated headers, the per-Unity regeneration step, and the whole class of struct-layout bugs — including the uninitialised-class walk that crashed the old build | generated headers from a metadata dump, structs walked by hand |

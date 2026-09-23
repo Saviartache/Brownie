@@ -311,16 +311,16 @@ describe('NativeLink', () => {
   });
 
   describe('events', () => {
-    it('forwards actions, hotkeys, telemetry and offset health', () => {
+    it('forwards actions, hotkeys, client frames and offset health', () => {
       const { link: native } = link();
       const peer = new NativePeer();
       const actions: string[] = [];
       const hotkeys: string[] = [];
       const health: string[][] = [];
-      let hp = 0;
+      const clocks: (number | undefined)[] = [];
       native.onControlAction((a) => actions.push(a));
       native.onHotkey((e) => hotkeys.push(e.pluginId));
-      native.onTelemetry((t) => (hp = t.hp));
+      native.onClientFrame((frame) => clocks.push(frame.frameTimeMs));
       native.onOffsetHealth((h) => health.push([...h.unresolved]));
 
       native.accept(peer.transport);
@@ -335,20 +335,18 @@ describe('NativeLink', () => {
         value: true,
       });
       peer.send({
-        kind: 'playerTelemetry',
-        alive: true,
-        x: 1,
-        y: 2,
-        hp: 640,
-        maxHp: 770,
-        defense: 25,
-        uptimeMs: 10,
+        kind: 'clientFrame',
+        player: { x: 1, y: 2 },
+        frameTimeMs: 640,
+        scanned: false,
+        born: [],
+        gone: [],
       });
       peer.send({ kind: 'offsetHealth', unresolved: ['HBEAKBIHANL'] });
 
       expect(actions).toEqual(['ui|page|key|1']);
       expect(hotkeys).toEqual(['auto-aim']);
-      expect(hp).toBe(640);
+      expect(clocks).toEqual([640]);
       expect(health).toEqual([['HBEAKBIHANL']]);
     });
 

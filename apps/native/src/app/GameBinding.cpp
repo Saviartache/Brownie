@@ -115,6 +115,41 @@ std::optional<game::MapObjectRoute> GameBinding::MapObjectRoute() const {
     return route;
 }
 
+std::optional<game::ClientShotRoute> GameBinding::ClientShotRoute() {
+    const auto objects = MapObjectRoute();
+    if (!objects.has_value() || game_ == nullptr) {
+        return std::nullopt;
+    }
+    // Asked for until both are found, and never again after: a class is where
+    // it is for the whole run.
+    if (shot_classes_.shot == nullptr || shot_classes_.pooled == nullptr) {
+        const game::ShotClasses found = game::FindShotClasses(*game_);
+        if (shot_classes_.shot == nullptr) shot_classes_.shot = found.shot;
+        if (shot_classes_.pooled == nullptr) shot_classes_.pooled = found.pooled;
+    }
+
+    const auto field = [this](std::string_view key) {
+        return offsets_->FieldOffset(key).value_or(0);
+    };
+    game::ClientShotRoute route;
+    route.objects = *objects;
+    route.pending_at = field(game::kWorldObjectsPending);
+    route.frame_time_at = field(game::kWorldFrameTime);
+    route.shot_class = shot_classes_.shot;
+    route.shot_subclass = shot_classes_.pooled;
+    route.start_x_at = field(game::kShotStartX);
+    route.start_y_at = field(game::kShotStartY);
+    route.angle_at = field(game::kShotAngle);
+    route.start_time_at = field(game::kShotStartTime);
+    route.owner_at = field(game::kShotOwner);
+    route.bullet_id_at = field(game::kShotBulletId);
+    route.damages_players_at = field(game::kShotDamagesPlayers);
+    route.speed_multiplier_at = field(game::kShotSpeedMultiplier);
+    route.lifetime_at = field(game::kShotLifetime);
+    route.radius_at = field(game::kShotRadius);
+    return route;
+}
+
 std::span<const game::WalkabilityPredicate> GameBinding::WalkabilityPredicates() {
     if (walkability_.empty() && game_ != nullptr && offsets_.has_value()) {
         walkability_ = game::ResolveWalkabilityPredicates(*game_, *offsets_);

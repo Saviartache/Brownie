@@ -1,15 +1,80 @@
 import type { Position, ProjectileView } from '@brownie/plugin-api';
 import { projectileHalfTiles } from '../../features/dodge/hitbox.js';
-import {
-  maxSpeedTilesPerSecond,
-  motionModelled,
-  type ProjectileDefinition,
-} from '../../gamedata/projectiles.js';
+import type { ProjectileDefinition } from '../../gamedata/projectiles.js';
 import { flightEndMs, type StopsShots } from './flightEnd.js';
-import { positionAt, type ShotOrigin } from './positionAt.js';
+import { ShotMotion, type ShotLaunch } from './ShotMotion.js';
+
+/** One shot as it is announced. */
+export interface AnnouncedShot extends ShotLaunch {
+  readonly ownerId: number;
+  readonly bulletType: number;
+  /** When it left the muzzle, on the world clock. */
+  readonly firedAtMs: number;
+  /**
+   * What it takes off, when the announcement said.
+   *
+   * `ENEMYSHOOT` carries the damage the server rolled for this volley, which is
+   * the number that will actually be charged — the definition's figure is a
+   * stand-in for when it did not.
+   */
+  readonly damage?: number | undefined;
+}
+
+/**
+ * What the client says about a shot it has made — see
+ * {@link ProjectileStore.confirm}.
+ */
+export interface ClientLaunch {
+  /** When the client started it, on the world clock. */
+  readonly firedAtMs: number;
+  readonly x: number;
+  readonly y: number;
+  /** Radians. */
+  readonly angle: number;
+  readonly speedMultiplier: number;
+  /** How long it lives, the owner's multiplier already applied. */
+  readonly lifetimeMs: number;
+  /** Half the side of the square the client hits with, in tiles. */
+  readonly halfTiles: number;
+}
+
+/**
+ * The furthest a believable coordinate is from the origin, and the widest a
+ * believable shot — the same bounds the module reads a shot against. A launch
+ * past either is a reading of something that is not a shot.
+ */
+const MAX_COORDINATE_TILES = 100_000;
+const MAX_HALF_TILES = 64;
+const MAX_MULTIPLIER = 100;
+
+function believable(launch: ClientLaunch, definition: ProjectileDefinition): boolean {
+  return (
+    Number.isFinite(launch.firedAtMs) &&
+    Math.abs(launch.x) <= MAX_COORDINATE_TILES &&
+    Math.abs(launch.y) <= MAX_COORDINATE_TILES &&
+    Number.isFinite(launch.angle) &&
+    launch.speedMultiplier > 0 &&
+    launch.speedMultiplier <= MAX_MULTIPLIER &&
+    launch.lifetimeMs > 0 &&
+    launch.lifetimeMs <= definition.lifetimeMs * MAX_MULTIPLIER &&
+    launch.halfTiles >= 0 &&
+    launch.halfTiles <= MAX_HALF_TILES
+  );
+}
 
 /** One shot in flight. */
 class TrackedShot implements ProjectileView {
+  readonly ownerId: number;
+  readonly bulletId: number;
+  readonly bulletType: number;
+  readonly damage: number;
+  readonly definition: ProjectileDefinition;
+  readonly motion: ShotMotion;
+  /** The game's own square: the client's word for it, or the data's. */
+  readonly collisionHalfTiles: number;
+  readonly #launch: ShotLaunch;
+  /** When it left the muzzle, on the world clock. */
+  readonly firedAtMs: number;
   /**
    * When it stops existing — its lifetime, or the wall it flies into.
    *
@@ -20,29 +85,58 @@ class TrackedShot implements ProjectileView {
   readonly expiresAtMs: number;
 
   constructor(
-    readonly ownerId: number,
-    readonly bulletId: number,
-    readonly bulletType: number,
-    readonly firedAtMs: number,
-    readonly origin: ShotOrigin,
-    readonly definition: ProjectileDefinition,
+    shot: AnnouncedShot,
+    definition: ProjectileDefinition,
     stopsShots: StopsShots,
+    halfTiles: number = projectileHalfTiles(definition.collisionMult),
   ) {
-    this.expiresAtMs = firedAtMs + flightEndMs(definition, origin, stopsShots);
+    this.ownerId = shot.ownerId;
+    this.bulletId = shot.bulletId;
+    this.bulletType = shot.bulletType;
+    this.definition = definition;
+    this.damage = shot.damage ?? definition.damage;
+    this.collisionHalfTiles = halfTiles;
+    this.#launch = shot;
+    this.motion = new ShotMotion(definition, shot);
+    this.firedAtMs = shot.firedAtMs;
+    this.expiresAtMs = this.firedAtMs + flightEndMs(this.motion, definition, shot, stopsShots);
   }
 
-  get damage(): number {
-    return this.definition.damage;
+  /**
+   * The same shot, launched the way the client says it was.
+   *
+   * Built again rather than patched, because every figure the flight is made
+   * of — the multipliers, the turn's exit, where the first wall is — follows
+   * from the launch, and a shot half-updated is a curve nobody fired.
+   */
+  relaunched(launch: ClientLaunch, stopsShots: StopsShots): TrackedShot {
+    return new TrackedShot(
+      {
+        ownerId: this.ownerId,
+        bulletId: this.bulletId,
+        bulletType: this.bulletType,
+        damage: this.damage,
+        firedAtMs: launch.firedAtMs,
+        x: launch.x,
+        y: launch.y,
+        angle: launch.angle,
+        speedMultiplier: launch.speedMultiplier,
+        lifetimeMultiplier: launch.lifetimeMs / this.definition.lifetimeMs,
+      },
+      this.definition,
+      stopsShots,
+      launch.halfTiles,
+    );
   }
 
-  /** The game's own square, from the multiplier the shot's data declares. */
-  get collisionHalfTiles(): number {
-    return projectileHalfTiles(this.definition.collisionMult);
+  /** How long the beam is, for a laser; nought for anything that is a point. */
+  get beamTiles(): number {
+    return this.definition.laserTiles;
   }
 
-  /** Whether `positionAt` describes this shot's whole path. */
-  get motionModelled(): boolean {
-    return motionModelled(this.definition);
+  /** Which way it was fired, in radians — the way a laser's beam points. */
+  get angle(): number {
+    return this.#launch.angle;
   }
 
   /** How bad the worst condition it applies is. See `gamedata/conditions.ts`. */
@@ -51,16 +145,16 @@ class TrackedShot implements ProjectileView {
   }
 
   get maxSpeedTilesPerSecond(): number {
-    return maxSpeedTilesPerSecond(this.definition);
+    return this.motion.maxSpeedTilesPerSecond;
   }
 
   /** Where it started. `positionAt` is what says where it is now. */
   get x(): number {
-    return this.origin.x;
+    return this.#launch.x;
   }
 
   get y(): number {
-    return this.origin.y;
+    return this.#launch.y;
   }
 
   positionAt(gameTimeMs: number): Position | undefined {
@@ -69,7 +163,7 @@ class TrackedShot implements ProjectileView {
     // field stops sampling here, and the drawn path ends here — so the wall is
     // answered in one place rather than by every caller learning about walls.
     if (gameTimeMs > this.expiresAtMs) return undefined;
-    return positionAt(this.definition, this.origin, gameTimeMs - this.firedAtMs);
+    return this.motion.positionAt(gameTimeMs - this.firedAtMs);
   }
 }
 
@@ -117,31 +211,37 @@ export class ProjectileStore {
    * @returns false when there is no definition for it, which is what happens
    *   without the game's data files.
    */
-  add(
-    definition: ProjectileDefinition | undefined,
-    shot: {
-      ownerId: number;
-      bulletId: number;
-      bulletType: number;
-      x: number;
-      y: number;
-      angle: number;
-      firedAtMs: number;
-    },
-  ): boolean {
+  add(definition: ProjectileDefinition | undefined, shot: AnnouncedShot): boolean {
     if (definition === undefined || definition.lifetimeMs <= 0) return false;
     this.#shots.set(
       shotKey(shot.ownerId, shot.bulletId),
-      new TrackedShot(
-        shot.ownerId,
-        shot.bulletId,
-        shot.bulletType,
-        shot.firedAtMs,
-        { bulletId: shot.bulletId, x: shot.x, y: shot.y, angle: shot.angle },
-        definition,
-        this.#stopsShots,
-      ),
+      new TrackedShot(shot, definition, this.#stopsShots),
     );
+    return true;
+  }
+
+  /**
+   * Takes the client's word for a shot it has made.
+   *
+   * **The client's shot is the one that hits, and this was only ever a
+   * reconstruction of it.** The announcement says where a volley starts and
+   * which way; the client then starts each bullet on the frame it reads the
+   * packet — later than it passed through here, by however long it took to get
+   * round to it — scales it by what its own copy of the owner's stats says, and
+   * hits with the square it was given. Where the client has said all of that,
+   * its answer replaces the estimate, and the shot is flown exactly as the
+   * client flies it from then on.
+   *
+   * A launch that does not make sense is refused rather than half-believed:
+   * the estimate is still a good one.
+   *
+   * @returns whether a shot was found and taken.
+   */
+  confirm(ownerId: number, bulletId: number, launch: ClientLaunch): boolean {
+    const key = shotKey(ownerId, bulletId);
+    const shot = this.#shots.get(key);
+    if (shot === undefined || !believable(launch, shot.definition)) return false;
+    this.#shots.set(key, shot.relaunched(launch, this.#stopsShots));
     return true;
   }
 
@@ -160,8 +260,8 @@ export class ProjectileStore {
    * **Still taken, now that the walls are worked out in advance.** An
    * acknowledgement that arrives is a fact and arrives for reasons
    * {@link flightEndMs} cannot see: a shot landing on a character, a door that
-   * closed after it was fired, and every shot whose curve the model declines to
-   * predict. It is the late confirmation, not the mechanism.
+   * closed after it was fired, and a wall the store never heard about.
+   * It is the late confirmation, not the mechanism.
    *
    * @param obstacle Whether it hit the map rather than a character. The two are
    *   survived by different shots — one passes through people, the other through
@@ -177,6 +277,16 @@ export class ProjectileStore {
     if (obstacle ? shot.definition.passesCover : shot.definition.multiHit) return false;
     this.#shots.delete(key);
     return true;
+  }
+
+  /**
+   * Forgets a shot outright, whatever it passes through.
+   *
+   * For when the client says it no longer has the shot at all — which is a
+   * fact about the shot, not an acknowledgement to interpret.
+   */
+  forget(ownerId: number, bulletId: number): boolean {
+    return this.#shots.delete(shotKey(ownerId, bulletId));
   }
 
   /**

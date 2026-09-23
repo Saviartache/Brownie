@@ -140,6 +140,13 @@ export class WorldStatusStage implements PipelineStage {
       blasts,
       this.#world.blastStore.confirmed,
       this.#world.blastStore.unmatched,
+      // **Whether the client's own reading is reaching the store.** Tracked
+      // shots the client has said it made, and ones it has said it destroyed:
+      // both stay at nought when the module is not reading the fight, which is
+      // the one thing that tells a dodge planning from the client apart from
+      // one quietly planning from the packets. See `native/ClientFrames`.
+      this.#world.shots.confirmed,
+      this.#world.shots.ended,
     ].join('|');
 
     this.#sayWeapon(self.weaponType);
