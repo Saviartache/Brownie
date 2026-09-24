@@ -825,14 +825,9 @@
         {
           "name": "slotObject2",
           "type": "SlotObject"
-        },
-        {
-          "name": "tickId",
-          "type": "int32",
-          "optional": true,
-          "default": 0
         }
-      ]
+      ],
+      "note": "Exactly these four: the client's own serializer (InventorySwap, build 6.13) writes time, x, y and two slot objects. A trailing tickId some build had is answered with FAILURE 'Bad message received'."
     },
     "56": {
       "name": "CHANGETRADE",

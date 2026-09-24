@@ -58,6 +58,18 @@ export interface ProxySessionOptions {
   readonly log: Logger;
   /** Called once the server link is opened, with the target it went to. */
   readonly onServerOpened?: (target: ServerTarget) => void;
+  /**
+   * Called once a packet from the game client has been dealt with — forwarded
+   * to the server, or withheld by a stage — before anything else is read from
+   * either side.
+   *
+   * **This is the one point in the client's stream where something of ours may
+   * join it.** The game client sends every packet behind the shot
+   * acknowledgements it owes, so straight after one of its packets it owes
+   * nothing; a packet injected here lands where its own next action would. The
+   * packet is handed over so the listener can tell what the server heard.
+   */
+  readonly onClientPacketPassed?: (packet: MutablePacket) => void;
   readonly onClosed: (session: ProxySession) => void;
 }
 
@@ -77,6 +89,7 @@ export class ProxySession {
   readonly #resolveTarget: (packet: MutablePacket) => ServerTarget | undefined;
   readonly #log: Logger;
   readonly #onServerOpened: ((target: ServerTarget) => void) | undefined;
+  readonly #onClientPacketPassed: ((packet: MutablePacket) => void) | undefined;
   readonly #onClosed: (session: ProxySession) => void;
   readonly #pipeline: PacketPipeline;
 
@@ -104,6 +117,7 @@ export class ProxySession {
     this.#resolveTarget = options.resolveTarget;
     this.#log = options.log.forSession(options.id);
     this.#onServerOpened = options.onServerOpened;
+    this.#onClientPacketPassed = options.onClientPacketPassed;
     this.#onClosed = options.onClosed;
 
     // The game client sends with the client key and expects the server key
@@ -245,8 +259,15 @@ export class ProxySession {
       origin === PacketOrigin.Client ? this.#clientContext : this.#serverContext,
     );
 
-    if (packet.verdict === Verdict.Drop) return;
+    if (packet.verdict !== Verdict.Drop) this.#forward(origin, packet);
 
+    // After the forward, not before: whatever the listener injects has to land
+    // behind this packet on the wire, where the client's own next one would.
+    // A stage may have closed the session, and a closed session carries nothing.
+    if (origin === PacketOrigin.Client && !this.closed) this.#onClientPacketPassed?.(packet);
+  }
+
+  #forward(origin: PacketOrigin, packet: MutablePacket): void {
     const destination = origin === PacketOrigin.Client ? this.#server : this.#client;
     if (destination === undefined) return;
 

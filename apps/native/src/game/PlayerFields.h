@@ -112,6 +112,16 @@ inline constexpr std::string_view kPlayerMoveMultiplier = "self.moveMultiplier";
 /// shape, and an overload that two methods match is refused rather than picked.
 inline constexpr std::string_view kComputeShootAngle = "self.computeShootAngle";
 inline constexpr std::string_view kShootWithAngle = "self.shootWithAngle";
+
+/// The game's own "use the ability", which the ability key calls with the
+/// cursor on the way down and again on the way up.
+///
+/// **Both called and intercepted**: called to cast for the player, and detoured
+/// to point the presses the player makes. Either way the client does what a key
+/// press makes it do — the checks, the `USEITEM`, the shots behind it, the
+/// cooldown — because a use the proxy wrote itself skipped every one of those
+/// and was what ended sessions. See `PlayerAbility.h`.
+inline constexpr std::string_view kPlayerUseAbility = "self.useAbility";
 inline constexpr std::string_view kSetPlayerSkin = "self.setSkin";
 inline constexpr std::string_view kSetPlayerShader = "self.setShaderProperties";
 

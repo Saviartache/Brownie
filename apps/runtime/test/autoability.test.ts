@@ -1,6 +1,5 @@
 import {
   MutablePacket,
-  SendOutcome,
   type EntityView,
   type InventoryView,
   type ItemSlotView,
@@ -34,13 +33,29 @@ const registry = createBundledRegistry();
 // verbatim, and nothing else. Real text rather than invented text: what is
 // being tested is a reading of a file somebody else maintains.
 
-/** Archer. One aimed effect, a cost, no cooldown, nothing granted. */
+/**
+ * Archer. One aimed effect, a cost, no cooldown, nothing granted — and arrows
+ * of its own, which the client fires behind its use from the same point.
+ */
 const QUIVER = `<Object type="0xb28" id="Quiver of Elvish Mastery">
     <Item />
     <SlotType>15</SlotType>
     <Usable />
+    <Projectile>
+      <ObjectId>Blue Arrow</ObjectId>
+    </Projectile>
+    <NumProjectiles>4</NumProjectiles>
     <MpCost>75</MpCost>
     <Activate scalingStat="WIS" statModScalingMin="34" statModDamage="3.88">Shoot</Activate>
+  </Object>`;
+
+/** Huntress. Aimed at a place, and nothing flies: the server lays the trap there. */
+const TRAP = `<Object type="0xb40" id="Trap of the Vile Spirit" collectionIcon="100">
+    <Item />
+    <SlotType>20</SlotType>
+    <Usable />
+    <MpCost>90</MpCost>
+    <Activate radius="3.0" sensitivity="1.0" totalDamage="0" color="5c6bb8" condEffect="Curse" condDuration="2" throwTime="0.6">Trap</Activate>
   </Object>`;
 
 /** Priest. A heal, a healing aura and a cleanse — and nothing else. */
@@ -58,17 +73,32 @@ const TOME = `<Object type="0xc09" id="Tome of Purification">
 /**
  * Priest again, and the one that reported this: a heal with a shot bolted on.
  *
- * `Tome of Holy Guidance` is the same shape with a damage nova in place of the
- * shot. Both fired every 700 ms for as long as anything was on screen, because
- * the rider was read as the reason.
+ * It fired every 700 ms for as long as anything was on screen, because the
+ * rider was read as the reason. The shot is a projectile of the item's own,
+ * which the client fires behind its use.
  */
 const HYBRID_TOME = `<Object type="0x7b8" id="pD Tome">
     <Item />
     <SlotType>4</SlotType>
+    <Projectile>
+      <ObjectId>pD Blob Shot</ObjectId>
+    </Projectile>
     <Activate amount="120" statModAmount="0.8800" scalingStat="ATT">Heal</Activate>
     <Activate amount="060" range="8.0" effect="Healing" duration="4.4" color="0xFFFFEE">ConditionEffectAura</Activate>
     <Activate scalingStat="ATT" statModScalingMin="65" statModDamage="6.65">Shoot</Activate>
+    <NumProjectiles>0</NumProjectiles>
     <MpCost>140</MpCost>
+  </Object>`;
+
+/** Priest, the same shape with a damage nova in place of the shot. */
+const NOVA_TOME = `<Object type="0x0ad7" id="Remedy Tome">
+    <Item />
+    <SlotType>4</SlotType>
+    <Activate amount="090" statModAmount="0.7150" scalingStat="WIS" statModScalingMin="70">Heal</Activate>
+    <Activate amount="045" statModAmount="0.3575" range="6.2" effect="Healing" duration="4.4" color="0xFFFFCC">ConditionEffectAura</Activate>
+    <Activate minDamage="240" maxDamage="240" statModDamage="5.20" activationCount="2" time="0.4" radius="2.5" color="0xFFFF00">DamageNova</Activate>
+    <MpCost>130</MpCost>
+    <Usable />
   </Object>`;
 
 /** Paladin. A stat boost the runtime cannot see, and two auras it can. */
@@ -309,7 +339,7 @@ describe('whether casting it now would accomplish anything', () => {
   it('gives no reason at all for an ability it cannot name — enemies or not', () => {
     // Every attack ability in the game lands here, and "something is nearby" is
     // not a reason to spend the player's mana on one. The plugin points those
-    // when the player fires them instead; see the redirect tests below.
+    // when the player fires them instead; see the pointing tests below.
     expect(castReason([], alone(), LIMITS)).toBeUndefined();
     expect(castReason([], fighting(), LIMITS)).toBeUndefined();
   });
@@ -355,8 +385,10 @@ describe('the auto-ability plugin', () => {
 
   const ABILITY_SLOT = 1;
   const QUIVER_TYPE = 0xb28;
+  const TRAP_TYPE = 0xb40;
   const TOME_TYPE = 0xc09;
   const HYBRID_TOME_TYPE = 0x7b8;
+  const NOVA_TOME_TYPE = 0x0ad7;
   const SEAL_TYPE = 0xc61;
   const CLOAK_TYPE = 0xb27;
   const PRISM_TYPE = 0xb23;
@@ -376,37 +408,17 @@ describe('the auto-ability plugin', () => {
     wisdom: 0,
   };
 
-  /** Reads a nested field, failing the test rather than asserting its shape. */
-  function recordAt(
-    fields: Readonly<Record<string, unknown>>,
-    key: string,
-  ): Readonly<Record<string, unknown>> {
-    const value = fields[key];
-    if (typeof value !== 'object' || value === null) {
-      throw new Error(`${key} is not an object`);
-    }
-    return value as Readonly<Record<string, unknown>>;
-  }
-
-  function numberAt(record: Readonly<Record<string, unknown>>, key: string): number {
-    const value = record[key];
-    if (typeof value !== 'number') throw new Error(`${key} is not a number`);
-    return value;
-  }
-
+  /** A press the module was asked to make, where. */
   interface Cast {
     readonly x: number;
     readonly y: number;
-    readonly slotId: number;
-    readonly objectType: number;
   }
 
-  /** The whole packet, for the one test that is about the packet. */
-  interface SentPacket {
-    readonly time: number;
-    readonly useType: number;
-    readonly slotId: number;
-    readonly objectId: number;
+  /** A pointing of the player's own presses, and how long it stands. */
+  interface Aim {
+    readonly x: number;
+    readonly y: number;
+    readonly holdMs: number;
   }
 
   interface Harness {
@@ -422,16 +434,30 @@ describe('the auto-ability plugin', () => {
       alive: boolean;
       conditions: number;
     };
-    world: { mapName: string; gameTimeMs: number; clientTimeMs: number; clientTickId: number };
+    world: { mapName: string; gameTimeMs: number };
     enemies: EntityView[];
     slot: { objectType: number };
+    /** Every press asked of the module, in order. */
     casts: Cast[];
-    packets: SentPacket[];
+    /** How long each of those was allowed to wait for a frame. */
+    castHolds: number[];
+    /** Every pointing published, in order. */
+    aims: Aim[];
+    /** Anything the plugin tried to send to the server itself. */
+    sent: string[];
+    /**
+     * Whether the client makes the presses it is asked to. When it does, its
+     * `USEITEM` follows within the same tick, the way the real one follows
+     * within a frame.
+     */
+    client: { makesPresses: boolean };
     session: SessionView;
     /** Where the module says the player is pointing, or nothing when nobody knows. */
     cursor: { point: Position | undefined };
     /** Advances the clock and offers one server tick. */
     tick: (atMs: number) => void;
+    /** The client's own use of the ability slot, at the clock as it stands. */
+    press: () => void;
     /** How many times the enemy list has been walked. */
     scans: () => number;
     /** How many times the cursor has been asked for, which is the claim on it. */
@@ -461,11 +487,26 @@ describe('the auto-ability plugin', () => {
     };
   }
 
+  /** A real `USEITEM`, encoded and decoded, so the nested slot is read as one. */
+  function useItem(slotId: number, objectType = SEAL_TYPE): MutablePacket {
+    const packet = createPacket(registry, 'USEITEM');
+    Object.assign(packet.fields, {
+      time: 0,
+      slotObject: { objectId: 7, slotId, objectType },
+      itemUsePos: { x: -7, y: 11 },
+      useType: 1,
+      unknownInt: 0,
+    });
+    return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
+  }
+
   function harness(): Harness {
     const abilities = new Map<number, AbilityFacts>([
       [QUIVER_TYPE, abilityOf(QUIVER)],
+      [TRAP_TYPE, abilityOf(TRAP)],
       [TOME_TYPE, abilityOf(TOME)],
       [HYBRID_TOME_TYPE, abilityOf(HYBRID_TOME)],
+      [NOVA_TOME_TYPE, abilityOf(NOVA_TOME)],
       [SEAL_TYPE, abilityOf(SEAL)],
       [CLOAK_TYPE, abilityOf(CLOAK)],
       [PRISM_TYPE, abilityOf(PRISM)],
@@ -473,7 +514,7 @@ describe('the auto-ability plugin', () => {
 
     // A support ability, because that is the half this plugin casts on its own.
     // The attack half is only ever pointed, and the tests that cover it name
-    // the quiver they are pointing.
+    // the item they are pointing.
     const slot = { objectType: SEAL_TYPE };
     const inventory: InventoryView = {
       carried: () => [],
@@ -508,8 +549,6 @@ describe('the auto-ability plugin', () => {
     const world = {
       mapName: 'Undead Lair',
       gameTimeMs: 0,
-      // Deliberately nothing like the schedule clock: the two are different
-      // quantities and only one of them belongs on the wire.
       clientTimeMs: 1_234_000,
       clientTickId: 41,
       entities: () => enemies,
@@ -527,32 +566,20 @@ describe('the auto-ability plugin', () => {
     };
 
     const casts: Cast[] = [];
-    const packets: SentPacket[] = [];
+    const castHolds: number[] = [];
+    const aims: Aim[] = [];
+    const sent: string[] = [];
+    const client = { makesPresses: true };
+    /** Presses asked for during the tick being offered, not yet made. */
+    let asked = 0;
+
     const session: SessionView = {
       id: 's1',
       self,
       world,
       server: { host: '', port: 0 },
-      // The real session's contract, spelled out: a cast's interval starts when
-      // the packet leaves, and here it leaves at once.
-      sendToServer: (name, fields, options) => {
-        expect(name).toBe('USEITEM');
-        const position = recordAt(fields, 'itemUsePos');
-        const slotObject = recordAt(fields, 'slotObject');
-        casts.push({
-          x: numberAt(position, 'x'),
-          y: numberAt(position, 'y'),
-          slotId: numberAt(slotObject, 'slotId'),
-          objectType: numberAt(slotObject, 'objectType'),
-        });
-        packets.push({
-          time: numberAt(fields, 'time'),
-          useType: numberAt(fields, 'useType'),
-          slotId: numberAt(slotObject, 'slotId'),
-          objectId: numberAt(slotObject, 'objectId'),
-        });
-        options?.onSent?.();
-        options?.onOutcome?.(SendOutcome.Sent);
+      sendToServer: (name) => {
+        sent.push(name);
       },
       sendToClient: () => undefined,
       notify: () => undefined,
@@ -570,6 +597,16 @@ describe('the auto-ability plugin', () => {
     let cursorAsks = 0;
     host.load(
       createAutoAbilityPlugin({
+        output: {
+          cast: (at, holdMs) => {
+            casts.push({ x: at.x, y: at.y });
+            castHolds.push(holdMs);
+            asked += 1;
+          },
+          aimAt: (at, holdMs) => {
+            aims.push({ x: at.x, y: at.y, holdMs });
+          },
+        },
         ability: (objectType) => abilities.get(objectType),
         isObstacle: (objectType) => objectType === WALL_TYPE,
         isInvincible: () => false,
@@ -584,9 +621,18 @@ describe('the auto-ability plugin', () => {
     const settings = host.settingsOf('auto-ability');
     if (settings === undefined) throw new Error('the plugin declared no settings');
 
+    const press = (): void => {
+      host.dispatchPacket(useItem(ABILITY_SLOT, slot.objectType), session);
+    };
+
     const tick = (atMs: number): void => {
       world.gameTimeMs = atMs;
       host.dispatchPacket(new MutablePacket(createPacket(registry, 'NEWTICK')), session);
+      // The client making what it was asked to, as its own `USEITEM` — which
+      // is the only way the plugin ever hears that a cast happened.
+      const made = client.makesPresses ? asked : 0;
+      asked = 0;
+      for (let i = 0; i < made; i++) press();
     };
 
     return {
@@ -597,35 +643,24 @@ describe('the auto-ability plugin', () => {
       enemies,
       slot,
       casts,
-      packets,
+      castHolds,
+      aims,
+      sent,
+      client,
       session,
       cursor,
       tick,
+      press,
       scans: () => scans,
       cursorAsks: () => cursorAsks,
     };
   }
 
-  /** Where the player pointed — nowhere near anything the tests below spawn. */
-  const MOUSE = { x: -7, y: 11 };
-
-  /** A real `USEITEM`, encoded and decoded, so the nested slot is read as one. */
-  function useItem(slotId: number, objectType = SEAL_TYPE): MutablePacket {
-    const packet = createPacket(registry, 'USEITEM');
-    Object.assign(packet.fields, {
-      time: 0,
-      slotObject: { objectId: 7, slotId, objectType },
-      itemUsePos: MOUSE,
-      useType: 1,
-      unknownInt: 0,
-    });
-    return new MutablePacket(decodeFrame(registry, encodePacket(registry, packet)));
-  }
-
-  /** Where a `USEITEM` says the effect should land. */
-  function usePosOf(packet: MutablePacket): { x: number; y: number } {
-    const position = recordAt(packet.fields, 'itemUsePos');
-    return { x: numberAt(position, 'x'), y: numberAt(position, 'y') };
+  /** The pointings published by one tick at `atMs`, as places. */
+  function pointedOn(h: Harness, atMs: number): Position[] {
+    const before = h.aims.length;
+    h.tick(atMs);
+    return h.aims.slice(before).map(({ x, y }) => ({ x, y }));
   }
 
   it('walks the enemy list once a tick at most, and not at all when it need not', () => {
@@ -645,7 +680,7 @@ describe('the auto-ability plugin', () => {
     expect(seal.scans()).toBe(1);
   });
 
-  it('stops before the ability slot while the cooldown is still running', () => {
+  it('does not search the room while the cooldown is still running', () => {
     const h = harness();
     h.enemies.push(enemyOf(1, 2));
     h.tick(0);
@@ -656,29 +691,55 @@ describe('the auto-ability plugin', () => {
     expect(h.scans()).toBe(1);
   });
 
-  it('stamps the packet with the client clock, not the schedule clock', () => {
-    // A `time` the server does not recognise is a packet it throws away without
-    // saying so: the ability sound plays, the mana never moves, and the plugin
-    // fires again a moment later because from where it sits nothing happened.
-    // A whole session of a priest's tome went that way.
+  it('sends nothing to the server itself: the client makes every use', () => {
+    // The kicks this replaced: a `USEITEM` the client never made — no shots
+    // behind a quiver's, no cooldown on the client's side, sent while the
+    // client would have refused it. The module presses the key instead, and
+    // the client builds its own.
     const h = harness();
     h.enemies.push(enemyOf(1, 2));
-    h.world.clientTimeMs = 1_800_500;
-    h.tick(9000);
+    h.tick(0);
+    h.slot.objectType = TRAP_TYPE;
+    h.tick(5000);
+    h.press();
 
-    expect(h.packets).toEqual([{ time: 1_800_500, useType: 1, slotId: ABILITY_SLOT, objectId: 7 }]);
+    expect(h.casts).toHaveLength(1);
+    expect(h.aims).toHaveLength(1);
+    expect(h.sent).toEqual([]);
+    // And the press may wait a quarter of a second for a frame to be made in,
+    // not longer: what it was aimed at moves.
+    expect(h.castHolds).toEqual([250]);
+  });
+
+  it('leaves the player’s own use exactly as the client built it', () => {
+    const h = harness();
+    h.slot.objectType = TRAP_TYPE;
+    h.enemies.push(enemyOf(1, 3));
+    h.tick(0);
+
+    const packet = useItem(ABILITY_SLOT, TRAP_TYPE);
+    h.host.dispatchPacket(packet, h.session);
+    expect(packet.modified).toBe(false);
   });
 
   it('never fires an attack ability, however long something stands in range', () => {
-    // The whole point of the split: a quiver is the player's key to press. It
-    // is not even worth a look at the room until they press it.
+    // The whole point of the split: a trap is the player's key to press. It
+    // looks at the room once a tick, to point that press, and no more.
     const h = harness();
-    h.slot.objectType = QUIVER_TYPE;
+    h.slot.objectType = TRAP_TYPE;
     h.enemies.push(enemyOf(1, 2));
 
     for (let at = 0; at <= 5000; at += 500) h.tick(at);
     expect(h.casts).toHaveLength(0);
-    expect(h.scans()).toBe(0);
+    expect(h.scans()).toBe(11);
+
+    // With the pointing off there is nothing to look at the room for at all.
+    const quiet = harness();
+    quiet.slot.objectType = TRAP_TYPE;
+    quiet.enemies.push(enemyOf(1, 2));
+    quiet.settings.apply('aimAttacks', false);
+    for (let at = 0; at <= 5000; at += 500) quiet.tick(at);
+    expect(quiet.scans()).toBe(0);
   });
 
   it('leaves a priest tome alone at full health, enemies or not', () => {
@@ -701,7 +762,7 @@ describe('the auto-ability plugin', () => {
     h.self.hp = 300;
 
     h.tick(0);
-    expect(h.casts).toEqual([{ x: 12.5, y: -4, slotId: ABILITY_SLOT, objectType: TOME_TYPE }]);
+    expect(h.casts).toEqual([{ x: 12.5, y: -4 }]);
   });
 
   it('casts the tome at full health when something needs cleansing', () => {
@@ -713,44 +774,74 @@ describe('the auto-ability plugin', () => {
     expect(h.casts).toHaveLength(1);
   });
 
-  it('does not spam a healing tome that happens to shoot', () => {
+  it('does not spam a healing tome that happens to hit things', () => {
     // The report: `cast aimed 0x7b8 … for 140 mp, again in 700 ms`, over and
-    // over, on a priest at full health. One `Shoot` at the end of the item's
-    // effects was outranking the two heals in front of it.
-    const h = harness();
-    h.slot.objectType = HYBRID_TOME_TYPE;
-    h.enemies.push(enemyOf(1, 2));
+    // over, on a priest at full health. One attack at the end of the item's
+    // effects was outranking the two heals in front of it — a shot on one tome,
+    // a nova on the other.
+    for (const tome of [HYBRID_TOME_TYPE, NOVA_TOME_TYPE]) {
+      const h = harness();
+      h.slot.objectType = tome;
+      h.enemies.push(enemyOf(1, 2));
 
-    for (let at = 0; at <= 5000; at += 500) h.tick(at);
-    expect(h.casts).toHaveLength(0);
+      for (let at = 0; at <= 5000; at += 500) h.tick(at);
+      expect(h.casts).toHaveLength(0);
+    }
   });
 
   it('points that tome at the enemy once health is worth spending it on', () => {
-    const h = harness();
-    h.slot.objectType = HYBRID_TOME_TYPE;
-    h.self.hp = 300;
-    h.enemies.push(enemyOf(1, 4));
-
-    h.tick(0);
     // At the enemy, not at the character: the heal lands either way and the
-    // shot only lands one of those ways.
-    expect(h.casts).toEqual([{ x: 4, y: 0, slotId: ABILITY_SLOT, objectType: HYBRID_TOME_TYPE }]);
+    // attack only lands one of those ways. The shot on the first is fired by
+    // the client itself, behind its own use, from the same point.
+    for (const tome of [HYBRID_TOME_TYPE, NOVA_TOME_TYPE]) {
+      const h = harness();
+      h.slot.objectType = tome;
+      h.self.hp = 300;
+      h.enemies.push(enemyOf(1, 4));
+
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 4, y: 0 }]);
+    }
   });
 
   it('still heals with that tome when there is nobody to point it at', () => {
     const h = harness();
-    h.slot.objectType = HYBRID_TOME_TYPE;
+    h.slot.objectType = NOVA_TOME_TYPE;
     h.self.hp = 300;
     h.self.x = 9;
     h.self.y = 3;
 
     h.tick(0);
-    expect(h.casts).toEqual([{ x: 9, y: 3, slotId: ABILITY_SLOT, objectType: HYBRID_TOME_TYPE }]);
+    expect(h.casts).toEqual([{ x: 9, y: 3 }]);
+  });
+
+  it('looks for that tome’s enemy once, whichever of its switches asks', () => {
+    // The pointing of the player's own presses and the cast both want the same
+    // enemy by the same rule, and the room is the expensive thing to ask about.
+    const h = harness();
+    h.slot.objectType = NOVA_TOME_TYPE;
+    h.self.hp = 300;
+    h.enemies.push(enemyOf(1, 4));
+
+    h.tick(0);
+    expect(h.casts).toEqual([{ x: 4, y: 0 }]);
+    expect(h.aims.map(({ x, y }) => ({ x, y }))).toEqual([{ x: 4, y: 0 }]);
+    expect(h.scans()).toBe(1);
+
+    // With the pointing off, the cast looks for itself.
+    const unpointed = harness();
+    unpointed.slot.objectType = NOVA_TOME_TYPE;
+    unpointed.self.hp = 300;
+    unpointed.enemies.push(enemyOf(1, 4));
+    unpointed.settings.apply('aimAttacks', false);
+    unpointed.tick(0);
+    expect(unpointed.casts).toEqual([{ x: 4, y: 0 }]);
+    expect(unpointed.aims).toHaveLength(0);
   });
 
   it('counts a tome as support rather than as an attack, switches included', () => {
     const h = harness();
-    h.slot.objectType = HYBRID_TOME_TYPE;
+    h.slot.objectType = NOVA_TOME_TYPE;
     h.self.hp = 300;
 
     h.settings.apply('aimAttacks', false);
@@ -891,6 +982,7 @@ describe('the auto-ability plugin', () => {
     h.enemies.push(enemyOf(1, 2));
     h.tick(0);
     expect(h.casts).toHaveLength(0);
+    expect(h.aims).toHaveLength(0);
   });
 
   it('casts nothing at all with the support switch off', () => {
@@ -911,20 +1003,25 @@ describe('the auto-ability plugin', () => {
 
   it('stays quiet in a safe zone and while dead', () => {
     const h = harness();
+    h.slot.objectType = NOVA_TOME_TYPE;
+    h.self.hp = 300;
     h.enemies.push(enemyOf(1, 2));
 
     h.world.mapName = 'Vault 3';
     h.tick(0);
     expect(h.casts).toHaveLength(0);
+    expect(h.aims).toHaveLength(0);
 
     h.world.mapName = 'Undead Lair';
     h.self.alive = false;
     h.tick(1000);
     expect(h.casts).toHaveLength(0);
+    expect(h.aims).toHaveLength(0);
 
     h.self.alive = true;
     h.tick(2000);
     expect(h.casts).toHaveLength(1);
+    expect(h.aims).toHaveLength(1);
   });
 
   it('backs off after the player uses the ability by hand', () => {
@@ -932,7 +1029,7 @@ describe('the auto-ability plugin', () => {
     h.enemies.push(enemyOf(1, 2));
 
     h.world.gameTimeMs = 0;
-    h.host.dispatchPacket(useItem(ABILITY_SLOT), h.session);
+    h.press();
     h.tick(1900);
     expect(h.casts).toHaveLength(0);
     h.tick(2000);
@@ -966,100 +1063,187 @@ describe('the auto-ability plugin', () => {
     expect(h.casts).toHaveLength(2);
   });
 
-  it('points the attack the player fired at the nearest enemy worth hitting', () => {
-    const h = harness();
-    h.enemies.push(enemyOf(1, 6), enemyOf(2, 3));
+  describe('hearing whether the client made the press', () => {
+    it('starts the interval when the client makes the press, not when it was asked', () => {
+      // A seal's four seconds are four seconds of an aura the server put up,
+      // and the server put it up when the client's use reached it.
+      const h = harness();
+      h.enemies.push(enemyOf(1, 2));
+      h.client.makesPresses = false;
 
-    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
-    h.host.dispatchPacket(packet, h.session);
+      h.tick(0);
+      expect(h.casts).toHaveLength(1);
+      h.world.gameTimeMs = 300;
+      h.press();
 
-    expect(usePosOf(packet)).toEqual({ x: 3, y: 0 });
-    expect(packet.modified).toBe(true);
+      h.tick(4200);
+      expect(h.casts).toHaveLength(1);
+      h.tick(4300);
+      expect(h.casts).toHaveLength(2);
+    });
+
+    it('asks again later, and later still, while the client makes nothing', () => {
+      // Silenced, a cooldown this side cannot see, a map that forbids it, or no
+      // module at all: the client refuses on screen each time it is asked, and
+      // five notices a second is not an answer to anything.
+      const h = harness();
+      h.slot.objectType = TOME_TYPE;
+      h.self.hp = 300;
+      h.client.makesPresses = false;
+
+      const askedAt: number[] = [];
+      for (let at = 0; at <= 23_000; at += 100) {
+        const before = h.casts.length;
+        h.tick(at);
+        if (h.casts.length > before) askedAt.push(at);
+      }
+      expect(askedAt).toEqual([0, 1000, 3000, 7000, 15_000, 23_000]);
+
+      // And the moment the client makes one, the ordinary pace is back.
+      h.client.makesPresses = true;
+      h.tick(23_100);
+      expect(h.casts).toHaveLength(6);
+      h.world.gameTimeMs = 23_100;
+      h.press();
+      h.tick(23_800);
+      expect(h.casts).toHaveLength(7);
+      h.tick(24_500);
+      expect(h.casts).toHaveLength(8);
+    });
+
+    it('reads a use long after the asking as the player’s own key', () => {
+      const h = harness();
+      h.slot.objectType = TOME_TYPE;
+      h.self.hp = 300;
+      h.client.makesPresses = false;
+
+      h.tick(0);
+      h.world.gameTimeMs = 900;
+      h.press();
+
+      // The pause a press by hand earns, not the heal's own interval.
+      h.tick(2800);
+      expect(h.casts).toHaveLength(1);
+      h.tick(2900);
+      expect(h.casts).toHaveLength(2);
+    });
+
+    it('forgets a press asked for on the last map', () => {
+      const h = harness();
+      h.slot.objectType = TOME_TYPE;
+      h.self.hp = 300;
+      h.client.makesPresses = false;
+
+      h.tick(0);
+      h.world.gameTimeMs = 100;
+      h.host.dispatchPacket(new MutablePacket(createPacket(registry, 'MAPINFO')), h.session);
+      // A use this soon after asking would have been the answer, but a map has
+      // changed in between: it is the player's.
+      h.world.gameTimeMs = 200;
+      h.press();
+
+      h.tick(2100);
+      expect(h.casts).toHaveLength(1);
+      h.tick(2200);
+      expect(h.casts).toHaveLength(2);
+    });
   });
 
-  it('points a tome that also shoots, since the shot is what the point is for', () => {
-    const h = harness();
-    h.enemies.push(enemyOf(1, 4));
+  describe('pointing the presses the player makes', () => {
+    it('points them at the nearest enemy worth hitting, a tick at a time', () => {
+      const h = harness();
+      h.slot.objectType = TRAP_TYPE;
+      h.enemies.push(enemyOf(1, 6), enemyOf(2, 3));
 
-    const packet = useItem(ABILITY_SLOT, HYBRID_TOME_TYPE);
-    h.host.dispatchPacket(packet, h.session);
+      h.tick(0);
+      // Two ticks' worth, renewed on every one: silence is how the cursor
+      // becomes theirs again.
+      expect(h.aims).toEqual([{ x: 3, y: 0, holdMs: 400 }]);
+      h.tick(200);
+      expect(h.aims).toHaveLength(2);
+    });
 
-    expect(usePosOf(packet)).toEqual({ x: 4, y: 0 });
-  });
+    it('points a quiver too: the client fires the arrows from the point it is handed', () => {
+      const h = harness();
+      h.slot.objectType = QUIVER_TYPE;
+      h.enemies.push(enemyOf(1, 3));
+      expect(pointedOn(h, 0)).toEqual([{ x: 3, y: 0 }]);
+    });
 
-  it('leaves the cast where the player pointed it when nothing is worth hitting', () => {
-    const h = harness();
-    // Past the eight-tile default, and then a wall, which is an object with hit
-    // points and would otherwise be the closest enemy there is.
-    h.enemies.push(enemyOf(1, 12), enemyOf(2, 2, WALL_TYPE));
+    it('points a tome that also hits, since the hit is what the point is for', () => {
+      for (const tome of [HYBRID_TOME_TYPE, NOVA_TOME_TYPE]) {
+        const h = harness();
+        h.slot.objectType = tome;
+        h.enemies.push(enemyOf(1, 4));
+        expect(pointedOn(h, 0)).toEqual([{ x: 4, y: 0 }]);
+      }
+    });
 
-    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
-    h.host.dispatchPacket(packet, h.session);
+    it('points nothing when nothing is worth hitting', () => {
+      const h = harness();
+      h.slot.objectType = TRAP_TYPE;
+      // Past the eight-tile default, and then a wall, which is an object with
+      // hit points and would otherwise be the closest enemy there is.
+      h.enemies.push(enemyOf(1, 12), enemyOf(2, 2, WALL_TYPE));
+      expect(pointedOn(h, 0)).toEqual([]);
+    });
 
-    expect(usePosOf(packet)).toEqual(MOUSE);
-    expect(packet.modified).toBe(false);
-  });
+    it('never points an ability that would move the character', () => {
+      // A prism reads the point as the place to teleport to, so pointing one at
+      // a monster is a teleport into the monster.
+      const h = harness();
+      h.slot.objectType = PRISM_TYPE;
+      h.enemies.push(enemyOf(1, 2));
+      expect(pointedOn(h, 0)).toEqual([]);
+    });
 
-  it('never points an ability that would move the character', () => {
-    // A prism reads that field as the place to teleport to, so pointing one at
-    // a monster is a teleport into the monster.
-    const h = harness();
-    h.enemies.push(enemyOf(1, 2));
+    it('leaves a buff alone, which the game centres on the character anyway', () => {
+      const h = harness();
+      h.slot.objectType = CLOAK_TYPE;
+      h.enemies.push(enemyOf(1, 2));
+      expect(pointedOn(h, 0)).toEqual([]);
+    });
 
-    const packet = useItem(ABILITY_SLOT, PRISM_TYPE);
-    h.host.dispatchPacket(packet, h.session);
+    it('leaves the presses on the mouse when the player asked it to', () => {
+      const h = harness();
+      h.slot.objectType = TRAP_TYPE;
+      h.enemies.push(enemyOf(1, 3));
+      h.settings.apply('aimAttacks', false);
+      expect(pointedOn(h, 0)).toEqual([]);
+    });
 
-    expect(usePosOf(packet)).toEqual(MOUSE);
-  });
-
-  it('leaves a buff alone, which the game centres on the character anyway', () => {
-    const h = harness();
-    h.enemies.push(enemyOf(1, 2));
-
-    const packet = useItem(ABILITY_SLOT, CLOAK_TYPE);
-    h.host.dispatchPacket(packet, h.session);
-
-    expect(packet.modified).toBe(false);
-  });
-
-  it('leaves the aim on the mouse when the player asked it to', () => {
-    const h = harness();
-    h.enemies.push(enemyOf(1, 3));
-    h.settings.apply('aimAttacks', false);
-
-    const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
-    h.host.dispatchPacket(packet, h.session);
-
-    expect(usePosOf(packet)).toEqual(MOUSE);
-  });
-
-  it('says nothing about an item the catalog cannot describe, here either', () => {
-    const h = harness();
-    h.enemies.push(enemyOf(1, 3));
-
-    const packet = useItem(ABILITY_SLOT, UNCATALOGUED_TYPE);
-    h.host.dispatchPacket(packet, h.session);
-
-    expect(packet.modified).toBe(false);
+    it('keeps pointing while a cast is not due', () => {
+      // Whether this plugin spends mana has nothing to do with where the
+      // player's spending lands: a press made inside the interval is pointed
+      // all the same.
+      const h = harness();
+      h.slot.objectType = NOVA_TOME_TYPE;
+      h.self.hp = 300;
+      h.enemies.push(enemyOf(1, 4));
+      h.tick(0);
+      expect(h.casts).toHaveLength(1);
+      expect(pointedOn(h, 300)).toEqual([{ x: 4, y: 0 }]);
+      expect(h.casts).toHaveLength(1);
+    });
   });
 
   describe('choosing which enemy', () => {
     /** A boss at the far end of the room, with a minion on top of the player. */
     function room(h: Harness): void {
+      h.slot.objectType = TRAP_TYPE;
       h.enemies.push(enemyOf(1, 2), enemyOf(2, 7, BOSS_TYPE));
     }
 
-    /** Where a quiver the player fired ended up. */
-    function fired(h: Harness): { x: number; y: number } {
-      const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
-      h.host.dispatchPacket(packet, h.session);
-      return usePosOf(packet);
+    /** Where the player's presses were pointed on one more tick, if anywhere. */
+    function pointed(h: Harness): Position | undefined {
+      const published = pointedOn(h, h.world.gameTimeMs + 200);
+      return published[published.length - 1];
     }
 
     it('takes the closest enemy until it is told otherwise', () => {
       const h = harness();
       room(h);
-      expect(fired(h)).toEqual({ x: 2, y: 0 });
+      expect(pointed(h)).toEqual({ x: 2, y: 0 });
     });
 
     it('takes the boss over whatever is standing closer, when asked to', () => {
@@ -1069,23 +1253,24 @@ describe('the auto-ability plugin', () => {
       // the tier doing the work rather than `The toughest enemy` happening to
       // agree with it, which is how bosses were picked before there was one.
       h.settings.apply('bosses', 'prefer');
-      expect(fired(h)).toEqual({ x: 7, y: 0 });
+      expect(pointed(h)).toEqual({ x: 7, y: 0 });
 
       h.settings.apply('bosses', 'any');
-      expect(fired(h)).toEqual({ x: 2, y: 0 });
+      expect(pointed(h)).toEqual({ x: 2, y: 0 });
     });
 
     it('points nothing at all at a minion when the player asked for bosses only', () => {
       const h = harness();
+      h.slot.objectType = TRAP_TYPE;
       h.enemies.push(enemyOf(1, 2));
       h.settings.apply('bosses', 'only');
 
-      // Left where they pointed it, which is the honest answer to "there is
-      // nothing here you said you wanted this spent on".
-      expect(fired(h)).toEqual(MOUSE);
+      // Left on the mouse, which is the honest answer to "there is nothing
+      // here you said you wanted this spent on".
+      expect(pointed(h)).toBeUndefined();
 
       h.enemies.push(enemyOf(2, 7, BOSS_TYPE));
-      expect(fired(h)).toEqual({ x: 7, y: 0 });
+      expect(pointed(h)).toEqual({ x: 7, y: 0 });
     });
 
     it('holds a combat aura for a boss under that rule, not for the minions', () => {
@@ -1101,7 +1286,7 @@ describe('the auto-ability plugin', () => {
 
       h.enemies.push(enemyOf(2, 7, BOSS_TYPE));
       h.tick(1000);
-      expect(h.casts).toEqual([{ x: 0, y: 0, slotId: ABILITY_SLOT, objectType: SEAL_TYPE }]);
+      expect(h.casts).toEqual([{ x: 0, y: 0 }]);
     });
 
     it('still puts a combat aura up while the cursor points at nothing', () => {
@@ -1125,7 +1310,7 @@ describe('the auto-ability plugin', () => {
       h.settings.apply('priority', 'closestToCursor');
       h.cursor.point = { x: 7, y: 1 };
 
-      expect(fired(h)).toEqual({ x: 7, y: 0 });
+      expect(pointed(h)).toEqual({ x: 7, y: 0 });
     });
 
     it('points nowhere new while nobody knows where the cursor is', () => {
@@ -1135,20 +1320,22 @@ describe('the auto-ability plugin', () => {
       room(h);
       h.settings.apply('priority', 'closestToCursor');
 
-      expect(fired(h)).toEqual(MOUSE);
+      expect(pointed(h)).toBeUndefined();
     });
 
-    it('keeps the cursor asked for even while it has no reason to cast', () => {
+    it('keeps the cursor asked for on every tick, whether or not it has a reason to cast', () => {
       // Asking is the claim, and the module measures nothing without one — so
-      // an archer holding a quiver, whose ability is never cast from here, has
-      // to keep the reading alive for the moment they press the key.
+      // a huntress holding a trap, whose ability is never cast from here, keeps
+      // the reading alive tick by tick for the moment they press the key.
       const h = harness();
-      h.slot.objectType = QUIVER_TYPE;
+      h.slot.objectType = TRAP_TYPE;
       h.settings.apply('priority', 'closestToCursor');
 
       h.tick(0);
+      const first = h.cursorAsks();
+      expect(first).toBeGreaterThan(0);
       h.tick(500);
-      expect(h.cursorAsks()).toBe(2);
+      expect(h.cursorAsks()).toBeGreaterThan(first);
     });
 
     it('leaves the cursor alone under every other priority', () => {
@@ -1157,7 +1344,7 @@ describe('the auto-ability plugin', () => {
       const h = harness();
       room(h);
       for (let at = 0; at <= 3000; at += 500) h.tick(at);
-      fired(h);
+      h.press();
       expect(h.cursorAsks()).toBe(0);
     });
   });
@@ -1167,10 +1354,10 @@ describe('the auto-ability plugin', () => {
     const bossOf = (objectId: number, x: number, conditions = 0): EntityView =>
       enemyOf(objectId, x, BOSS_TYPE, conditions);
 
-    /** A harness holding a quiver and the boss switch on, unless said otherwise. */
+    /** A harness holding a trap and the boss switch on, unless said otherwise. */
     function armed(enemies: readonly EntityView[], switchOn = true): Harness {
       const h = harness();
-      h.slot.objectType = QUIVER_TYPE;
+      h.slot.objectType = TRAP_TYPE;
       if (switchOn) h.settings.apply('autoCastAttacks', true);
       h.enemies.push(...enemies);
       return h;
@@ -1186,7 +1373,7 @@ describe('the auto-ability plugin', () => {
       const h = armed([bossOf(1, 7)]);
 
       h.tick(0);
-      expect(h.casts).toEqual([{ x: 7, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+      expect(h.casts).toEqual([{ x: 7, y: 0 }]);
 
       // Inside the interval floor: one boss, one cast.
       h.tick(300);
@@ -1204,7 +1391,17 @@ describe('the auto-ability plugin', () => {
     it('takes the boss over the minion standing closer', () => {
       const h = armed([enemyOf(1, 2), bossOf(2, 7)]);
       h.tick(0);
-      expect(h.casts).toEqual([{ x: 7, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+      expect(h.casts).toEqual([{ x: 7, y: 0 }]);
+    });
+
+    it('fires at the boss while the player’s own presses go to the minion in front of it', () => {
+      // Two questions with two answers in the same tick. The module keeps them
+      // apart: its own press goes where it was sent, whatever the player's are
+      // pointed at.
+      const h = armed([enemyOf(1, 2), bossOf(2, 7)]);
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 7, y: 0 }]);
+      expect(h.aims).toEqual([{ x: 2, y: 0, holdMs: 400 }]);
     });
 
     it('holds its fire while the boss cannot be hurt', () => {
@@ -1221,7 +1418,7 @@ describe('the auto-ability plugin', () => {
     it('picks between two bosses by the same aim setting', () => {
       const h = armed([bossOf(1, 7), bossOf(2, 3)]);
       h.tick(0);
-      expect(h.casts).toEqual([{ x: 3, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+      expect(h.casts).toEqual([{ x: 3, y: 0 }]);
     });
 
     it('ignores the boss rule the aiming half reads', () => {
@@ -1239,12 +1436,12 @@ describe('the auto-ability plugin', () => {
       h.settings.apply('mpReservePercent', 50);
       h.self.maxMp = 200;
 
-      // The 75 a quiver costs, and then the 100 the player asked to hold.
+      // The 90 a trap costs, and then the 100 the player asked to hold.
       h.self.mp = 150;
       h.tick(0);
       expect(h.casts).toHaveLength(0);
 
-      h.self.mp = 180;
+      h.self.mp = 190;
       h.tick(1000);
       expect(h.casts).toHaveLength(1);
     });
@@ -1253,36 +1450,40 @@ describe('the auto-ability plugin', () => {
       const h = armed([bossOf(1, 5)]);
 
       h.world.gameTimeMs = 0;
-      h.host.dispatchPacket(useItem(ABILITY_SLOT, QUIVER_TYPE), h.session);
+      h.press();
       h.tick(1500);
       expect(h.casts).toHaveLength(0);
       h.tick(2000);
       expect(h.casts).toHaveLength(1);
     });
 
-    it('never fires a hybrid tome for the shot riding on it', () => {
-      // The tome heals, so it belongs to the support half, and a boss walking
-      // past a priest at full health is not a reason to spend 140 mana.
-      const h = armed([bossOf(1, 4)]);
-      h.slot.objectType = HYBRID_TOME_TYPE;
-      for (let at = 0; at <= 5000; at += 500) h.tick(at);
-      expect(h.casts).toHaveLength(0);
+    it('fires a quiver at a boss as well: the client sends the arrows behind its own use', () => {
+      const h = armed([bossOf(1, 7)]);
+      h.slot.objectType = QUIVER_TYPE;
+      h.tick(0);
+      expect(h.casts).toEqual([{ x: 7, y: 0 }]);
     });
 
-    it('aims nothing when the aim switch is off, and still fires at the boss', () => {
+    it('never fires a hybrid tome for the hit riding on it', () => {
+      // The tome heals, so it belongs to the support half, and a boss walking
+      // past a priest at full health is not a reason to spend its mana.
+      for (const tome of [HYBRID_TOME_TYPE, NOVA_TOME_TYPE]) {
+        const h = armed([bossOf(1, 4)]);
+        h.slot.objectType = tome;
+        for (let at = 0; at <= 5000; at += 500) h.tick(at);
+        expect(h.casts).toHaveLength(0);
+      }
+    });
+
+    it('points nothing when the aim switch is off, and still fires at the boss', () => {
       // Two switches, two questions: where the player's own press lands, and
       // whether the plugin ever presses the key itself.
       const h = armed([bossOf(1, 5)]);
       h.settings.apply('aimAttacks', false);
 
-      const packet = useItem(ABILITY_SLOT, QUIVER_TYPE);
-      h.host.dispatchPacket(packet, h.session);
-      expect(usePosOf(packet)).toEqual(MOUSE);
-
-      // Past the pause that manual press earned: the two switches are about
-      // different presses, not a shared one.
-      h.tick(2000);
-      expect(h.casts).toEqual([{ x: 5, y: 0, slotId: ABILITY_SLOT, objectType: QUIVER_TYPE }]);
+      h.tick(0);
+      expect(h.aims).toHaveLength(0);
+      expect(h.casts).toEqual([{ x: 5, y: 0 }]);
     });
   });
 });

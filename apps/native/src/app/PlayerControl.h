@@ -22,6 +22,7 @@
 #include "game/TargetMotion.h"
 #include "game/Il2CppRuntime.h"
 #include "game/MapObjects.h"
+#include "game/PlayerAbility.h"
 #include "game/PlayerMover.h"
 #include "game/PlayerRoute.h"
 #include "overlay/WorldRecord.h"
@@ -98,6 +99,20 @@ struct AimTarget {
     game::AimShot shot{};
 };
 
+/// One press of the ability key the runtime wants made, where, and by when.
+///
+/// **Spent by the frame that makes it**, like a one-shot move and for the same
+/// reason: a target that stood would be pressed again on every frame of its
+/// hold. The hold is only how long it may wait for a frame that can find the
+/// player — a cast made late is aimed at where the fight used to be.
+struct AbilityCast {
+    bool wanted = false;
+    /// A place on the game's map.
+    float x = 0.0F;
+    float y = 0.0F;
+    std::uint64_t expires_at_ms = 0;
+};
+
 /// The longest a single frame may claim to have taken.
 ///
 /// A stall, a breakpoint or a minimised window can put a second between two
@@ -133,6 +148,8 @@ inline constexpr float kMaxStepTiles = 0.7F;
                                         std::uint64_t now_ms) noexcept;
 [[nodiscard]] AimTarget AimTargetFrom(const overlay::AimCommand& aim,
                                       std::uint64_t now_ms) noexcept;
+[[nodiscard]] AbilityCast AbilityCastFrom(const overlay::AbilityCommand& cast,
+                                          std::uint64_t now_ms) noexcept;
 
 /// How far one frame may carry a walk, in tiles.
 ///
@@ -210,6 +227,21 @@ class PlayerControl {
     /// write a detour into the game's code.
     [[nodiscard]] bool aim_wanted() const noexcept { return aim_wanted_; }
 
+    /// Binds the method the ability key calls. IPC thread. Casting needs only
+    /// this; pointing the player's own presses needs the detour below as well.
+    void BindAbility(void* use_ability) noexcept { ability_.Bind(use_ability); }
+    [[nodiscard]] bool ability_bound() const noexcept { return ability_.bound(); }
+
+    /// Puts the detour that points the player's own presses in place. IPC
+    /// thread, and a no-op once it is.
+    void InstallAbilityAim() { (void)ability_.InstallAim(); }
+    [[nodiscard]] bool ability_aim_installed() const noexcept { return ability_.aim_installed(); }
+
+    /// Whether the runtime has ever asked to point the player's presses, which
+    /// is the only reason to detour the ability key. Same argument as
+    /// {@link aim_wanted}, and the same thread.
+    [[nodiscard]] bool ability_aim_wanted() const noexcept { return ability_aim_wanted_; }
+
     /// Where the player is right now. **Game thread only**, and false when
     /// there is no player — between realms, at the login screen, during a map
     /// rebuild.
@@ -223,6 +255,15 @@ class PlayerControl {
     /// Publishes a target for the frame to act on. IPC thread.
     void MoveTo(const MoveTarget& target) { move_target_.Publish(target); }
     void AimAt(const AimTarget& target);
+
+    /// Asks the next frame that finds the player to press the ability key.
+    /// IPC thread. Two published between frames are one press, never two.
+    void Cast(const AbilityCast& cast) { ability_cast_.Publish(cast); }
+
+    /// Points the presses the player makes at a place on the map. IPC thread:
+    /// the detour reads it directly, since nothing about it depends on where
+    /// the player is standing.
+    void AimAbility(const overlay::AbilityCommand& aim, std::uint64_t now_ms) noexcept;
 
     /// Lets go of the wheel. **IPC thread.**
     ///
@@ -239,6 +280,10 @@ class PlayerControl {
     void Release() {
         move_target_.Publish(MoveTarget{});
         aim_target_.Publish(AimTarget{});
+        ability_cast_.Publish(AbilityCast{});
+        // Atomics, so the IPC thread may clear it itself: a press between here
+        // and the next frame goes to the cursor, which is where it belongs.
+        ability_.ClearAim();
     }
 
     /// Where this frame walked to, if it walked anywhere.
@@ -280,9 +325,15 @@ class PlayerControl {
     /// and changes nothing about where the shots go.
     [[nodiscard]] bool aim_installed() const noexcept { return aim_.installed(); }
 
-    /// Performs whatever the runtime asked for this frame — a step, a shot, or
-    /// both. **Game thread only**: it calls into managed code, which no other
-    /// thread may do.
+    /// How many of the player's own ability presses have been pointed. Any
+    /// thread.
+    [[nodiscard]] std::uint32_t ability_redirected() const noexcept {
+        return ability_.redirected();
+    }
+
+    /// Performs whatever the runtime asked for this frame — a step, a shot, a
+    /// cast, or any of them together. **Game thread only**: it calls into
+    /// managed code, which no other thread may do.
     ///
     /// The two are one method because they share the expensive part. Finding
     /// the player is three pointer reads and a position read, none of which can
@@ -307,6 +358,14 @@ class PlayerControl {
     /// Set by a record on the IPC thread, read by the same thread's loop.
     bool aim_wanted_ = false;
 
+    /// Published by the IPC thread, spent by the frame that makes it.
+    Snapshot<AbilityCast> ability_cast_;
+    /// Presses the ability key for the runtime, and points the player's own
+    /// presses. Holds a detour, so the rule `aim_` states holds for it too.
+    game::PlayerAbility ability_;
+    /// Set by a record on the IPC thread, read by the same thread's loop.
+    bool ability_aim_wanted_ = false;
+
     /// The walk to the player, and the runtime it belongs to. Written once
     /// before `ready_` is released, and read by every frame after.
     const game::Il2CppRuntime* game_ = nullptr;
@@ -324,6 +383,8 @@ class PlayerControl {
     float frame_walk_y_ = 0.0F;
     AimTarget frame_aim_;
     std::uint64_t frame_aim_version_ = 0;
+    AbilityCast frame_cast_;
+    std::uint64_t frame_cast_version_ = 0;
     /// Where this frame actually pointed, once the client's own reading of the
     /// enemy — if there was one — has shifted the record's point. See
     /// {@link AimTargetNow}, and `game/MapObjects.h` for the shift.

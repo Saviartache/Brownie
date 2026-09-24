@@ -20,14 +20,15 @@
  * express, and "do not move at all" is a candidate that competes on the same
  * terms as the rest instead of being the search's start node.
  *
- * **Three continuations, and the cheapest of them is what a candidate is worth.**
+ * **Four continuations, and the cheapest of them is what a candidate is worth.**
  * A first action is only as good as what can still be done afterwards, and there
- * are exactly three things a dodge does next: come home, ride the pattern's
- * pocket, or keep going. Rolling each candidate under all three and keeping the
- * best is a claim the receding horizon actually supports — *there exists* a way
- * out from here — where insisting on one of them would reject the sidestep that
- * needs a second sidestep, and rejecting that is how a planner walks into a wall
- * of fire it could have crossed.
+ * are four things a dodge does next: come home, ride the pattern's pocket, keep
+ * going until the place is clear and wait there, or keep going. Rolling each
+ * candidate under all of them and keeping the best is a claim the receding
+ * horizon actually supports — *there exists* a way out from here — where
+ * insisting on one of them would reject the sidestep that needs a second
+ * sidestep, and rejecting that is how a planner walks into a wall of fire it
+ * could have crossed.
  *
  * **The walk is the only action.** A walk covers ground over a tick and can be
  * turned part way through, and every candidate here is one — a heading and a
@@ -99,8 +100,28 @@ const COARSE_WALK_FRACTIONS = [1] as const;
 /** How many headings the fine pass refines around. */
 const REFINED_HEADINGS = 3;
 
+/**
+ * How many times a settling rollout halves the walk it stops part way along.
+ *
+ * Three is an eighth of a tick's walk — under a seventh of a tile even at the
+ * fastest the game allows, and a fraction of the difference between the two
+ * sides of a shot that a whole tick used to round across.
+ */
+const SETTLE_HALVINGS = 3;
+
 /** The most headings the tables are ever built for. */
 const MAX_HEADINGS = 64;
+
+/**
+ * What a candidate that is not on the heading ring passes in place of a ring
+ * index: one aimed at a pattern's gap, which is reported as riding it, and any
+ * other — standing still, or square to the fire — which is not.
+ */
+const POCKET_AIMED = -1;
+const OFF_RING = -2;
+
+/** Either side of a line. */
+const SIDES = [1, -1] as const;
 
 /** How the rest of the horizon is walked, once the first action is taken. */
 const Continuation = {
@@ -108,14 +129,43 @@ const Continuation = {
   Home: 0,
   /** After the pattern's moving pocket. Only offered while one is locked. */
   Ride: 1,
-  /** Straight on, the way the first step went. What crosses a wall of fire. */
-  Carry: 2,
+  /**
+   * On the way the first step went until the fire has nothing left for this
+   * place, and then standing there — or, for a player who is walking, carrying
+   * on beside their own line. What a sidestep is.
+   *
+   * **Stopping is the whole of it.** Without it the only ways on were `Carry`,
+   * which runs for the whole horizon, and `Home`, which walks back across the
+   * shot's line before the shot has crossed it — so every sidestep came home
+   * into the hit, and a step across a shot's line cost exactly what a step along
+   * it did, the anchor term asking only how far. Which of the two won was noise,
+   * and noise chose running with the shot as often as not. Stopping once the
+   * place is clear prices them apart: across the line a tile of walking buys
+   * the rest of the horizon, and along it the shot is still coming, so there is
+   * never anywhere to stop.
+   */
+  Settle: 2,
+  /**
+   * Straight on, the way the first step went. What crosses a wall of fire, and
+   * the one way round something that is not in the air: a body standing on
+   * the ground being held has nothing to settle clear of, and walking past it
+   * is a direction rather than a place.
+   */
+  Carry: 3,
 } as const;
 
 type Continuation = (typeof Continuation)[keyof typeof Continuation];
 
 /** In the order they are tried, cheapest-to-be-the-answer first. */
-const CONTINUATIONS = [Continuation.Home, Continuation.Ride, Continuation.Carry] as const;
+const CONTINUATIONS = [
+  Continuation.Home,
+  Continuation.Ride,
+  Continuation.Settle,
+  Continuation.Carry,
+] as const;
+
+/** What the delayed hold rolls after its first tick of standing, cheapest first. */
+const DELAYED_CONTINUATIONS = [Continuation.Settle, Continuation.Carry] as const;
 
 export interface TrajectoryRequest {
   readonly startX: number;
@@ -166,6 +216,13 @@ export interface TrajectoryRequest {
    */
   readonly holdDirX: number;
   readonly holdDirY: number;
+  /**
+   * Which way the fire that threatens the player is travelling, as a unit
+   * vector — see {@link TrajectoryPlanner.probeThreatX}. Both nought when
+   * nothing does, which charges no step for running with it.
+   */
+  readonly threatX: number;
+  readonly threatY: number;
   readonly ground: DodgeGround;
   readonly danger: DangerField;
   readonly blasts: BlastField | undefined;
@@ -213,6 +270,7 @@ export class TrajectoryPlanner {
     anchorTiles: 0,
     fromAnchorTiles: 0,
     travelTiles: 0,
+    withFireTiles: 0,
     clearanceTiles: NO_DANGER_TILES,
     hitDamage: 0,
     hitDebuff: 0,
@@ -226,6 +284,8 @@ export class TrajectoryPlanner {
   #rollImpactMs = Infinity;
   #rollRoom = NO_DANGER_TILES;
   #rollDriftTiles = 0;
+  /** Whether a settling rollout ever found somewhere to stop. */
+  #rollSettled = false;
 
   readonly #best = {
     dirX: 0,
@@ -278,6 +338,7 @@ export class TrajectoryPlanner {
     // floor every other candidate has to beat, it is very often the answer, and
     // it is the reason the optimizer can never come back empty-handed.
     this.#offerHold(request);
+    this.#squareToFire(request);
     this.#coarse(request);
     this.#pocketAimed(request);
     this.#fine(request);
@@ -314,9 +375,13 @@ export class TrajectoryPlanner {
     this.#probeImpactMs = Infinity;
     this.#probeRoomTiles = NO_DANGER_TILES;
     this.#probeUrgentTiles = NO_DANGER_TILES;
+    this.#probeThreatX = 0;
+    this.#probeThreatY = 0;
     // Where they are now counts: a player standing in a pool is one the planner
     // has to answer for whether or not they are walking anywhere.
     this.#probeHazardTiles = request.ground.hazardGapTiles(x, y);
+    const safe = request.weights.safeClearanceTiles;
+    let threatened = false;
 
     const moving = dirX !== 0 || dirY !== 0;
     for (let tick = 0; tick < request.ticks; tick += 1) {
@@ -331,6 +396,12 @@ export class TrajectoryPlanner {
       const endY = walkable ? toY : y;
 
       let room = request.danger.clearanceOf(tick, x, y, endX, endY);
+      if (!threatened && room < safe) {
+        // The first shot to come too close is the one whose line a dodge has
+        // to cross, so its heading is the one running with is charged against.
+        threatened = true;
+        this.#aimThreat(request.danger.closestTravelX, request.danger.closestTravelY);
+      }
       if (request.blasts !== undefined) {
         const blast = request.blasts.clearanceAt(endX, endY, startsMs, startsMs + request.tickMs);
         if (blast < room) room = blast;
@@ -356,6 +427,16 @@ export class TrajectoryPlanner {
   #probeRoomTiles = NO_DANGER_TILES;
   #probeUrgentTiles = NO_DANGER_TILES;
   #probeHazardTiles = NO_DANGER_TILES;
+  #probeThreatX = 0;
+  #probeThreatY = 0;
+
+  /** Takes a shot's travel over one slice as the heading of the threat. */
+  #aimThreat(travelX: number, travelY: number): void {
+    const length = Math.hypot(travelX, travelY);
+    if (!(length > 1e-9)) return;
+    this.#probeThreatX = travelX / length;
+    this.#probeThreatY = travelY / length;
+  }
 
   /** When the probed course is first hit, from now, or `Infinity`. */
   get probeImpactMs(): number {
@@ -385,19 +466,36 @@ export class TrajectoryPlanner {
   }
 
   /**
+   * Which way the first shot to come too close to the course is travelling, as
+   * a unit vector — both nought while nothing does, or while the one that does
+   * is not moving.
+   *
+   * **The line a dodge has to cross rather than follow.** A shot is outrun only
+   * by being out of range, and a step that runs with it buys the next plan the
+   * same problem a few tiles further from the fight. Handed back to the
+   * optimizer as {@link TrajectoryRequest.threatX}.
+   */
+  get probeThreatX(): number {
+    return this.#probeThreatX;
+  }
+
+  get probeThreatY(): number {
+    return this.#probeThreatY;
+  }
+
+  /**
    * Standing exactly here — now, and for as long as that keeps working.
    *
    * **Holding is the only candidate that cannot say "and then I move", and
    * without that it is the only one that cannot say anything.** Every other
-   * candidate has a direction, so its `Carry` continuation is a full-speed run
-   * the rest of the horizon can be judged against; holding has none, so its
-   * futures were "stand here and be hit" — which made standing still look fatal
-   * in every situation a step later would have solved, and had the planner
-   * twitching a fiftieth of a tile a whole horizon before it needed to move at
-   * all.
+   * candidate has a direction, so its `Settle` continuation is a way out the
+   * rest of the horizon can be judged against; holding has none, so its futures
+   * were "stand here and be hit" — which made standing still look fatal in every
+   * situation a step later would have solved, and had the planner twitching a
+   * fiftieth of a tile a whole horizon before it needed to move at all.
    *
-   * So the ring is rolled *from the second tick*: hold now, run then. It is what
-   * makes the planner patient, which is the whole of "move as little as
+   * So the ring is rolled *from the second tick*: hold now, step aside then. It
+   * is what makes the planner patient, which is the whole of "move as little as
    * possible" — a shot half a second away is answered by a shot half a second
    * away, not by leaning away from it now.
    *
@@ -405,7 +503,7 @@ export class TrajectoryPlanner {
    * the first tick, so the first tick's queries are the same query every time.
    */
   #offerHold(request: TrajectoryRequest): void {
-    this.#consider(request, 0, 0, 0, -1);
+    this.#consider(request, 0, 0, 0, OFF_RING);
     // Every other heading, because what this is asking is whether *some* escape
     // is still open a tick from now, and half a ring answers that: a direction
     // between two spokes is within fifteen degrees of one of them, which over
@@ -416,7 +514,7 @@ export class TrajectoryPlanner {
   }
 
   /**
-   * Holding this tick and running that way from the next one.
+   * Holding this tick and stepping aside that way from the next one.
    *
    * Reported as holding, because that is the move that would actually be
    * commanded — the rest is what the next plan will still be able to do, which
@@ -425,16 +523,49 @@ export class TrajectoryPlanner {
   #considerDelayed(request: TrajectoryRequest, carryX: number, carryY: number): void {
     if (this.#evaluated >= request.budget) return;
     this.#evaluated += 1;
-    this.#roll(request, 0, 0, 0, Continuation.Carry, carryX, carryY, this.#best.cost);
-    if (!(this.#rollCost < this.#best.cost)) return;
-    this.#best.cost = this.#rollCost;
-    this.#best.dirX = 0;
-    this.#best.dirY = 0;
-    this.#best.stepTiles = 0;
-    this.#best.impactMs = this.#rollImpactMs;
-    this.#best.clearanceTiles = this.#rollRoom;
-    this.#best.driftTiles = this.#rollDriftTiles;
-    this.#best.ridingPocket = false;
+    let settled = false;
+    for (const mode of DELAYED_CONTINUATIONS) {
+      // See the same test in {@link #consider}.
+      if (mode === Continuation.Carry && !settled) continue;
+      this.#roll(request, 0, 0, 0, mode, carryX, carryY, this.#best.cost);
+      settled = this.#rollSettled;
+      if (!(this.#rollCost < this.#best.cost)) continue;
+      this.#best.cost = this.#rollCost;
+      this.#best.dirX = 0;
+      this.#best.dirY = 0;
+      this.#best.stepTiles = 0;
+      this.#best.impactMs = this.#rollImpactMs;
+      this.#best.clearanceTiles = this.#rollRoom;
+      this.#best.driftTiles = this.#rollDriftTiles;
+      this.#best.ridingPocket = false;
+    }
+  }
+
+  /**
+   * Straight across the line the fire is coming down, both ways — now, and
+   * after a tick of standing.
+   *
+   * **The one answer the ring can miss.** Its spokes are fixed to the map and
+   * the fire is not, so the step square to a shot is usually between two of
+   * them, and the delayed hold — which offers every other spoke — had no
+   * sideways at all against fire down either axis. Waiting then lost to
+   * stepping at once, and a character a tenth of a tile off the line stepped
+   * back through it every plan, because the far side kept its first tick
+   * nearer home. Offered here at every distance, so the one move the whole
+   * feature is meant to prefer is never the one it cannot express.
+   */
+  #squareToFire(request: TrajectoryRequest): void {
+    if (request.threatX === 0 && request.threatY === 0) return;
+    for (const side of SIDES) {
+      const dirX = -request.threatY * side;
+      const dirY = request.threatX * side;
+      this.#considerDelayed(request, dirX, dirY);
+      for (const fraction of WALK_FRACTIONS) {
+        const distance = request.stepTiles * fraction;
+        if (distance < MIN_WALK_TILES) continue;
+        this.#consider(request, dirX, dirY, distance, OFF_RING);
+      }
+    }
   }
 
   /**
@@ -505,7 +636,7 @@ export class TrajectoryPlanner {
     // Walked if it is far enough to be a walk — closer than that is inside one
     // frame of travel, and the next plan will still be able to answer.
     const walk = Math.min(distance, request.stepTiles);
-    if (walk >= MIN_WALK_TILES) this.#consider(request, dirX, dirY, walk, -1);
+    if (walk >= MIN_WALK_TILES) this.#consider(request, dirX, dirY, walk, POCKET_AIMED);
   }
 
   /**
@@ -546,15 +677,16 @@ export class TrajectoryPlanner {
     let room = NO_DANGER_TILES;
     let drift = 0;
 
-    // **Standing still has one future, not three**, and rolling it three times
-    // is three times the work for one answer: carrying on goes nowhere, and
-    // riding a pocket from a candidate that has not moved is the walk home by
-    // another name. Only a candidate that actually displaces the character has
-    // continuations that differ.
+    // **Standing still has one future, not four**, and rolling it four times
+    // is four times the work for one answer: settling and carrying on have no
+    // way to go, and riding a pocket from a candidate that has not moved is the
+    // walk home by another name. Only a candidate that actually displaces the
+    // character has continuations that differ.
     // **What this candidate has to beat**, which is what lets a rollout stop the
     // moment it cannot: the best complete future so far, less what the decision
     // itself already costs.
     const bound = this.#best.cost - decision;
+    let settled = false;
     for (const mode of CONTINUATIONS) {
       if (mode !== Continuation.Home && distance <= 0) break;
       if (
@@ -563,7 +695,13 @@ export class TrajectoryPlanner {
       ) {
         continue;
       }
+      // **Carrying on is settling that never stops**, so the two are the same
+      // walk until settling finds its place — and where it never did, rolling
+      // the other is the same few queries again for exactly the same answer.
+      // On a busy screen that is most of them.
+      if (mode === Continuation.Carry && !settled) continue;
       this.#roll(request, dirX, dirY, distance, mode, dirX, dirY, cost < bound ? cost : bound);
+      settled = this.#rollSettled;
       if (this.#rollCost >= cost) continue;
       cost = this.#rollCost;
       impactMs = this.#rollImpactMs;
@@ -580,7 +718,7 @@ export class TrajectoryPlanner {
     this.#best.impactMs = impactMs;
     this.#best.clearanceTiles = room;
     this.#best.driftTiles = drift;
-    this.#best.ridingPocket = heading < 0 && distance > 0;
+    this.#best.ridingPocket = heading === POCKET_AIMED && distance > 0;
     if (heading >= 0) this.#bestHeading = heading;
   }
 
@@ -641,6 +779,10 @@ export class TrajectoryPlanner {
     let x = request.startX;
     let y = request.startY;
     let total = 0;
+    // Whether a settling rollout has found its place. Once found it is never
+    // asked again: the test that found it covered every tick still to come.
+    let settled = false;
+    this.#rollSettled = false;
     this.#rollImpactMs = Infinity;
     this.#rollRoom = NO_DANGER_TILES;
 
@@ -657,13 +799,44 @@ export class TrajectoryPlanner {
       let wantX = x;
       let wantY = y;
       let reach = 0;
+      // Whether this tick's walk ends at the place a settling rollout stops.
+      let settling = false;
       if (tick === 0) {
         wantX = x + dirX * distance;
         wantY = y + dirY * distance;
         reach = distance;
       } else {
         reach = request.stepTiles;
-        if (mode === Continuation.Carry) {
+        if (mode === Continuation.Settle && !settled && tick === 1) {
+          // The first step may have been all the getting clear there was.
+          settled = this.#clearFrom(
+            request,
+            tick,
+            x,
+            y,
+            x + request.anchorStepX,
+            y + request.anchorStepY,
+          );
+          this.#rollSettled = settled;
+        }
+        if (settled) {
+          // Standing — which for a player who is walking means keeping pace
+          // beside their own line rather than letting it walk away from them.
+          wantX = x + request.anchorStepX;
+          wantY = y + request.anchorStepY;
+          reach = Math.hypot(request.anchorStepX, request.anchorStepY);
+        } else if (mode === Continuation.Settle) {
+          const share = this.#settleAlong(request, tick, x, y, carryX * reach, carryY * reach);
+          if (share > 0) {
+            reach *= share;
+            settling = true;
+            // From here on it is no longer the walk `Carry` would take, even
+            // if the ground refuses this part of it.
+            this.#rollSettled = true;
+          }
+          wantX = x + carryX * reach;
+          wantY = y + carryY * reach;
+        } else if (mode === Continuation.Carry) {
           wantX = x + carryX * reach;
           wantY = y + carryY * reach;
         } else {
@@ -750,6 +923,9 @@ export class TrajectoryPlanner {
           }
         }
       }
+      // Only once it has actually got there: a refused walk leaves it standing
+      // where the test said there was no stopping.
+      if (settling && travelTiles > 0) settled = true;
 
       const clearance = request.danger.clearanceOf(tick, x, y, toX, toY);
       let hitDamage = request.danger.worstDamage;
@@ -786,6 +962,12 @@ export class TrajectoryPlanner {
         );
       }
       step.travelTiles = travelTiles;
+      // Measured against the player's own walking, so that what is charged is
+      // the dodge running with the fire and never the line they chose to walk.
+      const withFire =
+        (toX - x - request.anchorStepX) * request.threatX +
+        (toY - y - request.anchorStepY) * request.threatY;
+      step.withFireTiles = withFire > 0 ? withFire : 0;
       step.clearanceTiles = room;
       step.hitDamage = hitDamage;
       step.hitDebuff = hitDebuff;
@@ -818,6 +1000,81 @@ export class TrajectoryPlanner {
           x - (request.anchorX + request.anchorStepX * request.ticks),
           y - (request.anchorY + request.anchorStepY * request.ticks),
         );
+  }
+
+  /**
+   * How much of one tick's walk a settling rollout needs before it can stop, as
+   * a share of the walk — or nought when even all of it is not enough.
+   *
+   * **Found to within a fraction of a tick, and the fraction is the point.** A
+   * stop measured in whole ticks overshoots by up to one, and the overshoot is
+   * then charged for every tick left: two sides of a shot came out a few tenths
+   * apart on rounding alone, and a character standing on its line swapped sides
+   * from one plan to the next. Halving rather than stepping, because the one
+   * test that says the whole walk is enough is also the one that says where to
+   * start looking.
+   */
+  #settleAlong(
+    request: TrajectoryRequest,
+    tick: number,
+    x: number,
+    y: number,
+    stepX: number,
+    stepY: number,
+  ): number {
+    if (!this.#clearFrom(request, tick, x, y, x + stepX, y + stepY)) return 0;
+    let short = 0;
+    let enough = 1;
+    for (let i = 0; i < SETTLE_HALVINGS; i += 1) {
+      const share = (short + enough) / 2;
+      if (this.#clearFrom(request, tick, x, y, x + stepX * share, y + stepY * share)) {
+        enough = share;
+      } else {
+        short = share;
+      }
+    }
+    return enough;
+  }
+
+  /**
+   * Whether walking from one place to another over `tick`, and standing there
+   * from then to the horizon, keeps a comfortable margin from everything in the
+   * air — standing beside the player's own line, when they are walking one.
+   *
+   * **Every tick still to come, not the next few**, because a place is only
+   * somewhere to stop if nothing arrives at it later: the shot a sidestep is
+   * waiting out crosses the line it left some ticks from now, and a test that
+   * looked only at this tick would stop on the line and wait to be hit. It
+   * returns at the first tick that is short of room, which is where a place
+   * still in the way nearly always fails.
+   */
+  #clearFrom(
+    request: TrajectoryRequest,
+    tick: number,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+  ): boolean {
+    const safe = request.weights.safeClearanceTiles;
+    let atX = fromX;
+    let atY = fromY;
+    let nextX = toX;
+    let nextY = toY;
+    for (let slice = tick; slice < request.ticks; slice += 1) {
+      if (request.danger.clearanceOf(slice, atX, atY, nextX, nextY) < safe) return false;
+      if (request.blasts !== undefined) {
+        const startsMs = request.leadMs + slice * request.tickMs;
+        if (request.blasts.clearanceAt(nextX, nextY, startsMs, startsMs + request.tickMs) < safe) {
+          return false;
+        }
+      }
+      atX = nextX;
+      atY = nextY;
+      nextX = atX + request.anchorStepX;
+      nextY = atY + request.anchorStepY;
+    }
+    return true;
   }
 
   /** The evenly spaced ring of directions, rebuilt only when the count changes. */

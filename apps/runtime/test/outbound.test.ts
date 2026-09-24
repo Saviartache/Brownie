@@ -66,6 +66,14 @@ interface Harness {
     options?: Parameters<ServerActionQueue['submit']>[2],
     fields?: Record<string, unknown>,
   ) => boolean;
+  /** One of the client's own packets has just gone to the server. `MOVE` unless named. */
+  speak: (packetName?: string) => void;
+  /**
+   * Moves time on while the client keeps talking, the way it does in play: it
+   * answers every server tick, so something of its own passes every
+   * `everyMs`.
+   */
+  run: (ms: number, everyMs?: number) => void;
 }
 
 function harness(tuning?: Parameters<typeof makeQueue>[0]): Harness {
@@ -100,6 +108,10 @@ function makeQueue(tuning?: ConstructorParameters<typeof ServerActionQueue>[0]['
     ...(tuning === undefined ? {} : { tuning }),
   });
 
+  const speak = (packetName = 'MOVE'): void => {
+    queue.clientPacketPassed(packetOf(packetName));
+  };
+
   return {
     queue,
     clock,
@@ -122,6 +134,13 @@ function makeQueue(tuning?: ConstructorParameters<typeof ServerActionQueue>[0]['
           options.onOutcome?.(outcome);
         },
       }),
+    speak,
+    run: (ms, everyMs = 100) => {
+      for (let elapsed = everyMs; elapsed <= ms; elapsed += everyMs) {
+        clock.advance(everyMs);
+        speak();
+      }
+    },
   };
 }
 
@@ -178,13 +197,63 @@ describe('the outbound queue', () => {
     expect(h.queue.depth).toBe(0);
   });
 
-  it('sends the first packet of a lane at once and holds the second', () => {
+  describe('where in the stream a paced packet lands', () => {
+    it('holds it until the client has put one of its own on the wire, and follows that', () => {
+      // The game client sends every packet behind the shot acknowledgements it
+      // owes. Anything of ours that goes out at another moment can overtake
+      // acknowledgements the client already owes — an order the real client
+      // cannot produce.
+      const h = harness();
+      expect(h.submit('loot', 'INVENTORYSWAP')).toBe(false);
+      h.clock.advance(1000);
+      expect(h.sent).toHaveLength(0);
+
+      h.speak();
+      expect(h.order).toEqual(['loot']);
+    });
+
+    it('never follows a shot acknowledgement, only the message it was flushed ahead of', () => {
+      // The acknowledgements come immediately before the packet whose sending
+      // flushed them, so after one of them that packet is still to come.
+      const h = harness();
+      h.submit('loot', 'INVENTORYSWAP');
+      h.speak('SHOOTACKCOUNTER');
+      expect(h.sent).toHaveLength(0);
+
+      h.speak('MOVE');
+      expect(h.order).toEqual(['loot']);
+    });
+
+    it('lets a waiting packet expire rather than send it from a timer', () => {
+      // A client that has gone quiet — a map loading, a stalled frame — is not
+      // one to slip a packet in behind.
+      const h = harness();
+      h.submit('loot', 'INVENTORYSWAP', { expiresInMs: 500 });
+      h.clock.advance(600);
+      expect(h.outcomes.get('loot')).toBe(SendOutcome.Expired);
+      expect(h.sent).toHaveLength(0);
+    });
+
+    it('still follows a client packet a stage withheld, which cost the server nothing', () => {
+      const h = harness();
+      h.submit('loot', 'INVENTORYSWAP');
+      const withheld = swapPacket();
+      withheld.drop();
+      h.queue.clientPacketPassed(withheld);
+      // Not spaced behind it and not made stale by it: the server never heard
+      // it. And the acknowledgements ahead of it did go out.
+      expect(h.order).toEqual(['loot']);
+    });
+  });
+
+  it('sends one packet of a lane when the client speaks, and holds the second', () => {
     const h = harness();
-    expect(h.submit('loot', 'INVENTORYSWAP')).toBe(true);
+    h.submit('loot', 'INVENTORYSWAP');
     // This is the collision the whole thing exists for: a cast decided in the
     // same tick as a pickup.
-    expect(h.submit('cast', 'USEITEM')).toBe(false);
-    expect(h.sent).toHaveLength(1);
+    h.submit('cast', 'USEITEM');
+    h.speak();
+    expect(h.order).toEqual(['loot']);
     expect(h.queue.depth).toBe(1);
   });
 
@@ -192,12 +261,13 @@ describe('the outbound queue', () => {
     const h = harness();
     h.submit('loot', 'INVENTORYSWAP');
     h.submit('cast', 'USEITEM');
+    h.speak();
 
     // A use asks for only 250 ms of its own; what it is waiting out is the
     // move's second.
-    h.clock.advance(999);
-    expect(h.sent).toHaveLength(1);
-    h.clock.advance(2);
+    h.run(900);
+    expect(h.order).toEqual(['loot']);
+    h.run(200);
     expect(h.order).toEqual(['loot', 'cast']);
   });
 
@@ -206,21 +276,23 @@ describe('the outbound queue', () => {
     h.submit('loot', 'INVENTORYSWAP');
     // A portal is a different limit, if it is a limit at all — pacing it behind
     // an item move would be paying for something that was never measured.
-    expect(h.submit('portal', 'USEPORTAL')).toBe(true);
+    h.submit('portal', 'USEPORTAL');
+    h.speak();
     expect(h.order).toEqual(['loot', 'portal']);
   });
 
   it('lets a potion past a queue full of looting, without jumping the spacing', () => {
     const h = harness();
     h.submit('loot', 'INVENTORYSWAP');
+    h.speak();
     h.submit('take', 'USEITEM', { priority: SendPriority.Background });
     h.submit('drink', 'USEITEM', { priority: SendPriority.Survival });
 
-    h.clock.advance(500);
+    h.run(500);
     // Priority decides the order of the queue, never the floor under it.
     expect(h.order).toEqual(['loot']);
 
-    h.clock.advance(600);
+    h.run(600);
     expect(h.order).toEqual(['loot', 'drink']);
   });
 
@@ -229,28 +301,30 @@ describe('the outbound queue', () => {
     h.submit('first', 'INVENTORYSWAP');
     h.submit('second', 'USEITEM');
     h.submit('third', 'USEITEM');
-    h.clock.advance(5000);
+    h.run(2000);
     expect(h.order).toEqual(['first', 'second', 'third']);
   });
 
   it('replaces a waiting request that named the same intent', () => {
     const h = harness();
     h.submit('move', 'INVENTORYSWAP');
+    h.speak();
     h.submit('older', 'USEITEM', { key: 'auto-drink:health' });
     h.submit('newer', 'USEITEM', { key: 'auto-drink:health' });
 
     expect(h.outcomes.get('older')).toBe(SendOutcome.Superseded);
     expect(h.queue.depth).toBe(1);
-    h.clock.advance(1100);
+    h.run(1100);
     expect(h.order).toEqual(['move', 'newer']);
   });
 
   it('drops a request that waited past its deadline rather than sending it late', () => {
     const h = harness();
     h.submit('move', 'INVENTORYSWAP');
+    h.speak();
     h.submit('stale', 'USEITEM', { expiresInMs: 300 });
 
-    h.clock.advance(1100);
+    h.run(1100);
     expect(h.outcomes.get('stale')).toBe(SendOutcome.Expired);
     expect(h.order).toEqual(['move']);
     expect(wasSent(SendOutcome.Expired)).toBe(false);
@@ -258,10 +332,13 @@ describe('the outbound queue', () => {
 
   it('fills in the fields that mean "now" when the packet leaves, not when it was asked for', () => {
     const h = harness();
-    const at = h.clock.nowMs;
     h.submit('first', 'INVENTORYSWAP');
     h.submit('second', 'INVENTORYSWAP');
-    h.clock.advance(1500);
+    h.clock.advance(100);
+    const at = h.clock.nowMs;
+    h.speak();
+    h.clock.advance(1000);
+    h.speak();
 
     expect(h.sent[0]?.fields['time']).toBe(at);
     // The whole reason a queue is allowed to hold a packet: the second one
@@ -277,14 +354,15 @@ describe('the outbound queue', () => {
       // Given a deadline it cannot reach: what is under test here is the hold,
       // and the default deadline would otherwise expire it while it waited.
       h.submit('next', 'INVENTORYSWAP', { expiresInMs: 30_000 });
+      h.speak();
 
       // Well past the spacing, and still nothing: an unanswered move is exactly
       // what must not be followed by a second one aimed from the same picture.
-      h.clock.advance(3000);
+      h.run(3000);
       expect(h.order).toEqual(['move']);
 
       landed = true;
-      h.clock.advance(100);
+      h.run(100);
       expect(h.outcomes.get('move')).toBe(SendOutcome.Confirmed);
       expect(h.order).toEqual(['move', 'next']);
     });
@@ -292,6 +370,7 @@ describe('the outbound queue', () => {
     it('gives up on it after its window and reports the silence as silence', () => {
       const h = harness();
       h.submit('move', 'INVENTORYSWAP', { confirm: () => false, confirmWindowMs: 800 });
+      h.speak();
       h.clock.advance(900);
       // Not "refused": a bag somebody else emptied and a bag that was merely
       // slow both answer with nothing at all.
@@ -307,8 +386,9 @@ describe('the outbound queue', () => {
         confirmWindowMs: 500,
       });
       h.submit('next', 'INVENTORYSWAP');
+      h.speak();
 
-      h.clock.advance(1600);
+      h.run(1600);
       expect(h.outcomes.get('bad')).toBe(SendOutcome.Unconfirmed);
       expect(h.order).toEqual(['bad', 'next']);
       expect(h.sink.messages().some((line) => line.includes('confirming'))).toBe(true);
@@ -321,26 +401,27 @@ describe('the outbound queue', () => {
       h.submit('move', 'INVENTORYSWAP', { confirm: () => false });
       h.submit('later', 'USEITEM');
       h.submit('portal', 'USEPORTAL');
+      h.speak();
       expect(h.order).toEqual(['move', 'portal']);
 
       h.clock.advance(100);
-      h.queue.observe(failure('Bad message received'), false);
+      h.queue.observe(failure('Bad message received'));
 
       expect(h.outcomes.get('move')).toBe(SendOutcome.Refused);
       expect(h.queue.holding).toBe(true);
 
       // The lane is free again as far as spacing goes, and still quiet.
-      h.clock.advance(1000);
+      h.run(1000);
       expect(h.order).toEqual(['move', 'portal']);
 
-      h.clock.advance(1100);
+      h.run(1100);
       expect(h.order).toEqual(['move', 'portal', 'later']);
     });
 
     it('goes quieter each time, up to a cap', () => {
       const h = harness({ failureHoldMs: 1000, maxFailureHoldMs: 3000 });
       const complain = (): void => {
-        h.queue.observe(failure(), false);
+        h.queue.observe(failure());
       };
 
       complain();
@@ -360,51 +441,73 @@ describe('the outbound queue', () => {
       const h = harness();
       // We cannot prove a complaint was not about us, and the two ways of being
       // wrong cost wildly different amounts.
-      h.queue.observe(failure('nope'), false);
+      h.queue.observe(failure('nope'));
       expect(h.queue.holding).toBe(true);
       h.submit('move', 'INVENTORYSWAP');
+      h.speak();
       expect(h.order).toEqual([]);
     });
 
     it('treats a confirmed packet as evidence the server is listening again', () => {
       const h = harness({ failureHoldMs: 1000, maxFailureHoldMs: 30_000 });
-      h.queue.observe(failure(), false);
+      h.queue.observe(failure());
       h.clock.advance(1100);
 
       let landed = false;
       h.submit('move', 'INVENTORYSWAP', { confirm: () => landed });
+      h.speak();
       landed = true;
       h.clock.advance(100);
       expect(h.outcomes.get('move')).toBe(SendOutcome.Confirmed);
 
       // The streak is broken, so the next complaint is a first one again.
-      h.queue.observe(failure(), false);
+      h.queue.observe(failure());
       h.clock.advance(1100);
       expect(h.queue.holding).toBe(false);
     });
   });
 
-  it("counts the player's own item packets against the lane", () => {
-    const h = harness();
-    // The floor is about the server, not about who asked — and a plugin racing
-    // the player's own hands is the same collision as two plugins racing.
-    h.queue.observe(swapPacket(), true);
-    h.submit('ours', 'USEITEM');
-    expect(h.order).toEqual([]);
+  describe("the player's own hands", () => {
+    it('counts their item packets against the lane', () => {
+      const h = harness();
+      // The floor is about the server, not about who asked — and a plugin
+      // racing the player's own hands is the same collision as two plugins
+      // racing.
+      h.queue.clientPacketPassed(swapPacket());
+      h.submit('ours', 'USEITEM');
+      h.speak();
+      expect(h.order).toEqual([]);
 
-    h.clock.advance(1001);
-    expect(h.order).toEqual(['ours']);
+      h.clock.advance(1001);
+      h.speak();
+      expect(h.order).toEqual(['ours']);
+    });
+
+    it('drops the item requests that were aimed at the inventory before they changed it', () => {
+      // A swap into the slot they have just filled, or a drink from the one
+      // they have just emptied, names contents the server no longer has.
+      const h = harness();
+      h.submit('loot', 'INVENTORYSWAP');
+      h.submit('portal', 'USEPORTAL');
+      h.queue.clientPacketPassed(swapPacket());
+
+      expect(h.outcomes.get('loot')).toBe(SendOutcome.Dropped);
+      // Another lane's request is aimed at nothing they touched.
+      expect(h.order).toEqual(['portal']);
+      expect(h.queue.depth).toBe(0);
+    });
   });
 
   it('throws away everything aimed at a map the player has left', () => {
     const h = harness();
     h.submit('move', 'INVENTORYSWAP');
+    h.speak();
     h.submit('next', 'INVENTORYSWAP', { confirm: () => false });
-    h.queue.observe(packetOf('MAPINFO'), false);
+    h.queue.observe(packetOf('MAPINFO'));
 
     expect(h.outcomes.get('next')).toBe(SendOutcome.Dropped);
     expect(h.queue.depth).toBe(0);
-    h.clock.advance(5000);
+    h.run(5000);
     expect(h.order).toEqual(['move']);
   });
 
@@ -414,7 +517,8 @@ describe('the outbound queue', () => {
     // never left, and a caller that believed it would put its own bookkeeping
     // back by one move.
     h.submit('move', 'INVENTORYSWAP', { confirm: () => false });
-    h.queue.observe(packetOf('MAPINFO'), false);
+    h.speak();
+    h.queue.observe(packetOf('MAPINFO'));
     expect(h.outcomes.get('move')).toBe(SendOutcome.Unconfirmed);
     expect(wasSent(SendOutcome.Unconfirmed)).toBe(true);
   });
@@ -439,6 +543,7 @@ describe('the outbound queue', () => {
   it('drops the least wanted request rather than growing without bound', () => {
     const h = harness({ maxQueuedPerLane: 2 });
     h.submit('sent', 'INVENTORYSWAP');
+    h.speak();
     h.submit('cheap', 'USEITEM', { priority: SendPriority.Background });
     h.submit('dear', 'USEITEM', { priority: SendPriority.Survival });
     h.submit('third', 'USEITEM', { priority: SendPriority.Normal });
@@ -451,6 +556,7 @@ describe('the outbound queue', () => {
     const h = harness();
     h.breakNextSend();
     h.submit('malformed', 'INVENTORYSWAP', { confirm: () => false });
+    h.speak();
     expect(h.outcomes.get('malformed')).toBe(SendOutcome.Dropped);
     expect(h.sent).toHaveLength(0);
 
@@ -458,18 +564,19 @@ describe('the outbound queue', () => {
     // sent — but it *is* still spaced, because a packet we failed to build is
     // no reason to believe the server wants two in a row.
     h.submit('next', 'INVENTORYSWAP');
-    h.clock.advance(1100);
+    h.run(1100);
     expect(h.order).toEqual(['next']);
   });
 
   it('sends nothing once the session has gone', () => {
     const h = harness();
     h.submit('waiting', 'INVENTORYSWAP');
+    h.speak();
     h.submit('queued', 'INVENTORYSWAP');
     h.queue.dispose();
 
     expect(h.outcomes.get('queued')).toBe(SendOutcome.Dropped);
-    h.clock.advance(10_000);
+    h.run(10_000);
     expect(h.order).toEqual(['waiting']);
 
     expect(h.submit('after', 'ESCAPE')).toBe(false);

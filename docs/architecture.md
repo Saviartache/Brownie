@@ -211,15 +211,33 @@ the client. `clientTimeMs` is therefore floored at the highest stamp seen, and
 `calibrateClientClock` is re-read on every stamped packet so the lag never gets
 frozen in.
 
+**Never put an action ahead of the acknowledgements the client owes.** The game
+client answers the shots it is shown — every `ENEMYSHOOT` and
+`SERVERPLAYERSHOOT` — with a `SHOOTACKCOUNTER` naming the frame it took them in,
+and it keeps those answers until it next sends something: every send the game
+makes goes through `SocketManager`, and each of its send methods first runs
+`FlushAckMessages`. So in the client's own stream an action is always preceded
+by the acknowledgement of every shot the client had seen, and nothing it says
+later is stamped before them. A packet injected while a tick is still on its way
+to the client — which is where a plugin reacting to `NEWTICK` is — or from a
+timer can land between a shot the client has already seen and the
+acknowledgement it is about to send, stamped later than that acknowledgement:
+an order the real client cannot produce. Straight after one of the client's own
+packets it owes nothing, so that is where anything of ours goes — and never
+straight after a `SHOOTACKCOUNTER`, which is only ever the first half of a flush.
+
 The practical rule for anything injecting toward the server:
 
 * stamp with `world.clientTimeMs` and nothing else;
 * do not hold a stamp and reuse it later — read it at the moment of sending;
+* put it on the wire straight behind one of the client's own packets, never in
+  the middle of a tick;
 * leave room between injected packets rather than emitting several for one tick,
   so what we add to the stream keeps the shape the client's own traffic has.
 
-All three are now enforced rather than remembered: every plugin send passes
-through the session's one outbound queue, which spaces packets, and which
+All four are now enforced rather than remembered: every plugin send passes
+through the session's one outbound queue, which sends a paced packet only when
+the session reports that the client has just spoken, spaces packets, and
 rewrites `time` and `position` at the instant a held packet leaves. See
 **[One outbound queue per session](#one-outbound-queue-per-session)**.
 
@@ -259,6 +277,17 @@ above. The player's own hands are a fourth sender nobody was counting.
 So there is one queue per session, it lives under `SessionView.sendToServer`,
 and nothing goes around it. `apps/runtime/src/outbound/` is the whole of it.
 
+**Auto-ability has since left it, for a reason the queue could not fix.** A
+`USEITEM` the proxy writes is a use the client never made: it charges no
+cooldown on the client, so the player's next press is a second use inside the
+first one's cooldown; it has none of the shots a quiver or a spell fires behind
+its use; and it goes out while the client would have refused it — silenced, out
+of mana. Ordering cannot make any of those a packet the real client sends. So
+the plugin now presses the client's own ability key through the native module
+(`ability-cast` in [`docs/ipc.md`](./ipc.md)), and points the player's own
+presses the same way (`ability-aim`): the client makes every use, and its
+`USEITEM` reaches this queue as the player's own does.
+
 **What is paced is a short table, not a guess.** `actionLanes.ts` names the
 packets the server has been seen to count and groups them into *lanes* that do
 not wait for each other — items, travel, chat. A packet the table does not name
@@ -269,9 +298,29 @@ strictly worse than sending them. Within a lane, the wait between two packets is
 the longer of what each asks for, so a cheap `USEITEM` following an expensive
 `INVENTORYSWAP` still waits out the swap.
 
+**A paced packet goes out only straight behind one of the client's own.** The
+session calls the queue once a client packet has been forwarded (or withheld by
+a stage), before anything else is read from either side; that is the one moment
+the client owes the server no shot acknowledgement, and the only moment the
+queue sends anything paced — never from its own timer, and never from inside a
+server packet the client has not seen yet. See
+[the client's timeline](#the-clients-timeline-two-clocks-one-direction). The
+client answers every server tick with a `MOVE`, so the wait is at most a tick
+and usually a frame or two. A `SHOOTACKCOUNTER` does not count: the client
+writes those immediately ahead of the message whose sending flushed them.
+
 **Priority orders the queue; it never jumps the floor.** A potion at a survival
 threshold goes ahead of a pickup, and still waits its turn — because the floor
 is the thing the disconnects were about, and no priority is worth one.
+
+**The player's own item packet makes every waiting item request stale.** A swap
+into the slot they have just filled, or a drink from the slot they have just
+emptied, names contents the server no longer has, and a swap whose contents
+disagree with the server's is answered by hanging up rather than by being
+ignored. So when the client's own `INVENTORYSWAP`, `INVDROP` or `USEITEM` goes
+to the server, whatever of ours is still waiting in the item lane is dropped,
+and each feature asks again from the next tick's picture. One a stage withheld
+changes nothing — the server never heard it.
 
 **A caller can say how to tell whether its packet worked.** The protocol
 acknowledges neither an item move nor a drink, so "worked" is a fact about the
@@ -295,20 +344,24 @@ streak, because it is evidence the server is listening again.
 `time` a packet was *built* with would be a queue that reliably produced the
 silent rejection two sections above.
 
-### A trailing optional the definition has and the game does not
+### A trailing optional the definition had and the game does not
 
-`packet-definitions.json` gives `INVENTORYSWAP` a trailing optional `tickId`.
-**The live build does not carry it.** Filling it in — a reasonable-looking way
-to place an operation in the tick sequence — got every swap back as `FAILURE`
-with the message `Bad message received`, including the stack join that had been
-working a minute earlier.
+`packet-definitions.json` used to give `INVENTORYSWAP` a trailing optional
+`tickId`, inherited from the reference implementation. **The live build does
+not carry it.** Filling it in — a reasonable-looking way to place an operation
+in the tick sequence — got every swap back as `FAILURE` with the message
+`Bad message received`, including the stack join that had been working a minute
+earlier. That message is the server failing to *parse* the packet rather than
+refusing what it asked for: four bytes this build does not expect.
 
-That message is the server failing to *parse* the packet rather than refusing
-what it asked for: four bytes this build does not expect. An optional field in
-that file is a field some build had, not one this build wants.
+The game's own code settles it. Its swap message (`InventorySwap`, build 6.13)
+serialises `time`, `x`, `y` and two slot objects and nothing else, so the field
+is gone from the definition rather than left as a trap.
 
-**So set only the fields a working implementation sets, and treat a trailing
-optional as absent unless the live game has been seen to carry one.**
+**So set only the fields the game client sets, and check a field against the
+client's own serialiser before trusting a definition inherited from another
+tool.** The recovered IL2CPP code under `tools/extractor/output` is the answer
+key: `docs/gameassembly.md` is how to find a message class and its writer.
 
 ### What the server says when it refuses
 
@@ -597,7 +650,7 @@ belongs here and nowhere else.
 |---|---|---|
 | `Engine` | the IPC thread, the link, the published model, the wiring | IPC, plus the frame it hands to `Overlay` |
 | `GameBinding` | the IL2CPP runtime, the offset table, the player reader | IPC only |
-| `PlayerControl` | the route, the mover, the aim detours, the two targets | published on IPC, acted on by the frame |
+| `PlayerControl` | the route, the mover, the aim detours, the ability key, the targets | published on IPC, acted on by the frame |
 | `ScenePatches` | the Unity scene walk, the health bar tint, the collision write | resolved on IPC, applied by the frame |
 | `Inspection` | nothing — it takes a catalog and a sink | whichever calls it |
 
@@ -964,3 +1017,5 @@ looks exactly like a broken one.
 | Stock ImGui, no theming; custom widgets draw from `ImGuiCol_*` | A widget that paints its own colours drifts from everything around it the moment the theme changes | a project theme, hand-picked colours per widget |
 | Only the render thread touches ImGui; the window procedure queues | Window thread and render thread coincide only sometimes, and "usually the same" is not a threading model | call `ImGui_ImplWin32_WndProcHandler` straight from the window procedure, as most overlays do |
 | `Present` found via a throwaway swap chain's vtable | The vtable belongs to the interface, so our own swap chain answers for the game's — no waiting, no walking its objects, nothing to revise per Windows update | byte-pattern scan of `dxgi.dll` |
+| An injected packet goes out only straight behind one of the client's own | The client flushes the shot acknowledgements it owes before every send (`SocketManager.FlushAckMessages`), so in its own stream no action ever precedes them; a packet sent from a timer or from inside a server tick can | sending the moment a plugin asks, spaced only by a rate limit |
+| A packet's fields and values are checked against the game client's own code | The inherited definitions carried an `INVENTORYSWAP.tickId` the server cannot parse and a potion `useType` no client sends; the recovered IL2CPP code says what the client actually writes | trusting another tool's packet table, however long it has worked |

@@ -171,6 +171,15 @@ function moveRecord(
 }
 
 /**
+ * One instruction for the player's ability key, in the same units: press it
+ * once pointed here (`ability-cast`), or point the presses the player makes
+ * here (`ability-aim`). See `docs/ipc.md`.
+ */
+function abilityRecord(kind: 'ability-cast' | 'ability-aim', at: Position, holdMs: number): string {
+  return [kind, Math.round(at.x * 100), Math.round(at.y * 100), Math.round(holdMs)].join('|');
+}
+
+/**
  * The composition root.
  *
  * Everything is constructed here and handed its collaborators; nothing reaches
@@ -959,6 +968,18 @@ export class Application {
     // the catalogs finish loading picks them up when they do.
     this.#plugins.load(
       createAutoAbilityPlugin({
+        // Both into the client's own ability code: the module presses the key,
+        // or hands the client the enemy in place of the cursor when the player
+        // presses it. Nothing here writes a `USEITEM` — the client builds its
+        // own, with its own checks and shots. See `game/PlayerAbility.h`.
+        output: {
+          cast: (at, holdMs) => {
+            this.#native.publishRecord(abilityRecord('ability-cast', at, holdMs));
+          },
+          aimAt: (at, holdMs) => {
+            this.#native.publishRecord(abilityRecord('ability-aim', at, holdMs));
+          },
+        },
         ability: (objectType) => this.#objects.item(objectType)?.ability,
         isObstacle: (objectType) => this.#objects.occupies(objectType),
         isInvincible: (objectType) => this.#objects.isInvincible(objectType),

@@ -17,6 +17,8 @@ constexpr std::string_view kWeaponKind = "weapon";
 constexpr std::size_t kWeaponFieldCount = 6;
 constexpr std::string_view kMoveKind = "move";
 constexpr std::string_view kAimKind = "aim";
+constexpr std::string_view kAbilityCastKind = "ability-cast";
+constexpr std::string_view kAbilityAimKind = "ability-aim";
 constexpr std::string_view kTextKind = "text";
 /// The largest value a colour channel can carry.
 constexpr int kMaxChannel = 255;
@@ -46,6 +48,33 @@ constexpr std::size_t kFieldCount = 7;
     const char* const end = begin + text.size();
     const auto parsed = std::from_chars(begin, end, out);
     return parsed.ec == std::errc{} && parsed.ptr == end;
+}
+
+/// `<kind>|x|y|holdMs`, which both ability records are.
+[[nodiscard]] bool ParseAbilityRecord(std::string_view record, std::string_view kind,
+                                      AbilityCommand& out) noexcept {
+    std::string_view rest = record;
+    if (TakeField(rest) != kind) {
+        return false;
+    }
+
+    int x = 0;
+    int y = 0;
+    int hold = 0;
+    if (!ParseInt(TakeField(rest), x) || !ParseInt(TakeField(rest), y) ||
+        !ParseInt(TakeField(rest), hold)) {
+        return false;
+    }
+    // No lifetime is not a brief one: a cast with no time to be made in, or an
+    // aim that never applies — refused rather than acted on as a zero.
+    if (hold <= 0) {
+        return false;
+    }
+
+    out.x_hundredths = x;
+    out.y_hundredths = y;
+    out.hold_ms = hold;
+    return true;
 }
 
 }  // namespace
@@ -254,6 +283,14 @@ bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept {
         out.lead_lag_ms = has_lag ? lead_lag : 0;
     }
     return true;
+}
+
+bool ParseAbilityCastRecord(std::string_view record, AbilityCommand& out) noexcept {
+    return ParseAbilityRecord(record, kAbilityCastKind, out);
+}
+
+bool ParseAbilityAimRecord(std::string_view record, AbilityCommand& out) noexcept {
+    return ParseAbilityRecord(record, kAbilityAimKind, out);
 }
 
 bool ParseTextRecord(std::string_view record, TextCommand& out) noexcept {

@@ -395,6 +395,20 @@ void Engine::AcceptRecord(std::string_view record) {
         }
         return;
     }
+    if (overlay::AbilityCommand cast; overlay::ParseAbilityCastRecord(record, cast)) {
+        control_.Cast(AbilityCastFrom(cast, NowMs()));
+        return;
+    }
+    if (overlay::AbilityCommand aim; overlay::ParseAbilityAimRecord(record, aim)) {
+        control_.AimAbility(aim, NowMs());
+        // The same argument as the shot aim above: the first one is what asks
+        // for the detour, and the player may press the key before the pass
+        // would have come round on its own.
+        if (!control_.ability_aim_installed()) {
+            setup_.Trigger();
+        }
+        return;
+    }
     if (overlay::TextCommand text; overlay::ParseTextRecord(record, text)) {
         // Queued, not shown: showing calls into the game, and this is not the
         // thread that may. The scene pass picks it up on the next frame.
@@ -728,6 +742,11 @@ void Engine::AdvanceSetup() {
             control_.BindMover(*address);
         }
     }
+    if (!control_.ability_bound()) {
+        if (const auto address = binding_.MethodAddress(game::kPlayerUseAbility)) {
+            control_.BindAbility(*address);
+        }
+    }
 
     // **The aim detours go in only once the runtime has asked to aim**, which
     // it does by sending a record — and it only does that while auto-aim is
@@ -740,6 +759,13 @@ void Engine::AdvanceSetup() {
     // is a no-op once its detour is live.
     if (control_.aim_wanted() && !control_.aim_complete()) {
         InstallAimHook();
+    }
+
+    // And the ability key's, on the same terms: only once the runtime has asked
+    // to point the player's own presses, which it does only while that setting
+    // is on. Casting needs no detour at all — it calls the method it just bound.
+    if (control_.ability_aim_wanted() && !control_.ability_aim_installed()) {
+        control_.InstallAbilityAim();
     }
 
     // The same argument, and the same shape: the detours go in the first time

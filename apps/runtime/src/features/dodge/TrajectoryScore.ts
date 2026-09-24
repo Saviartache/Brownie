@@ -33,9 +33,16 @@
  *    character can actually fight from, on top of the distance. It is what makes
  *    "a twentieth of a tile and back" strictly better than "a tile and back"
  *    even when both are perfectly safe.
- * 7. *How far it walked*, so the character stands still when nothing forces a
+ * 7. *Running with the fire.* Per tile walked the way the threatening shot is
+ *    travelling. The anchor asks only how far, so a step across a shot's line
+ *    and a step along it were the same price — and along it is the one that
+ *    postpones the hit instead of ending it, and gives up the fight doing so.
+ *    Above the walking and far below the room, so it decides between two safe
+ *    ways out and never buys a graze: backing off is still the answer while
+ *    nothing across the line is open, and only for as long as that lasts.
+ * 8. *How far it walked*, so the character stands still when nothing forces a
  *    move.
- * 8. *Whether it reversed*, which is the only term here that exists to stop a
+ * 9. *Whether it reversed*, which is the only term here that exists to stop a
  *    character vibrating between two answers the field cannot tell apart.
  *
  * **Every constant below is quoted against `anchorPerTile`**, which is the one
@@ -73,6 +80,15 @@ export interface TrajectoryWeights {
    * it, and an indifferent planner picks whichever way the arithmetic rounded.
    */
   readonly travelPerTile: number;
+  /**
+   * Per tile walked the way the threatening fire is travelling.
+   *
+   * **What makes a dodge go round a shot rather than in front of it.** Getting
+   * clear of a shot's line takes a tile or so across it, while walking with the
+   * shot only postpones it — and the anchor term, which asks only how far, priced
+   * the two alike. See {@link TrajectoryStep.withFireTiles}.
+   */
+  readonly withFirePerTile: number;
   /**
    * The most a complete reversal of the held direction costs.
    *
@@ -181,6 +197,12 @@ export interface TrajectoryStep {
   fromAnchorTiles: number;
   /** How far it walked. */
   travelTiles: number;
+  /**
+   * How far of that was the way the threatening fire is going, beyond whatever
+   * the player's own walking would have covered. Nought for a step across the
+   * line or against it, and whenever nothing threatens.
+   */
+  withFireTiles: number;
   /** The least room it had at any instant. `Infinity` when nothing came near. */
   clearanceTiles: number;
   /** What landed on it, when something did. Nought otherwise. */
@@ -206,7 +228,10 @@ export function stepCost(weights: TrajectoryWeights, step: TrajectoryStep): numb
     step.clearanceTiles >= weights.safeClearanceTiles || step.fromAnchorTiles < step.anchorTiles
       ? step.anchorTiles
       : step.fromAnchorTiles;
-  let cost = weights.anchorPerTile * charged + weights.travelPerTile * step.travelTiles;
+  let cost =
+    weights.anchorPerTile * charged +
+    weights.travelPerTile * step.travelTiles +
+    weights.withFirePerTile * step.withFireTiles;
   // **A step, not a slope, and that is the whole of "stay on the DPS spot".**
   // The distance term alone trades a tenth of a tile against a tile at the same
   // rate; this makes leaving the ring at all cost something the distance cannot

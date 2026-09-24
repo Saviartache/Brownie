@@ -173,6 +173,28 @@ struct AimCommand {
 /// the enemy, which is the rule this file already follows for defence.
 [[nodiscard]] bool ParseAimRecord(std::string_view record, AimCommand& out) noexcept;
 
+/// A place on the map for the player's ability, and how long it stands.
+///
+/// One shape for the two ability records, which differ in what they ask rather
+/// than in what they carry: `ability-cast` presses the key once, pointed here,
+/// and `ability-aim` points the presses the player makes. See
+/// `game/PlayerAbility.h` for why both go through the game's own method.
+struct AbilityCommand {
+    std::int32_t x_hundredths = 0;
+    std::int32_t y_hundredths = 0;
+    /// For a cast, how long it may wait for a frame that can make it — a cast
+    /// made late is aimed at where the fight was. For an aim, how long it
+    /// stands if nothing replaces it, which is what makes silence mean "the
+    /// cursor is theirs again".
+    std::int32_t hold_ms = 0;
+};
+
+/// Parses `ability-cast|x|y|holdMs`, in hundredths of a tile and milliseconds.
+[[nodiscard]] bool ParseAbilityCastRecord(std::string_view record, AbilityCommand& out) noexcept;
+
+/// Parses `ability-aim|x|y|holdMs`, in the same units.
+[[nodiscard]] bool ParseAbilityAimRecord(std::string_view record, AbilityCommand& out) noexcept;
+
 /// A line for the game to show over the player, and the colour to show it in.
 ///
 /// No style: which of the game's floating-text kinds to use is not the

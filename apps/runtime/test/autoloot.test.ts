@@ -800,9 +800,8 @@ describe('the auto-loot plugin', () => {
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
     tick(h);
 
-    // No `tickId`. The definition carries it as a trailing optional and this
-    // build of the game does not: filling it in got every swap back as
-    // `FAILURE [0] Bad message received`, which is a parse failure.
+    // Exactly the four fields the game client's own swap carries — no trailing
+    // `tickId`, which the server answers with `Bad message received`.
     expect(h.sent).toHaveBeenCalledWith('INVENTORYSWAP', {
       time: 1_234_000,
       position: { x: 10, y: 10 },
@@ -1218,7 +1217,6 @@ function inventorySwap(slotId: number, objectType: number): MutablePacket {
     position: { x: 0, y: 0 },
     slotObject1: { objectId: 7, slotId, objectType },
     slotObject2: { objectId: 7, slotId: 4, objectType: -1 },
-    tickId: 0,
   });
 }
 
@@ -1229,7 +1227,6 @@ function dumpIntoBag(objectType: number, bagId: number): MutablePacket {
     position: { x: 0, y: 0 },
     slotObject1: { objectId: 7, slotId: 4, objectType },
     slotObject2: { objectId: bagId, slotId: 0, objectType: -1 },
-    tickId: 0,
   });
 }
 

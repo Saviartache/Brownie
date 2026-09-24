@@ -419,17 +419,30 @@ So do not cache a stamp and reuse it later. `clientTimeMs` will not read behind
 the client's own last stamp, but the *order* of what a plugin sends is still the
 plugin's to get right.
 
-**3. Set the fields a working implementation sets, and no more — a trailing
-optional in the definition file is not an invitation.** `INVENTORYSWAP` has an
-optional `tickId` there; this build of the game does not carry it. Filling it in
-— which looks like exactly the right way to place an operation in the tick
-sequence — made the server answer `Bad message received` and hang up, on *every*
-swap including the one that had been working a minute earlier. An optional field
-is a field some build had, not one this build wants.
+**3. Set the fields the game client sets, with the values it sets, and no
+more.** `INVENTORYSWAP` used to carry an optional `tickId` in the definition
+file; this build of the game does not. Filling it in — which looks like exactly
+the right way to place an operation in the tick sequence — made the server
+answer `Bad message received` and hang up, on *every* swap including the one
+that had been working a minute earlier. The values matter as much as the
+fields: `USEITEM.useType` is the game's `Default = 0, StartUse = 1,
+EndUse = 2`, a potion or anything else used out of a container is `Default`,
+and `StartUse` is what the ability key sends. When in doubt, read the client's
+own serialiser and the code that calls it — `docs/gameassembly.md` — rather
+than another tool's packet table.
 
 **4. Leave a gap between packets that change the same thing.** Two item moves
 inside half a second end the session; the same two seven seconds apart are fine.
 The gap is not yours to keep, and it never was — see below.
+
+**5. Do not write a use of the ability slot.** Right shape, right clock, right
+place in the stream, and it is still a use the client never made: the client
+charges itself no cooldown for it, so the player's next press lands inside the
+first one's; an ability with projectiles has none of its shots behind it; and it
+goes out while the client would have refused — silenced, out of mana. The
+built-in Auto Ability used to do exactly this and sessions ended. It now presses
+the client's own ability key through the native module, which is not on the
+plugin surface; a plugin that wants an ability used should leave it to that one.
 
 ### The queue under `sendToServer`
 
@@ -442,10 +455,20 @@ of that is a kick.
 
 So `sendToServer` does not promise to send during the call. A packet the server
 counts against a rate limit — anything that moves or uses an item, enters a
-portal, teleports or speaks — is spaced against everything else the runtime is
-sending, and its `time` and `position` are rewritten at the instant it leaves.
-Everything else, including every acknowledgement and `ESCAPE`, is not paced at
-all and goes out immediately.
+portal, teleports or speaks — waits for the game client's next packet of its
+own and goes out straight behind it, spaced against everything else the
+runtime is sending, with its `time` and `position` rewritten at that instant.
+Behind the client's own packet is where the client itself would put its next
+action: it never sends one ahead of the shot acknowledgements it owes, and a
+packet sent from a `NEWTICK` handler the moment it is decided would. The client
+answers every tick, so the wait is a frame or two. Everything else, including
+every acknowledgement and `ESCAPE`, is not paced at all and goes out
+immediately.
+
+**An item request is dropped when the player's own hands get there first.** If
+the client's own `INVENTORYSWAP`, `INVDROP` or `USEITEM` goes to the server while
+yours is waiting, yours was aimed at an inventory that no longer exists, and you
+are told `Dropped`. Ask again from the next tick's picture.
 
 The third argument is how a plugin takes part in that rather than only
 submitting to it. All of it is optional:

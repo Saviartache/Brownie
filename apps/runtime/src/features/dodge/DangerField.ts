@@ -167,6 +167,8 @@ export class DangerField {
   /** What the last query found landing on it. See {@link worstDamage}. */
   #worstDamage = 0;
   #worstDebuff = 0;
+  /** The segment that left the last query least room, or -1. */
+  #closest = -1;
 
   /** How many slices of the horizon are indexed. */
   get slices(): number {
@@ -188,6 +190,24 @@ export class DangerField {
   /** And the worst condition any of them carries, from nought to one. */
   get worstDebuff(): number {
     return this.#worstDebuff;
+  }
+
+  /**
+   * How far the shot that came nearest in the last {@link clearanceOf} travels
+   * over that slice, along x and along y.
+   *
+   * **Which way the fire is going, rather than where it is.** The one thing
+   * the room cannot say is whether a step crosses a shot's line or runs along
+   * it, and running along it is the dodge that only postpones the hit. Both
+   * nought when nothing came near enough to be measured, and for a shot that is
+   * not moving — a beam that stands, or one that has stopped.
+   */
+  get closestTravelX(): number {
+    return this.#closestTravel(0);
+  }
+
+  get closestTravelY(): number {
+    return this.#closestTravel(1);
   }
 
   /** Drops the index. */
@@ -428,6 +448,7 @@ export class DangerField {
   clearanceOf(slice: number, fromX: number, fromY: number, toX: number, toY: number): number {
     this.#worstDamage = 0;
     this.#worstDebuff = 0;
+    this.#closest = -1;
     if (slice < 0 || slice >= this.#built) return NO_DANGER_TILES;
 
     const interest = this.#interest;
@@ -467,7 +488,10 @@ export class DangerField {
           if ((segment[at + 9] ?? 0) < lowX || (segment[at + 7] ?? 0) > highX) continue;
           if ((segment[at + 10] ?? 0) < lowY || (segment[at + 8] ?? 0) > highY) continue;
           const here = this.#measure(index, fromX, fromY, toX, toY);
-          if (here < room) room = here;
+          if (here < room) {
+            room = here;
+            this.#closest = index;
+          }
         }
       }
     }
@@ -475,10 +499,21 @@ export class DangerField {
     const largeBase = slice * MAX_LARGE_PER_SLICE;
     const large = this.#largeCount[slice] ?? 0;
     for (let i = 0; i < large; i += 1) {
-      const here = this.#measure(this.#large[largeBase + i] ?? 0, fromX, fromY, toX, toY);
-      if (here < room) room = here;
+      const index = this.#large[largeBase + i] ?? 0;
+      const here = this.#measure(index, fromX, fromY, toX, toY);
+      if (here < room) {
+        room = here;
+        this.#closest = index;
+      }
     }
     return room;
+  }
+
+  /** One axis of the nearest segment's travel. See {@link closestTravelX}. */
+  #closestTravel(axis: 0 | 1): number {
+    if (this.#closest < 0) return 0;
+    const at = this.#closest * SEGMENT_STRIDE;
+    return (this.#segment[at + 2 + axis] ?? 0) - (this.#segment[at + axis] ?? 0);
   }
 
   /**

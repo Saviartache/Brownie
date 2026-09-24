@@ -1,3 +1,4 @@
+import type { MutablePacket } from '@brownie/plugin-api';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import { createPacket, decodeFrame, encodePacket, type PacketRegistry } from '@brownie/protocol';
 import { describe, expect, it } from 'vitest';
@@ -22,6 +23,13 @@ function teleportFrame(objectId: number, playerName: string): Buffer {
   return encodePacket(registry, packet);
 }
 
+/** The client answering a server tick, which is what it does most often. */
+function moveFrame(tickId: number): Buffer {
+  const packet = createPacket(registry, 'MOVE');
+  packet.fields['tickId'] = tickId;
+  return encodePacket(registry, packet);
+}
+
 interface Harness {
   session: ProxySession;
   client: FakeTransport;
@@ -37,6 +45,7 @@ function harness(
   options: {
     stages?: readonly PipelineStage[];
     resolveTarget?: () => ServerTarget | undefined;
+    onClientPacketPassed?: (packet: MutablePacket) => void;
   } = {},
 ): Harness {
   const client = new FakeTransport();
@@ -59,6 +68,9 @@ function harness(
     resolveTarget: options.resolveTarget ?? ((): ServerTarget => TARGET),
     buildPipeline: () => new PacketPipeline(options.stages ?? [], () => undefined),
     log: testLogger(sink),
+    ...(options.onClientPacketPassed === undefined
+      ? {}
+      : { onClientPacketPassed: options.onClientPacketPassed }),
     onClosed: (s) => closed.push(s),
   });
 
@@ -226,6 +238,47 @@ describe('ProxySession', () => {
     expect(decodeFrame(registry, sent!).fields['playerName']).toBe('injected');
   });
 
+  it('tells its listener about a client packet only once it is on the wire', () => {
+    // Whatever the listener injects has to land *behind* the client's packet,
+    // where the client's own next one would: the client sends every packet
+    // after the shot acknowledgements it owes, so that is where it owes none.
+    const escape = createPacket(registry, 'ESCAPE');
+    // The listener needs the session and the session needs the listener, so the
+    // listener reads a reference filled in once both exist.
+    const holder: { session?: ProxySession } = {};
+    const h = harness({
+      onClientPacketPassed: () => {
+        holder.session?.injectToServer(escape);
+      },
+    });
+    holder.session = h.session;
+
+    h.client.receive(h.gameClient.encipher(teleportFrame(1, 'first')));
+    h.client.receive(h.gameClient.encipher(moveFrame(2)));
+
+    const onWire = h
+      .server()
+      .sent.map((frame) => decodeFrame(registry, h.gameServer.decipher(frame)).name);
+    expect(onWire).toEqual(['TELEPORT', 'ESCAPE', 'MOVE', 'ESCAPE']);
+  });
+
+  it('reports a client packet a stage withheld, and never a server one', () => {
+    // Withheld is still a point where the client owes nothing — the
+    // acknowledgements ahead of it went out — so the listener is told, and
+    // can see from the verdict that the server never heard it.
+    const passed: string[] = [];
+    const h = harness({
+      stages: [{ name: 'withhold', handle: (packet) => packet.drop() }],
+      onClientPacketPassed: (packet) => passed.push(`${packet.name}:${packet.verdict}`),
+    });
+
+    h.client.receive(h.gameClient.encipher(teleportFrame(1, 'held')));
+    h.server().receive(h.gameServer.encipher(frameOf(255, Buffer.from('server-side'))));
+
+    expect(passed).toEqual(['TELEPORT:drop']);
+    expect(h.server().sent).toHaveLength(0);
+  });
+
   it('refuses to open a link to a target nothing vouched for', () => {
     const h = harness({ resolveTarget: () => undefined });
 
@@ -315,26 +368,44 @@ describe('ProxySession', () => {
 
 /**
  * The queue as a plugin actually reaches it: through `sendToServer`, with a
- * real encoder, a real cipher and a real socket underneath.
+ * real encoder, a real cipher and a real socket underneath, and the session
+ * telling the queue when the client has spoken — wired the way `ProxyServer`
+ * wires it.
  *
  * The unit tests in `outbound.test.ts` cover the ordering rules. What is worth
- * proving here is the two things only the wiring can get wrong — that an
- * unpaced packet still leaves during the call, and that a held one is stamped
- * when it leaves rather than when it was asked for.
+ * proving here is what only the wiring can get wrong — that an unpaced packet
+ * still leaves during the call, that a held one lands on the wire behind the
+ * client's own packet and not ahead of it, and that it is stamped when it
+ * leaves rather than when it was asked for.
  */
 describe('SessionContext and the outbound queue', () => {
   function connected(): {
     h: ReturnType<typeof harness>;
     world: WorldState;
     view: SessionContext;
+    /** Everything on the server link after the packet that opened it, in order. */
+    wire: () => { name: string; fields: Readonly<Record<string, unknown>> }[];
+    /** What the queue put there, without the client's own traffic. */
     toServer: () => { name: string; fields: Readonly<Record<string, unknown>> }[];
+    /** The client answers a server tick. */
+    clientSpeaks: () => void;
   } {
-    const h = harness();
+    // The same knot `ProxyServer` ties: the session exists before the view that
+    // owns the queue, so the listener reads a reference filled in below.
+    const holder: { passed?: (packet: MutablePacket) => void } = {};
+    const h = harness({
+      onClientPacketPassed: (packet) => {
+        holder.passed?.(packet);
+      },
+    });
     // The first client packet is what opens the server link.
     h.client.receive(h.gameClient.encipher(teleportFrame(1, 'x')));
     const world = new WorldState();
     world.markConnected();
     const view = new SessionContext(h.session, world, registry, testLogger(h.sink));
+    holder.passed = (packet) => {
+      view.outbound.clientPacketPassed(packet);
+    };
 
     // **Each frame is deciphered exactly once.** RC4 is a keystream, not a
     // function of the bytes in front of it, so reading the same frame twice
@@ -343,7 +414,7 @@ describe('SessionContext and the outbound queue', () => {
     // connection when one packet goes missing.
     let read = 0;
     const decoded: { name: string; fields: Readonly<Record<string, unknown>> }[] = [];
-    const toServer = (): typeof decoded => {
+    const wire = (): typeof decoded => {
       const frames = h.server().sent;
       for (; read < frames.length; read++) {
         const frame = frames[read];
@@ -352,20 +423,36 @@ describe('SessionContext and the outbound queue', () => {
       }
       // The session's own forwarding of the packet that opened the link is not
       // what any of this is about.
-      return decoded.filter((packet) => packet.name !== 'TELEPORT');
+      return decoded.slice(1);
     };
-    return { h, world, view, toServer };
+    const toServer = (): typeof decoded => wire().filter((packet) => packet.name !== 'MOVE');
+    let tick = 0;
+    const clientSpeaks = (): void => {
+      h.client.receive(h.gameClient.encipher(moveFrame(++tick)));
+    };
+    return { h, world, view, wire, toServer, clientSpeaks };
   }
 
   it('sends an escape during the call, whatever else is waiting', () => {
     const c = connected();
-    // Two item moves first: the lane they share is now busy for a full second.
+    // Two item moves first: they wait for the client, and then for each other.
     c.view.sendToServer('INVENTORYSWAP', swapFields(4));
     c.view.sendToServer('INVENTORYSWAP', swapFields(5));
     // An escape is somebody's life and is not in the table at all.
     c.view.sendToServer('ESCAPE', {});
+    expect(c.toServer().map((packet) => packet.name)).toEqual(['ESCAPE']);
 
-    expect(c.toServer().map((packet) => packet.name)).toEqual(['INVENTORYSWAP', 'ESCAPE']);
+    c.clientSpeaks();
+    expect(c.toServer().map((packet) => packet.name)).toEqual(['ESCAPE', 'INVENTORYSWAP']);
+  });
+
+  it('puts a held packet on the wire right behind the client, never ahead of it', () => {
+    const c = connected();
+    c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    expect(c.wire()).toEqual([]);
+
+    c.clientSpeaks();
+    expect(c.wire().map((packet) => packet.name)).toEqual(['MOVE', 'INVENTORYSWAP']);
   });
 
   it('holds the second item move rather than putting both on the wire', () => {
@@ -375,9 +462,10 @@ describe('SessionContext and the outbound queue', () => {
       time: 0,
       slotObject: { objectId: 1, slotId: 4, objectType: 2594 },
       itemUsePos: { x: 0, y: 0 },
-      useType: 1,
+      useType: 0,
       unknownInt: 0,
     });
+    c.clientSpeaks();
 
     // This is the collision, on the wire, with the real encoder: one packet,
     // not two inside a millisecond.
@@ -388,11 +476,13 @@ describe('SessionContext and the outbound queue', () => {
     const c = connected();
     c.view.sendToServer('INVENTORYSWAP', swapFields(4));
     c.view.sendToServer('INVENTORYSWAP', swapFields(5));
+    c.clientSpeaks();
 
     // The client's clock, as the server has been hearing it — and moved on by
     // more than the lane's spacing while the second move waited.
     c.world.calibrateClientClock(500_000);
-    await waitFor(() => c.toServer().length === 2);
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    c.clientSpeaks();
 
     const [first, second] = c.toServer();
     // The first left before the calibration, on the only clock there was: the
@@ -407,10 +497,12 @@ describe('SessionContext and the outbound queue', () => {
   it('stops sending once the session has gone', async () => {
     const c = connected();
     c.view.sendToServer('INVENTORYSWAP', swapFields(4));
+    c.clientSpeaks();
     c.view.sendToServer('INVENTORYSWAP', swapFields(5));
     c.view.outbound.dispose();
 
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    c.clientSpeaks();
     expect(c.toServer()).toHaveLength(1);
   });
 });
@@ -423,13 +515,4 @@ function swapFields(slotId: number): Record<string, unknown> {
     slotObject1: { objectId: 100, slotId: 0, objectType: 2594 },
     slotObject2: { objectId: 1, slotId, objectType: -1 },
   };
-}
-
-/** Polls until a condition holds, or gives up — the queue runs on real timers. */
-async function waitFor(done: () => boolean, timeoutMs = 3000): Promise<void> {
-  const until = Date.now() + timeoutMs;
-  while (!done()) {
-    if (Date.now() > until) throw new Error('timed out waiting for the queue');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
 }

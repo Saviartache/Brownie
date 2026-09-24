@@ -64,6 +64,10 @@ export interface DodgeControls {
     readonly avoid: SettingHandle<boolean>;
     readonly clearanceTiles: SettingHandle<number>;
   };
+  /**
+   * Whether area attacks are dodged at all — the telegraphed blasts and the
+   * discs round enemies that blast themselves. Off, only projectiles are.
+   */
   readonly avoidBlasts: SettingHandle<boolean>;
   readonly spacing: {
     readonly mindMonsters: SettingHandle<boolean>;
@@ -417,15 +421,21 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     step: 0.05,
     visibleWhen: { key: 'avoidDamagingGround', equals: [true] },
   });
-  // **Thrown bombs, novas and telegraphed circles.** A different shape of danger
-  // from a bullet — a disc that goes off at a moment rather than a point that
-  // travels — and it is read from the telegraph the game sends before it lands,
-  // because the packet that reports the blast itself arrives after the damage.
-  // Its own switch because it rests on a packet body worked out rather than
-  // stated — a mask byte and nine conditional fields, see `docs/protocol.md` —
-  // so there is a way to turn it off if a patch moves it.
+  // **Every area attack, and off means projectiles only.** Two kinds of it: the
+  // thrown bombs, novas and circles the game telegraphs before they land — a
+  // disc that goes off at a moment rather than a point that travels, read from
+  // the telegraph because the packet reporting the blast arrives after the
+  // damage — and the discs round enemies learned to blast themselves, which
+  // have no telegraph at all and are only ever kept out of. See `DodgeScene`.
+  //
+  // One switch for both because the question is one: whether this dodge minds
+  // area damage. Somebody who would rather tank or outheal it wants the planner
+  // left to the bullets, and a disc it still stepped round would be exactly the
+  // interference they switched off. It is also the way out if a patch moves the
+  // telegraph, which rests on a packet body worked out rather than stated — a
+  // mask byte and nine conditional fields, see `docs/protocol.md`.
   const avoidBlasts = settings.boolean('avoidBlasts', {
-    label: 'Dodge thrown bombs and area effects',
+    label: 'Dodge area attacks (bombs, novas, self-blasts)',
     group: 'Safety',
     advanced: true,
     default: true,

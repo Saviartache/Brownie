@@ -67,8 +67,11 @@ export class DodgeScene {
    * **Collected whatever the spacing switch says**, because a self blast is not
    * a preference: there is no keep-away setting whose value could stand in for
    * "this ground takes a fifth of your health the instant you are noticed on
-   * it". It follows the hazard switch instead, which is the one that asks the
-   * question it answers. See `SelfBlastKeepouts`.
+   * it". It follows the switch for area attacks instead, because that is what
+   * it is — an area attack with no telegraph — and somebody who has told the
+   * dodge to mind projectiles only has told it to walk through this too. The
+   * lava switch was its home until that switch stopped being the only way to
+   * say so. See `SelfBlastKeepouts`.
    */
   readonly #keepOuts = new SelfBlastKeepouts();
   /**
@@ -187,13 +190,15 @@ export class DodgeScene {
     };
     this.world = {
       canStand: (x, y) => !this.#wallsMatter || this.#ground.canStand(x, y, this.#clearance),
+      // One question — does standing here cost health — asked of two kinds of
+      // ground under two switches: the map's own under the hazard switch, and
+      // the discs round a self-blaster under the one for area attacks, which
+      // leaves them empty while it is off.
       hazardGapTiles: (x, y, aheadMs) =>
-        this.#damagingMatters
-          ? Math.min(
-              this.#ground.hazardGap(x, y, this.#hazardClearance),
-              this.#keepOuts.gapAt(x, y, aheadMs),
-            )
-          : Infinity,
+        Math.min(
+          this.#damagingMatters ? this.#ground.hazardGap(x, y, this.#hazardClearance) : Infinity,
+          this.#keepOuts.gapAt(x, y, aheadMs),
+        ),
       crowdingAt: (x, y, aheadMs) => this.#bodies.crowdingAt(x, y, this.#keepAwayTiles, aheadMs),
       contactAt: (x, y, aheadMs) => this.#bodies.contactAt(x, y, aheadMs),
     };
@@ -326,12 +331,12 @@ export class DodgeScene {
       );
     }
 
-    // **The keep-out discs follow the hazard switch, not the spacing one.**
-    // A self blast is not a matter of taste about distance — there is no
+    // **The keep-out discs follow the switch for area attacks, not the spacing
+    // one.** A self blast is not a matter of taste about distance — there is no
     // keep-away setting whose value could stand in for the radius the enemy
-    // itself was measured at — and the question they answer ("does this ground
-    // cost health?") is the hazard switch's own.
-    if (this.#damagingMatters) {
+    // itself was measured at — and it is an area attack like any bomb, so it is
+    // minded exactly when those are.
+    if (controls.avoidBlasts.get()) {
       this.#map = map;
       const reach = (planning.leadMs + planning.horizonMs) / 1000;
       this.#keepOuts.collect(
@@ -347,7 +352,8 @@ export class DodgeScene {
   }
 
   /**
-   * The area effects still worth walking out of.
+   * The area effects still worth walking out of — none at all while area
+   * attacks are switched off, which leaves the dodge to the projectiles.
    *
    * A generator rather than an array: the caller iterates once, and a fight with
    * a boss throwing bombs would otherwise build a fresh array fifty times a

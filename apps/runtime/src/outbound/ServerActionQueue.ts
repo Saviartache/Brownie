@@ -1,6 +1,7 @@
 import {
   SendOutcome,
   SendPriority,
+  Verdict,
   type MutablePacket,
   type SendOptions,
 } from '@brownie/plugin-api';
@@ -26,22 +27,34 @@ import { ActionLane, laneOf, type ActionLaneEntry, type RefreshedField } from '.
  *
  * What it does, in order of how much it matters:
  *
- * 1. **Spaces packets within a lane**, at the floor `actionLanes.ts` records —
- *    including around the *player's* own packets, which pass through the
- *    pipeline and are counted here even though we did not send them. Two
- *    plugins can no longer collide, and neither can a plugin and the player.
- * 2. **Waits for one packet to settle before sending the next in its lane**,
+ * 1. **Puts a paced packet on the wire only straight after one of the
+ *    client's own.** The game client never sends anything ahead of the shot
+ *    acknowledgements it owes: every send it makes first flushes a
+ *    `SHOOTACKCOUNTER` for the shots it has taken in since its last one
+ *    (`SocketManager.FlushAckMessages` in the game's own code). A packet
+ *    injected at any other moment — from a timer, or from a server tick that
+ *    has not reached the client yet — can overtake acknowledgements the client
+ *    already owes, and the server then hears an action stamped later than
+ *    acknowledgements that arrive after it: an order the real client cannot
+ *    produce. Right after the client has spoken it owes nothing, so that is
+ *    the only moment anything here goes out. See {@link clientPacketPassed}.
+ * 2. **Spaces packets within a lane**, at the floor `actionLanes.ts` records —
+ *    including around the *player's* own packets, which are counted here even
+ *    though we did not send them. Two plugins can no longer collide, and
+ *    neither can a plugin and the player.
+ * 3. **Waits for one packet to settle before sending the next in its lane**,
  *    where the caller said how to tell. A second item move aimed with a
  *    picture of the inventory from before the first one is the other half of
  *    what the server refuses.
- * 3. **Backs off when the server says `FAILURE`.** That is the only
+ * 4. **Backs off when the server says `FAILURE`.** That is the only
  *    unambiguous complaint the protocol has, and it is what precedes a kick.
  *    Each one holds every lane, and consecutive ones hold them longer, up to a
  *    cap — so the shape that ends sessions, a plugin retrying into a server
  *    that is already unhappy, cannot happen.
- * 4. **Drops what is no longer worth sending** rather than sending it late: a
- *    request past its deadline, a request a newer one replaced, and everything
- *    at all once the map changes.
+ * 5. **Drops what is no longer worth sending** rather than sending it late: a
+ *    request past its deadline, a request a newer one replaced, an item
+ *    request aimed at an inventory the player's own hands have since changed,
+ *    and everything at all once the map changes.
  *
  * What it deliberately does *not* do is delay anything the table does not
  * name. An acknowledgement, an `ESCAPE`, a `MOVE` — those go out the moment
@@ -50,6 +63,16 @@ import { ActionLane, laneOf, type ActionLaneEntry, type RefreshedField } from '.
 
 /** How often an unconfirmed packet is asked again whether it landed. */
 const CONFIRM_POLL_MS = 60;
+
+/**
+ * The one client packet that never ends what the client is saying.
+ *
+ * The client writes these immediately ahead of the message whose sending
+ * flushed them, so after one of them that message is still to come — and a
+ * packet of ours slipped in between would sit ahead of a message the
+ * acknowledgements are meant to precede, stamped later than they are.
+ */
+const SHOT_ACKNOWLEDGEMENT = 'SHOOTACKCOUNTER';
 
 /** Far enough in the past that the first packet of a session never waits. */
 const NEVER = Number.NEGATIVE_INFINITY;
@@ -168,6 +191,13 @@ export class ServerActionQueue {
   #failureStreak = 0;
   #lastFailureAtMs = NEVER;
   #closed = false;
+  /**
+   * Whether a paced packet may go out right now.
+   *
+   * True only for the length of {@link clientPacketPassed}: straight after the
+   * client has spoken is the one point in its stream where it owes nothing.
+   */
+  #mayDispatch = false;
 
   constructor(options: ServerActionQueueOptions) {
     this.#send = options.send;
@@ -203,12 +233,13 @@ export class ServerActionQueue {
   }
 
   /**
-   * Sends a packet, or queues it if its lane is busy.
+   * Sends a packet that is not paced, or queues one that is.
    *
-   * @returns true when it went out during this call — either because its lane
-   *   was free or because it is not a paced packet at all. False means it is
-   *   waiting, and {@link SendOptions.onOutcome} is how the caller learns what
-   *   became of it.
+   * @returns true when it went out during this call. That is every packet the
+   *   lane table does not name, and a paced one only when it is asked for
+   *   while the queue is already following one of the client's own packets —
+   *   see {@link clientPacketPassed}. False means it is waiting, and
+   *   {@link SendOptions.onOutcome} is how the caller learns what became of it.
    */
   submit(packetName: string, fields: Record<string, unknown>, options: SendOptions = {}): boolean {
     if (this.#closed) {
@@ -255,38 +286,21 @@ export class ServerActionQueue {
   }
 
   /**
-   * Shows the queue a packet that went past.
-   *
-   * Two things are read off the stream, and both matter more than they look.
+   * Shows the queue a packet the server sent, before any plugin reacts to it.
    *
    * **A `FAILURE` is the server's only unambiguous complaint**, and it arrives
    * shortly after whatever caused it — so it is charged to what we last sent,
    * and holds every lane while it is worked out.
    *
-   * **A client packet in a paced lane is the player using their own hands**,
-   * and the lane's floor applies to them exactly as it applies to us. Our own
-   * injected packets never come back through here — they join the stream below
-   * the pipeline — so nothing is counted twice. One the *plugins* go on to drop
-   * is counted anyway, because this runs ahead of them: over-generous by a lane
-   * slot, in the direction that was never the problem.
+   * Nothing is sent from here. A server packet is exactly the moment the
+   * client has not yet caught up with — see {@link clientPacketPassed}.
    *
    * Takes the packet rather than a description of it. This runs for every
-   * packet of a session in both directions, and building a small object to
-   * describe each one is an allocation per packet on the busiest path there is.
+   * server packet of a session, the busiest path there is, and building a
+   * small object to describe each one would be an allocation per packet.
    */
-  observe(packet: MutablePacket, fromClient: boolean): void {
+  observe(packet: MutablePacket): void {
     if (this.#closed) return;
-
-    if (fromClient) {
-      const entry = laneOf(packet.name);
-      if (entry !== undefined) {
-        const lane = this.#lane(entry.lane);
-        lane.lastSentAtMs = this.#now();
-        lane.lastSpacingMs = entry.spacingMs;
-      }
-      this.pump();
-      return;
-    }
 
     if (packet.name === 'FAILURE') {
       // The fields are read only here: an opaque `FAILURE` has none to give,
@@ -305,12 +319,45 @@ export class ServerActionQueue {
   }
 
   /**
+   * One of the client's own packets has just been dealt with — forwarded to
+   * the server, or withheld by a stage — and nothing has been read from either
+   * side since.
+   *
+   * **The only moment a paced packet goes out.** Every packet the game client
+   * sends is preceded by the shot acknowledgements it owes, so right after one
+   * of them it owes none: a packet of ours placed here sits where the client's
+   * own next action would, behind every acknowledgement for a shot the client
+   * had seen, and stamped no later than anything the client says next. Placed
+   * anywhere else it can overtake an acknowledgement the client already owes.
+   * The client answers every server tick with a `MOVE`, so the wait for this
+   * is at most a tick and usually far less.
+   *
+   * A packet a stage withheld is still such a moment — the acknowledgements
+   * ahead of it went out — but the server never heard it, so it neither counts
+   * against a lane nor makes anything of ours stale.
+   */
+  clientPacketPassed(packet: MutablePacket): void {
+    if (this.#closed) return;
+    if (packet.verdict !== Verdict.Drop) this.#heardFromClient(packet.name);
+    if (packet.name === SHOT_ACKNOWLEDGEMENT) return;
+
+    this.#mayDispatch = true;
+    try {
+      this.pump();
+    } finally {
+      this.#mayDispatch = false;
+    }
+  }
+
+  /**
    * Sends whatever is due, resolves whatever has settled, and arranges to be
    * called again.
    *
    * Idempotent and cheap when there is nothing to do, which is most of the
    * time: it runs on every packet as well as on its own timer, and waking early
-   * is not a problem because it simply finds nothing due.
+   * is not a problem because it simply finds nothing due. Only a pump inside
+   * {@link clientPacketPassed} sends anything paced; every other one settles,
+   * expires and waits.
    */
   pump(): void {
     if (this.#closed) return;
@@ -323,6 +370,7 @@ export class ServerActionQueue {
     for (const lane of this.#lanes.values()) {
       this.#resolveInFlight(lane, nowMs);
       this.#dropExpired(lane, nowMs);
+      if (!this.#mayDispatch) continue;
       if (lane.inFlight !== undefined) continue;
       if (nowMs < this.#holdUntilMs) continue;
 
@@ -380,6 +428,37 @@ export class ServerActionQueue {
     // than a non-null assertion that would hide a table gone stale.
     if (lane === undefined) throw new Error(`no such lane: ${name}`);
     return lane;
+  }
+
+  /**
+   * Counts a packet the player's own client put on the wire.
+   *
+   * **A lane's floor applies to the player exactly as it applies to us** — a
+   * plugin racing the player's hands is the same collision as two plugins
+   * racing. Our own packets never come through here, so nothing is counted
+   * twice.
+   *
+   * **And an item packet of theirs changes the inventory every item request
+   * still waiting here was aimed with.** A swap into the slot they have just
+   * filled, or a drink from the slot they have just emptied, names contents
+   * the server no longer has — and the reference implementation found that the
+   * server hangs up over a swap whose slot contents disagree with its own
+   * rather than ignoring it. So those are dropped, and each plugin asks again
+   * from the next tick's picture.
+   */
+  #heardFromClient(packetName: string): void {
+    const entry = laneOf(packetName);
+    if (entry === undefined) return;
+    const lane = this.#lane(entry.lane);
+    lane.lastSentAtMs = this.#now();
+    lane.lastSpacingMs = entry.spacingMs;
+
+    if (entry.lane !== ActionLane.Item || lane.queued.length === 0) return;
+    const stale = lane.queued.splice(0);
+    for (const action of stale) this.#settle(action, SendOutcome.Dropped);
+    this.#log.debug(
+      `dropped ${String(stale.length)} queued item packets: the player moved or used an item`,
+    );
   }
 
   /** Replaces an older request that named the same intent. */
@@ -558,19 +637,12 @@ export class ServerActionQueue {
         // a packet: the inventory filling is what proves a move landed, and no
         // single packet announces it.
         soonest(Math.min(lane.inFlightDeadlineMs, nowMs + CONFIRM_POLL_MS));
-        continue;
       }
-      const next = this.#next(lane);
-      if (next === undefined) continue;
-      // **The later of the two waits, not the earlier.** A lane whose spacing
-      // has already elapsed while the queue is held is not due at the spacing —
-      // waking then would find the hold still on, send nothing, and ask to be
-      // woken again at the same instant, which is a spin rather than a wait.
-      const spacing = Math.max(lane.lastSpacingMs, next.entry.spacingMs);
-      soonest(Math.max(lane.lastSentAtMs + spacing, this.#holdUntilMs));
-      // The deadline is a separate reason to wake: it can fall before either of
-      // the above, and what happens then is the request being dropped.
-      soonest(next.expiresAtMs);
+      // **Never to send.** A waiting packet goes out behind the client's next
+      // one of its own and at no other time, so the timer's only business
+      // with it is dropping it at its deadline — and telling its caller so
+      // while the session is quiet enough that nothing else would.
+      for (const action of lane.queued) soonest(action.expiresAtMs);
     }
 
     if (wakeAtMs === Number.POSITIVE_INFINITY) {

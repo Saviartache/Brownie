@@ -583,6 +583,8 @@ only — no encoding to apply, and nothing to get wrong between two languages.
 | `weapon` | name, objectType, speed·100 (tiles/s), lifetimeMs, range·100 | the equipped item, as `objects.xml` describes it — sent when it changes, and shown so the range the dodge planner keeps the player inside can be checked against the item it was read for |
 | `move`  | x·100, y·100, speed·100, holdMs, fromPlayer, once | walk towards here, no faster than this, for this long unless replaced. `fromPlayer` is `1` when the two numbers are an offset from wherever the character is on the frame the module acts, and `0` (or absent) when they are a place on the map. `once` is `1` for a target the first frame that steps towards it spends, and `0` (or absent) for one that stands until it expires |
 | `aim`   | x·100, y·100, holdMs, objectId, targetX·100, targetY·100, vx·100, vy·100, turn·1000, shotSpeed·100, maxFlightMs, lead‰, trimMs | point the shots the player fires at here, for this long unless replaced. `objectId` and the two positions after it name the enemy the point leads and where the *runtime* had that enemy — so the module can look it up in the game's own tables. The six after those say how the enemy moves (tiles a second, and radians a second for the turn), how fast the shot travels, how long it has to hit something with, and how much of the lead to apply — everything the module needs to solve the meeting again from the game's own positions. Each group is all or none: a shift needs somewhere to be measured from, and five sixths of a solution is not one. Absent is an aim used exactly as sent. `trimMs` rides after the group on its own, because a record that stops before it wants no trim — which is a perfectly good aim, unlike a record that stops before the velocity |
+| `ability-cast` | x·100, y·100, holdMs                        | press the ability key once, as the key would with the cursor on this place on the map. `holdMs` is how long the press may wait for a frame that can find the player; one not made by then is dropped, never made late. Two arriving between frames are one press |
+| `ability-aim`  | x·100, y·100, holdMs                        | hand the presses the *player* makes this place instead of the cursor, for this long unless replaced — the key going down only |
 | `text`  | red, green, blue, message                         | show this over the player, in the game's own floating text, replacing whatever was waiting            |
 | `dodge-begin` / `dodge-end` | —                     | brackets the dodge planner's picture — paths and circles alike — which is committed whole             |
 | `trails` | one field per shot: `life‰,x·100,y·100,…` (pairs) | every shot's remaining path, from where it is now to where it stops existing                         |
@@ -616,11 +618,37 @@ taking a string and the one taking the `int` that every damage number goes
 through — and keeps the style argument of the last call the game made. So the
 runtime says what to write and in what colour, and the game says the rest.
 
-`move` and `aim` are the only instructions in the protocol, and the division
-they embody is the architecture's: the runtime decides *what to do about the
-world*, because it holds the world model and the planner, and the module applies
-that inside the game — on the game's own thread, because touching managed code
-from any other is not a mistake a module makes twice.
+`move`, `aim` and the two ability records are the only instructions in the
+protocol, and the division they embody is the architecture's: the runtime
+decides *what to do about the world*, because it holds the world model and the
+planner, and the module applies that inside the game — on the game's own
+thread, because touching managed code from any other is not a mistake a module
+makes twice.
+
+**The ability records exist because a packet could not do their job.** A
+`USEITEM` the runtime writes is a use the client never made: the client charges
+itself no cooldown or mana for it, fires none of the shots an item with
+projectiles sends behind its use, and would have refused it outright while
+silenced — so the server sees a second use inside the first one's cooldown, a
+quiver's use with no arrows, a use nobody could have made. So both go through
+the method the ability key itself calls, on the local player, with the cursor
+and a press phase. `ability-cast` **calls** it, as the key going down with the
+cursor at the record's place; `ability-aim` **intercepts** it, and hands the
+player's own key-down the record's place in place of the cursor. Either way the
+client makes every check and sends every packet exactly as it would for the
+player's press, which is the whole point. The key coming up is never touched:
+only an ability held down acts on it, and the runtime never casts or points one
+of those.
+
+A cast is never answered on this link. The runtime hears it in the client's own
+`USEITEM` coming through the proxy — and hears nothing when the client refused
+it, which is how it knows to ask again later. The cast is spent by the frame
+that makes it, whatever the client answers: pressing again on the next frame
+would be arguing with a refusal at the frame rate. The module's own press is
+not pointed by a standing `ability-aim` — the two can name different places, an
+attack fired at a boss while the player's presses go to the minion in front of
+it. The detour goes in only once the first `ability-aim` arrives; a cast needs
+none.
 
 **Where a position enters that decision, it is the module's to supply.** The
 runtime hears where things are five times a second and the game moves them every

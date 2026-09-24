@@ -227,7 +227,10 @@ describe('the auto-drink plugin', () => {
       time: 987_000,
       slotObject: { objectId: 7, slotId: 4, objectType: HEALTH_POTION },
       itemUsePos: { x: 4.5, y: 6.5 },
-      useType: 1,
+      // `Default`, which is what the game client's own consumable path sends.
+      // `StartUse` is the ability key's, and a potion sent with it is a use no
+      // client ever makes.
+      useType: 0,
       unknownInt: 0,
     });
   });

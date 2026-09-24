@@ -83,6 +83,15 @@ AimTarget AimTargetFrom(const overlay::AimCommand& aim, std::uint64_t now_ms) no
     return target;
 }
 
+AbilityCast AbilityCastFrom(const overlay::AbilityCommand& cast, std::uint64_t now_ms) noexcept {
+    AbilityCast target;
+    target.wanted = true;
+    target.x = static_cast<float>(cast.x_hundredths) / 100.0F;
+    target.y = static_cast<float>(cast.y_hundredths) / 100.0F;
+    target.expires_at_ms = now_ms + HeldFor(cast.hold_ms);
+    return target;
+}
+
 float StepBudget(std::uint64_t elapsed_ms, float speed) noexcept {
     const float seconds =
         static_cast<float>(elapsed_ms > kMaxFrameMs ? kMaxFrameMs : elapsed_ms) / 1000.0F;
@@ -147,10 +156,20 @@ void PlayerControl::AimAt(const AimTarget& target) {
     aim_wanted_ = true;
 }
 
+void PlayerControl::AimAbility(const overlay::AbilityCommand& aim, std::uint64_t now_ms) noexcept {
+    ability_.Aim(static_cast<float>(aim.x_hundredths) / 100.0F,
+                 static_cast<float>(aim.y_hundredths) / 100.0F, now_ms + HeldFor(aim.hold_ms));
+    // The runtime only sends these while the player wants their presses
+    // pointed, so this is the module's whole answer to "does anybody want the
+    // ability detoured".
+    ability_aim_wanted_ = true;
+}
+
 void PlayerControl::Apply(std::uint64_t now_ms) {
     // Refreshed by version: the common frame copies nothing at all.
     move_target_.Refresh(frame_target_, frame_target_version_);
     aim_target_.Refresh(frame_aim_, frame_aim_version_);
+    ability_cast_.Refresh(frame_cast_, frame_cast_version_);
 
     // Nothing is being walked at until this frame says so. Cleared first so
     // every path out of here leaves an honest answer behind it.
@@ -174,12 +193,17 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     const bool walking = frame_target_.wanted && now_ms < frame_target_.expires_at_ms &&
                          previous != 0 && now_ms > previous;
     const bool aiming = frame_aim_.wanted && now_ms < frame_aim_.expires_at_ms && aim_.installed();
-    if (!walking && !aiming) {
+    const bool casting =
+        frame_cast_.wanted && now_ms < frame_cast_.expires_at_ms && ability_.bound();
+    if (!aiming) {
         // Whatever was aimed at has expired or been withdrawn. Said out loud
-        // rather than left to the hook's own deadline: the player gets their
-        // own aim back on the next shot, not on the next frame that happens to
-        // check.
+        // rather than left to the hook's own deadline — and on every frame that
+        // is not aiming, including one that only walks or casts: the player
+        // gets their own aim back on the next shot, not on the next frame that
+        // happens to have nothing else to do.
         aim_.Clear();
+    }
+    if (!walking && !aiming && !casting) {
         // Nothing was read this frame, so there is no position to measure the
         // next one against — a walk that starts after a quiet stretch would
         // otherwise be charged for every frame of it.
@@ -412,6 +436,17 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
         } else {
             aim_.Aim(player.object, std::atan2(dy, dx), frame_aim_.expires_at_ms);
         }
+    }
+
+    if (casting) {
+        // **Spent before the call, whatever the game answers.** A press the
+        // client turned down — silenced, on cooldown, out of mana — is its
+        // decision about this moment, and pressing again on the next frame
+        // would be arguing with it sixty times a second. The runtime hears
+        // whether it went through from the client's own `USEITEM`, and asks
+        // again on its own clock if it did not.
+        frame_cast_.wanted = false;
+        (void)ability_.Cast(player.object, frame_cast_.x, frame_cast_.y);
     }
 }
 

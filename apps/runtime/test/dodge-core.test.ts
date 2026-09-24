@@ -18,7 +18,11 @@ import type { Position } from '@brownie/plugin-api';
 
 import { AttackPatterns, PatternKind } from '../src/features/dodge/AttackPatterns.js';
 import { DangerField, NO_DANGER_TILES } from '../src/features/dodge/DangerField.js';
-import { DodgePlanner, type DodgeSettings } from '../src/features/dodge/DodgePlanner.js';
+import {
+  DodgePlanner,
+  type DodgePlan,
+  type DodgeSettings,
+} from '../src/features/dodge/DodgePlanner.js';
 import { DODGE_PRESETS } from '../src/features/dodge/dodgePresets.js';
 import { walkableBetween, type DodgeGround } from '../src/features/dodge/DodgeGround.js';
 import { PocketLock } from '../src/features/dodge/PocketLock.js';
@@ -111,6 +115,7 @@ const WEIGHTS: TrajectoryWeights = {
   dpsRadiusTiles: 0.2,
   dpsPerTick: 0.6,
   travelPerTile: 0.4,
+  withFirePerTile: 3,
   turnPerReversal: 0.18,
   safeClearanceTiles: 0.25,
   riskPerTile: 10,
@@ -141,6 +146,8 @@ function planFor(overrides: Partial<TrajectoryRequest> = {}): TrajectoryRequest 
     weights: WEIGHTS,
     holdDirX: 0,
     holdDirY: 0,
+    threatX: 0,
+    threatY: 0,
     ground: OPEN_GROUND,
     danger: empty.danger,
     blasts: undefined,
@@ -312,6 +319,27 @@ describe('the space-time danger field', () => {
     expect(danger.worstDamage).toBe(0);
   });
 
+  // **Which way the fire is going, and not only how near it came**: the one
+  // thing room cannot say is whether a step crosses a shot's line or runs
+  // along it.
+  it('says which way the shot that came nearest is going', () => {
+    const { danger } = fieldOf([
+      // Up the y axis at ten tiles a second: a tile a slice, straight at them.
+      straightShot({ x: 10, y: 8 }, Math.PI / 2, 10, 0, 900),
+      // Along a row two tiles off, and further than anything worth measuring.
+      straightShot({ x: 7, y: 12 }, 0, 10, 0, 900),
+    ]);
+
+    expect(danger.clearanceOf(1, 10, 10, 10, 10)).toBeLessThan(0);
+    expect(danger.closestTravelX).toBeCloseTo(0, 6);
+    expect(danger.closestTravelY).toBeCloseTo(1, 6);
+
+    // And nothing, rather than the last answer, once nothing is near.
+    expect(danger.clearanceOf(1, 30, 30, 30, 30)).toBe(NO_DANGER_TILES);
+    expect(danger.closestTravelX).toBe(0);
+    expect(danger.closestTravelY).toBe(0);
+  });
+
   it('does not sweep a step a shot no longer exists for', () => {
     // Gone by 250 ms, and its straight line would run over the player at 500.
     const spent = straightShot({ x: 10, y: 5 }, Math.PI / 2, 10, 0, 250);
@@ -401,6 +429,7 @@ describe('what a future is worth', () => {
       anchorTiles: 0,
       fromAnchorTiles: 0,
       travelTiles: 0,
+      withFireTiles: 0,
       clearanceTiles: NO_DANGER_TILES,
       hitDamage: 0,
       hitDebuff: 0,
@@ -443,6 +472,15 @@ describe('what a future is worth', () => {
     expect(stepCost(WEIGHTS, step({ travelTiles: 0.6 }))).toBeGreaterThan(
       stepCost(WEIGHTS, step()),
     );
+  });
+
+  // The anchor asks only how far, so without this a step across a shot's line
+  // and a step along it are the same price — and along it only postpones the
+  // hit.
+  it('charges for walking the way the fire is going, over and above the walking', () => {
+    const across = stepCost(WEIGHTS, step({ travelTiles: 0.6 }));
+    const along = stepCost(WEIGHTS, step({ travelTiles: 0.6, withFireTiles: 0.6 }));
+    expect(along - across).toBeCloseTo(WEIGHTS.withFirePerTile * 0.6, 9);
   });
 
   it('puts a hit beyond anything the other terms can buy, and prefers a late one', () => {
@@ -758,10 +796,47 @@ describe('the optimizer', () => {
 
     expect(answer.stepTiles).toBeGreaterThan(0);
     expect(answer.impactMs).toBe(Infinity);
-    // Away along the line, because a walk cannot clear a shot this close
-    // sideways in the time left — the honest walk is the one that outruns it.
-    expect(Math.abs(answer.dirY)).toBeGreaterThan(Math.abs(answer.dirX));
-    expect(answer.dirY).toBeGreaterThan(0);
+    // **Across the line, not along it.** Running with the shot only meets it
+    // again a few tiles further on; a step sideways, and then standing there,
+    // is the whole of getting out of its way — and it is what a sidestep costs
+    // once the optimizer can see that it stops.
+    expect(Math.abs(answer.dirX)).toBeGreaterThan(Math.abs(answer.dirY));
+  });
+
+  // **A sidestep stops.** Rolled on to the horizon, a step across a shot and a
+  // step along it cost the same — the anchor asks only how far — and which of
+  // them won was noise.
+  it('plans a sidestep that stands once the shot has nothing left for the place', () => {
+    const { danger } = fieldOf([straightShot({ x: 7, y: 10 }, 0, 10, 0, 900)]);
+    const answer = new TrajectoryPlanner().run(planFor({ danger }));
+
+    expect(answer.stepTiles).toBeGreaterThan(0);
+    expect(answer.impactMs).toBe(Infinity);
+    // It ends the horizon a step or so off its ground, where a run for it would
+    // end most of five tiles away.
+    expect(answer.driftTiles).toBeLessThan(1.5);
+  });
+
+  it('steps square to the fire, even where the ring has no spoke for it', () => {
+    // Twenty degrees off the axis, so neither way square to it is one of the
+    // twelve headings — and two tiles off, so the step has to happen now.
+    const heading = (20 * Math.PI) / 180;
+    const { danger } = fieldOf([
+      straightShot(
+        { x: 10 - Math.cos(heading) * 2, y: 10 - Math.sin(heading) * 2 },
+        heading,
+        10,
+        0,
+        900,
+      ),
+    ]);
+    const answer = new TrajectoryPlanner().run(
+      planFor({ danger, threatX: Math.cos(heading), threatY: Math.sin(heading) }),
+    );
+
+    expect(answer.stepTiles).toBeGreaterThan(0);
+    expect(answer.impactMs).toBe(Infinity);
+    expect(answer.dirX * Math.cos(heading) + answer.dirY * Math.sin(heading)).toBeCloseTo(0, 9);
   });
 
   it('never asks for a walk shorter than the module can deliver', () => {
@@ -870,6 +945,20 @@ describe('the optimizer', () => {
     planner.probe(request, 1, 0, 1000);
     expect(planner.probeImpactMs).toBe(Infinity);
     expect(planner.probeRoomTiles).toBeGreaterThan(0);
+  });
+
+  it('says which way the shot that comes too close to the course is going', () => {
+    const planner = new TrajectoryPlanner();
+    const { danger } = fieldOf([straightShot({ x: 10, y: 4 }, Math.PI / 2, 10, 0, 900)]);
+
+    planner.probe(planFor({ danger }), 0, 0, 1000);
+    expect(planner.probeThreatX).toBeCloseTo(0, 9);
+    expect(planner.probeThreatY).toBeCloseTo(1, 9);
+
+    // A course nothing comes near has no line to cross.
+    planner.probe(planFor(), 0, 0, 1000);
+    expect(planner.probeThreatX).toBe(0);
+    expect(planner.probeThreatY).toBe(0);
   });
 
   it('reports the room inside the reaction window apart from the room overall', () => {
@@ -1125,27 +1214,38 @@ describe('riding a spiral', () => {
       y: ORIGIN.y + Math.sin(angle) * radius,
     };
 
+    // **Played on until it moves**, because waiting is an answer too: while the
+    // arm behind is still far enough off that a tick of standing leaves the step
+    // after it room, standing is cheaper than going now. What is asserted is
+    // which way it goes when it does.
     const planner = new DodgePlanner();
-    const plan = planner.plan(
-      {
-        x: at.x,
-        y: at.y,
-        intentX: 0,
-        intentY: 0,
-        speedTilesPerSecond: 5.52,
-        gameTimeMs: atMs,
-        nowMs: 1_000_000,
-        onDamagingGround: false,
-      },
-      SPIRAL_SETTINGS,
-      OPEN_GROUND,
-      arms(atMs),
-      [],
-      fired(atMs),
-    );
+    let plan: DodgePlan | undefined;
+    for (let now = atMs; now <= atMs + 300; now += 20) {
+      plan = planner.plan(
+        {
+          x: at.x,
+          y: at.y,
+          intentX: 0,
+          intentY: 0,
+          speedTilesPerSecond: 5.52,
+          gameTimeMs: now,
+          nowMs: 1_000_000 + now - atMs,
+          onDamagingGround: false,
+        },
+        SPIRAL_SETTINGS,
+        OPEN_GROUND,
+        arms(now),
+        [],
+        fired(now),
+      );
+      // Whatever it chose, it is not hit.
+      expect(plan.impactMs).toBe(Infinity);
+      if (plan.stepTiles > 0) break;
+    }
+    if (plan === undefined) throw new Error('never planned');
 
-    // Whatever it chose, it is not hit and it has not run for the horizon.
-    expect(plan.impactMs).toBe(Infinity);
+    // And when it moves it has not run for the horizon.
+    expect(plan.stepTiles).toBeGreaterThan(0);
     expect(plan.stepTiles).toBeLessThanOrEqual(0.7 + 1e-9);
     // **And it went round rather than out**, which is the whole of what riding
     // one means: at sixteen arms the corridor between two of them is half a tile

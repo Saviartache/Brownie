@@ -228,6 +228,50 @@ describe('ProxyServer', () => {
     expect(h.connector.last().sent).toHaveLength(0);
   });
 
+  it("puts what a plugin sends behind the client's next packet, not in the middle of a tick", async () => {
+    // A server tick reaches the plugins before it reaches the client. A pickup
+    // sent from there would go out ahead of the shot acknowledgements the
+    // client is about to send for that tick — so it waits for the client, and
+    // follows the client's own answer.
+    const h = await harness();
+    h.host.load(
+      definePlugin({
+        meta: { id: 'looter', name: 'Looter', category: PluginCategory.Items },
+        setup: (ctx) =>
+          ctx.packets.on('NEWTICK', (_packet, session) => {
+            session.sendToServer('INVENTORYSWAP', {
+              time: 0,
+              position: { x: 0, y: 0 },
+              slotObject1: { objectId: 100, slotId: 0, objectType: 2594 },
+              slotObject2: { objectId: 1, slotId: 4, objectType: -1 },
+            });
+          }),
+      }),
+    );
+    h.host.setEnabled('looter', true);
+
+    const socket = await h.connect();
+    const gameClient = PeerCiphers.gameClient();
+    const gameServer = PeerCiphers.gameServer();
+    socket.write(gameClient.encipher(teleportFrame(1, 'open')));
+    await until(() => h.connector.transports.length === 1, 'the server link to open');
+    await until(() => h.connector.last().sent.length === 1, 'the packet to be forwarded');
+
+    h.connector
+      .last()
+      .receive(gameServer.encipher(encodePacket(registry, createPacket(registry, 'NEWTICK'))));
+    // Every chance to go out early before concluding that it did not.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.connector.last().sent).toHaveLength(1);
+
+    socket.write(gameClient.encipher(encodePacket(registry, createPacket(registry, 'MOVE'))));
+    await until(() => h.connector.last().sent.length === 3, 'the move and the pickup');
+    const names = h.connector
+      .last()
+      .sent.map((frame) => decodeFrame(registry, gameServer.decipher(frame)).name);
+    expect(names).toEqual(['TELEPORT', 'MOVE', 'INVENTORYSWAP']);
+  });
+
   it('closes the session when no target vouches for it', async () => {
     const h = await harness({ resolve: () => undefined });
     const socket = await h.connect();

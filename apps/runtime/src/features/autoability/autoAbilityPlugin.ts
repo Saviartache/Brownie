@@ -39,11 +39,11 @@
  * one decision a player can hand over whole is "a boss is in range", because a
  * boss is what the mana is unambiguously for; that is the switch, off until
  * they say otherwise. With it off — or with no boss in range — the ability
- * waits for the key press, and all this does with it is rewrite the one field
- * the client fills from the mouse, so the ability lands on the enemy rather
- * than wherever the cursor happened to be. When to spend the mana on everything
- * else stays the player's decision; the only thing taken off them is the
- * aiming.
+ * waits for the key press, and all this does with it is point it: the client is
+ * handed the enemy in place of the cursor, so the ability lands on the enemy
+ * rather than wherever the mouse happened to be. When to spend the mana on
+ * everything else stays the player's decision; the only thing taken off them is
+ * the aiming.
  *
  * **The target is picked the way auto-aim picks one**, out of the same two
  * modules rather than out of a second opinion — see the import below. It is not
@@ -66,12 +66,28 @@
  * So the trigger is the player's own bar, which is the half that is knowable,
  * and healing the group is still the player's key to press.
  *
- * **It sends `USEITEM`, exactly as the client does for a key press.** The
- * position it names is where the effect lands — an enemy for an aimed ability,
- * the character for a buff — which is the same field the client fills with the
- * mouse, and the same field the redirect above rewrites. Injected packets do
- * not re-enter the pipeline, so this plugin never sees its own cast and needs
- * no flag to tell one from a real key press.
+ * **It sends nothing to the server. The game client presses the key.** Both
+ * halves go through the native module to the client's own ability code — the
+ * method the key calls with the cursor — so a cast is the client using its
+ * ability at a point this plugin chose, and a pointed press is the client using
+ * it at the enemy instead of the mouse. Everything the server hears is what the
+ * client builds from that: its own checks first (silenced, paralysed, on
+ * cooldown, out of mana), its own `USEITEM`, the shots an item with projectiles
+ * fires behind it, and the cooldown and mana it then charges itself.
+ *
+ * **That is a correction, and a costly one to have needed.** This used to
+ * write the `USEITEM` itself and rewrite the player's. The client knew nothing
+ * of a use it had not made, so it sent its own a moment later on the player's
+ * press while the server still had the first on cooldown; a use of a quiver or
+ * a spell arrived with no shots behind it, a rewritten one with its shots
+ * flying at the mouse; and a use went out while the client would have refused
+ * it. None of that is a thing the real client sends — and with this plugin on,
+ * sessions ended. A press made through the client cannot be any of those.
+ *
+ * **So this plugin sees its own casts**, as the client's `USEITEM` coming past
+ * like any other — which is how it learns a cast happened at all, and when:
+ * the interval starts there. A use of the ability slot shortly after one was
+ * asked for is that one; any other is the player's own key.
  *
  * It does not reconcile with auto-drink: mana potions are that plugin's
  * threshold and this one's reserve, and moving somebody's setting on their
@@ -82,7 +98,6 @@ import {
   PluginCategory,
   definePlugin,
   type EntityView,
-  type ItemSlotView,
   type Plugin,
   type Position,
   type SelfView,
@@ -106,7 +121,38 @@ import {
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { castReason, percentOf, type CastPreferences } from './worthCasting.js';
 
+/**
+ * The native module's two ways into the client's ability key — the one thing
+ * here a plugin cannot do alone, handed over by the composition root.
+ *
+ * Both name a place on the map, and both leave the rest to the client: it
+ * makes whatever checks it makes, sends its own `USEITEM`, and fires whatever
+ * shots the item fires, from that place. Neither is ever answered: a cast is
+ * seen happening in the client's own `USEITEM`, and a pointing in nothing at
+ * all until the player presses the key.
+ */
+export interface AbilityOutput {
+  /**
+   * Presses the ability key once, pointed here, as the key would with the
+   * cursor on this spot.
+   *
+   * `holdMs` is how long the module may wait for a frame that can make the
+   * press. A press it could not make in that time is dropped rather than made
+   * late: what it was aimed at has moved.
+   */
+  cast(at: Position, holdMs: number): void;
+  /**
+   * Points the presses the player makes here instead of at the mouse, until
+   * `holdMs` runs out.
+   *
+   * A *standing* target, like auto-aim's: saying nothing is how the runtime
+   * says the cursor is theirs again, so there is no cancel.
+   */
+  aimAt(at: Position, holdMs: number): void;
+}
+
 export interface AutoAbilityInputs {
+  readonly output: AbilityOutput;
   /**
    * What `objects.xml` says about an ability item. See `ObjectCatalog.item`.
    *
@@ -143,9 +189,6 @@ export interface AutoAbilityInputs {
  */
 const ABILITY_SLOT = 1;
 
-/** `USEITEM.useType` for using something out of one of your own slots. */
-const USE_TYPE_SELF = 1;
-
 /**
  * How long a cast by hand holds this off.
  *
@@ -166,14 +209,48 @@ const MANUAL_PAUSE_MS = 2000;
 const MAP_SETTLE_MS = 1000;
 
 /**
- * How long a cast waiting its turn in the outbound queue is still worth firing.
+ * How long the module may wait to make a press before dropping it.
  *
- * Short, and shorter than the shortest ability interval: what a cast is aimed
- * at moves, and a mana-priced heal fired at where the fight was a second ago is
- * worse than one not fired at all. A cast that lapses is simply asked for again
- * on the next tick, with the room as it stands then.
+ * A frame is a few milliseconds away, so this only bites while the game cannot
+ * find the player — a map loading, a stall — and a mana-priced heal made at
+ * the end of one would be made at where the fight used to be. A dropped press
+ * goes unanswered, and is asked for again on the room as it stands then.
  */
-const CAST_EXPIRY_MS = 400;
+const CAST_HOLD_MS = 250;
+
+/**
+ * How long after asking a use of the ability slot is the press that was asked
+ * for, rather than the player's own.
+ *
+ * The client makes it on the next frame and the proxy sees it a moment later,
+ * so anything in this window is the answer; anything after it is a key press.
+ * The rare press of the player's that lands inside is read as the plugin's own,
+ * which costs nothing but the interval it starts.
+ */
+const CAST_ANSWER_MS = 500;
+
+/**
+ * How long to wait before asking again when the client made nothing, doubling
+ * with each press in a row that went unanswered, up to the ceiling.
+ *
+ * **Unanswered is the client's decision more often than not** — silenced, on a
+ * cooldown this side does not see, somewhere abilities are not allowed — and it
+ * says so on screen every time it is asked. Asking at the tick rate would put
+ * that notice up five times a second; backing off keeps a refusal that lasts
+ * from becoming a stream of them. The same wait covers a module that is not
+ * there to ask at all.
+ */
+const CAST_RETRY_MS = 1000;
+const CAST_RETRY_MAX_MS = 8000;
+
+/**
+ * How long a pointing stands, which is two server ticks.
+ *
+ * Renewed on every tick while there is an enemy to point at, so this is only
+ * how long the player's presses keep going to the last one after the room says
+ * nothing — a tick that arrived late, or an enemy that died.
+ */
+const AIM_HOLD_MS = 400;
 
 /**
  * There is no setting for either.
@@ -234,6 +311,15 @@ interface Tuning extends CastPreferences {
 interface SessionState {
   /** When this session may cast again, on the world's clock. */
   nextAtMs: number;
+  /**
+   * Until when a use of the ability slot is the press last asked for. Minus
+   * infinity while nothing is outstanding.
+   */
+  askedUntilMs: number;
+  /** The interval that press starts once the client makes it. */
+  askedIntervalMs: number;
+  /** Presses asked for in a row that the client did not make. */
+  unanswered: number;
   mapName: string;
   safeZone: boolean;
 }
@@ -427,6 +513,9 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         if (held === undefined) {
           const fresh: SessionState = {
             nextAtMs: Number.NEGATIVE_INFINITY,
+            askedUntilMs: Number.NEGATIVE_INFINITY,
+            askedIntervalMs: 0,
+            unanswered: 0,
             mapName,
             safeZone: isSafeZone(mapName),
           };
@@ -461,9 +550,8 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       /**
        * The best enemy in range under a given ordering.
        *
-       * The cursor is read here rather than passed in because a search can
-       * happen between two ticks — the player's own key press is one — and a
-       * cursor that has moved since the last tick has moved.
+       * The cursor is read here rather than passed in, so only a search that
+       * ranks by it pays for the reading.
        *
        * `preference` defaults to the panel's boss rule, because every search
        * shares it but one: the attack half, whose rule is bosses by definition.
@@ -503,58 +591,33 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         search(session, TargetPriority.Closest);
 
       /**
-       * Sends one ability use, exactly as the client does for a key press.
+       * Asks the client to press the ability key, pointed at `at`.
        *
-       * **The client's clock, not the one this plugin schedules against.** The
-       * server checks this field against the time the game client has been
-       * stamping its own packets with, and throws the packet away when it does
-       * not match — no error, no effect, and the ability sound the player hears
-       * is the client reacting to a use it never made. It cost a session of a
-       * priest's tome firing every 700 ms and healing nothing. `gameTimeMs`
-       * elsewhere is a different quantity for a different job: a monotonic
-       * proxy-side clock to measure intervals with.
+       * **The interval starts when the client makes the press, not here** —
+       * see the `USEITEM` listener below. Until then this holds the next ask
+       * back by the retry wait, so a press the client turned down, or one
+       * nobody was there to make, is asked for again later rather than on the
+       * very next tick. One press outstanding, ever.
        */
-      const sendCast = (
+      const askToCast = (
         session: SessionView,
-        self: SelfView,
-        slot: ItemSlotView,
         at: Position,
         ability: AbilityFacts,
         aimed: boolean,
         state: SessionState,
       ): void => {
-        session.sendToServer(
-          'USEITEM',
-          {
-            // Rewritten by the session the instant this leaves, for the reason
-            // above; written here as well so the packet's shape is visible
-            // where it is built.
-            time: Math.trunc(session.world.clientTimeMs),
-            slotObject: {
-              objectId: self.objectId,
-              slotId: ABILITY_SLOT,
-              objectType: slot.objectType,
-            },
-            itemUsePos: { x: at.x, y: at.y },
-            useType: USE_TYPE_SELF,
-            unknownInt: 0,
-          },
-          {
-            // One cast outstanding, ever. A cast waiting behind a pickup is
-            // replaced each tick rather than joined, so what finally goes out
-            // is aimed where the enemy is now and not where it was when the
-            // ability first came off cooldown.
-            key: 'auto-ability:cast',
-            expiresInMs: CAST_EXPIRY_MS,
-            // **The interval starts here, not at the decision.** Measured from
-            // the decision it would be a cooldown against a moment the server
-            // never saw, and a cast held up by a busy lane would come off
-            // cooldown while it was still waiting.
-            onSent: () => {
-              state.nextAtMs = session.world.gameTimeMs + intervalOf(ability, aimed);
-            },
-          },
-        );
+        const nowMs = session.world.gameTimeMs;
+        if (state.unanswered > 0) {
+          context.log.debug(
+            `the client made none of the last ${String(state.unanswered)} casts asked of it — ` +
+              'it refused them, or the native module is not there to ask',
+          );
+        }
+        inputs.output.cast(at, CAST_HOLD_MS);
+        state.askedUntilMs = nowMs + CAST_ANSWER_MS;
+        state.askedIntervalMs = intervalOf(ability, aimed);
+        state.nextAtMs = nowMs + Math.min(CAST_RETRY_MS * 2 ** state.unanswered, CAST_RETRY_MAX_MS);
+        state.unanswered += 1;
       };
 
       /**
@@ -568,9 +631,9 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
       const castIfWorthHaving = (
         session: SessionView,
         self: SelfView,
-        slot: ItemSlotView,
         ability: AbilityFacts,
         state: SessionState,
+        pointed: EntityView | undefined,
       ): void => {
         if (!tuning.support) return;
 
@@ -618,16 +681,20 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // exactly when a support ability with an attack rider is being cast for
         // the support, or when the player is pointing away from the room. A
         // buff ignores the point either way: the game centres it on the
-        // character whatever the client sent.
+        // character whatever the client was handed.
         //
-        // Its own search, and asked once because this is the only line that
-        // wants it: what is worth casting for above and what is worth pointing
-        // at here are two orderings of the same room, and only a support
-        // ability that both needed the room *and* carries an attack pays for
-        // both — `pD Tome` and its handful of neighbours.
-        const at: Position = aimed ? (targetEnemy(session) ?? self) : self;
+        // The enemy the player's own presses are going to this tick, where
+        // that was looked for — the same search, so asking it twice would be a
+        // second pass over the room for the same answer. Searched here only
+        // when pointing is switched off. What is worth casting for above and
+        // what is worth pointing at here are two orderings of the same room,
+        // and only a support ability that both needed the room *and* carries
+        // an attack pays for both — `pD Tome` and its handful of neighbours.
+        const at: Position = aimed
+          ? (pointed ?? (tuning.aimAttacks ? undefined : targetEnemy(session)) ?? self)
+          : self;
 
-        sendCast(session, self, slot, at, ability, aimed, state);
+        askToCast(session, at, ability, aimed, state);
       };
 
       /**
@@ -649,29 +716,25 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
        */
       const castIfBossInReach = (
         session: SessionView,
-        self: SelfView,
-        slot: ItemSlotView,
         ability: AbilityFacts,
         state: SessionState,
       ): void => {
         if (!tuning.autoCastAttacks) return;
         const boss = search(session, tuning.priority, { rule: BossRule.Only, isBoss });
         if (boss === undefined) return;
-        sendCast(session, self, slot, boss, ability, true, state);
+        askToCast(session, boss, ability, true, state);
       };
 
       // Cheapest test first, and each one is a test the next would have been
       // wasted work without. Nothing on this path allocates until a cast is
-      // actually going out, bar the reading below under the one priority that
+      // actually asked for, bar the reading below under the one priority that
       // asks for it.
       context.packets.on('NEWTICK', (_packet, session) => {
         // **Asked for and thrown away, ahead of every reason to stop below.**
         // The module measures the cursor only while somebody keeps asking, and
-        // the search that wants it runs elsewhere: the player's key press lands
-        // between ticks, and an attack ability reaches the cast path here only
-        // when the boss switch is on. Waiting to ask until a search needs one
-        // would mean the first search after a quiet spell — which is the key
-        // press — got no reading.
+        // a pointing chosen by it has to be current when the player presses
+        // the key. Waiting to ask until a search needs one would mean the first
+        // search after a quiet spell got no reading.
         if (tuning.priority === TargetPriority.ClosestToCursor) inputs.cursorPoint();
 
         const self = session.self;
@@ -680,19 +743,38 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         const state = stateFor(session);
         if (state.safeZone) return;
 
-        const nowMs = session.world.gameTimeMs;
-        if (nowMs < state.nextAtMs) return;
-
         const slot = self.inventory.at(ABILITY_SLOT);
         if (slot === undefined || slot.objectType <= 0) return;
 
         const ability = inputs.ability(slot.objectType);
         if (ability === undefined || ability.use === AbilityUse.Never) return;
 
+        // **The player's own presses, pointed on every tick and ahead of every
+        // reason not to cast.** Whether this plugin spends mana has nothing to
+        // do with where the player's spending lands, and the pointing has to be
+        // standing *before* the key goes down — the press never comes past
+        // here, it goes straight into the client's own ability code.
+        //
+        // **Only what the game points at a place.** A buff is centred on the
+        // character whatever the client is handed, so pointing one changes
+        // nothing; an ability that also *moves* the character reads the point
+        // as the place to move to, and pointing one of those at a monster is a
+        // teleport into the monster. `Aimed` is exactly the set that is
+        // neither.
+        let pointed: EntityView | undefined;
+        if (tuning.aimAttacks && ability.use === AbilityUse.Aimed) {
+          pointed = targetEnemy(session);
+          if (pointed !== undefined) inputs.output.aimAt(pointed, AIM_HOLD_MS);
+        }
+
+        const nowMs = session.world.gameTimeMs;
+        if (nowMs < state.nextAtMs) return;
+
         // The cost first, then the reserve on top of it: a cast that leaves the
         // bar under what the player asked to keep is one they did not want, and
-        // a cast the server refuses for want of mana is a packet sent for
-        // nothing. An unstated maximum reserves nothing rather than everything.
+        // one the client would refuse for want of mana is a notice on their
+        // screen for nothing. An unstated maximum reserves nothing rather than
+        // everything.
         const reserve = self.maxMp > 0 ? self.maxMp * tuning.manaReserve : 0;
         if (self.mp < ability.mpCost + reserve) return;
 
@@ -703,41 +785,42 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
         // against "is there a boss to spend it on" — so they part here and
         // share everything above it.
         if (ability.benefits.length > 0) {
-          castIfWorthHaving(session, self, slot, ability, state);
+          castIfWorthHaving(session, self, ability, state, pointed);
           return;
         }
         if (ability.use === AbilityUse.Aimed) {
-          castIfBossInReach(session, self, slot, ability, state);
+          castIfBossInReach(session, ability, state);
         }
       });
 
-      // `USEITEM` only ever flows from the client, and our own casts are
-      // injected past the pipeline — so anything seen here is the player's own
-      // key press.
+      // Every use of the ability slot comes past here — the player's and the
+      // ones this plugin asked for alike, since both are the client's own.
+      // Which it is decides what it holds the next cast back by.
       context.packets.on('USEITEM', (packet, session) => {
         if (packet.opaque) return;
-        const objectType = abilityInUse(packet.get('slotObject'));
-        if (objectType === undefined) return;
+        if (!usesAbilitySlot(packet.get('slotObject'))) return;
 
         const state = stateFor(session);
-        state.nextAtMs = Math.max(state.nextAtMs, session.world.gameTimeMs + MANUAL_PAUSE_MS);
-
-        if (!tuning.aimAttacks) return;
-        // **Only what the game points at a place.** A buff is centred on the
-        // character whatever this field says, so moving it would change
-        // nothing; an ability that also *moves* the character reads it as the
-        // place to move to, and pointing one of those at a monster is a
-        // teleport into the monster. `Aimed` is exactly the set that is neither.
-        const ability = inputs.ability(objectType);
-        if (ability?.use !== AbilityUse.Aimed) return;
-
-        const target = targetEnemy(session);
-        if (target === undefined) return;
-        packet.set('itemUsePos', { x: target.x, y: target.y });
+        const nowMs = session.world.gameTimeMs;
+        if (nowMs <= state.askedUntilMs) {
+          // The press asked for, made. **The interval starts here** — measured
+          // from the asking it would be a cooldown against a moment the server
+          // never saw.
+          state.askedUntilMs = Number.NEGATIVE_INFINITY;
+          state.unanswered = 0;
+          state.nextAtMs = nowMs + state.askedIntervalMs;
+          return;
+        }
+        state.nextAtMs = Math.max(state.nextAtMs, nowMs + MANUAL_PAUSE_MS);
       });
 
       context.packets.on('MAPINFO', (_packet, session) => {
-        stateFor(session).nextAtMs = session.world.gameTimeMs + MAP_SETTLE_MS;
+        const state = stateFor(session);
+        state.nextAtMs = session.world.gameTimeMs + MAP_SETTLE_MS;
+        // A press asked for on the last map is not one this map answers, and
+        // whatever refused the last ones may not be here.
+        state.askedUntilMs = Number.NEGATIVE_INFINITY;
+        state.unanswered = 0;
       });
 
       context.onDispose(
@@ -753,19 +836,16 @@ export function createAutoAbilityPlugin(inputs: AutoAbilityInputs): Plugin {
 }
 
 /**
- * The item a `USEITEM` is using out of the ability slot, or `undefined` for a
- * packet that is using something else — a potion out of the belt, most often.
+ * Whether a `USEITEM` is using the ability slot, rather than something else — a
+ * potion out of the belt, most often.
  *
  * Takes `unknown` rather than the decoded shape on purpose: a field is only a
  * record here because a schema said so, and a definition that has drifted from
  * the live game is exactly the case worth surviving.
  */
-function abilityInUse(slotObject: unknown): number | undefined {
+function usesAbilitySlot(slotObject: unknown): boolean {
   if (typeof slotObject !== 'object' || slotObject === null || Array.isArray(slotObject)) {
-    return undefined;
+    return false;
   }
-  const fields = slotObject as Record<string, unknown>;
-  if (fields['slotId'] !== ABILITY_SLOT) return undefined;
-  const objectType = fields['objectType'];
-  return typeof objectType === 'number' ? objectType : undefined;
+  return (slotObject as Record<string, unknown>)['slotId'] === ABILITY_SLOT;
 }

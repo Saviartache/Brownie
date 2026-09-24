@@ -12,6 +12,7 @@ import {
   bindAnnouncement,
   bindSlot,
   bindTargets,
+  type BlastView as WorldBlastView,
   type EntityView,
   type NativeApi,
   type Position,
@@ -138,6 +139,40 @@ function parkingShot(
       };
     },
   };
+}
+
+/**
+ * The least room a shot leaves a character over one frame of its walk.
+ *
+ * The client's hit test — a square the size of the shot's, around a character
+ * that is a point — at every instant of the frame, with both of them moving.
+ * **Both at the same moments**: measured after the walk against where the shot
+ * was before it, a return behind a shot going away read short by a frame of the
+ * shot's travel, and a step away from one coming on read long by the same.
+ */
+function roomOverFrame(
+  shot: DodgeShot,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+  atMs: number,
+  frameMs: number,
+): number {
+  const before = shot.positionAt(atMs);
+  if (before === undefined) return Infinity;
+  const after = shot.positionAt(atMs + frameMs);
+  // Gone part of the way through the frame: all that is left is where it was.
+  if (after === undefined) {
+    return (
+      Math.max(Math.abs(before.x - fromX), Math.abs(before.y - fromY)) -
+      DEFAULT_PROJECTILE_HALF_TILES
+    );
+  }
+  return (
+    minChebyshevOnSegment(before.x - fromX, before.y - fromY, after.x - toX, after.y - toY) -
+    DEFAULT_PROJECTILE_HALF_TILES
+  );
 }
 
 /** Every entity counts, none is going anywhere, and all are ordinary sized. */
@@ -486,6 +521,51 @@ describe('how far it moves to get out of the way', () => {
     expect(strayed).toBeLessThan(2);
   });
 
+  // **The live report: "we very often walk the way the shot is flying, when
+  // there is every chance to step left or right of it."** A shot is outrun
+  // only by being out of range; a step across its line ends it, and running
+  // with it only meets it again a few tiles further from the fight.
+  it('steps across a shot rather than running the way it is going', () => {
+    const planner = new DodgePlanner();
+    // Slow enough that running with it survives most of a second — the case
+    // that used to be settled by noise, and settled the wrong way half the time.
+    const shots = [straightShot({ x: 5, y: 10 }, 0, 6, 0, 3000)];
+    let x = 10;
+    let y = 10;
+    let ahead = 0;
+    let across = 0;
+    let closest = Infinity;
+
+    const FRAME_MS = 25;
+    for (let frame = 0; frame < 60; frame += 1) {
+      const at = frame * FRAME_MS;
+      const plan = planner.plan(
+        { ...situation(), x, y, gameTimeMs: at, nowMs: 1_000_000 + at },
+        SETTINGS,
+        OPEN_GROUND,
+        shots,
+      );
+      const fromX = x;
+      const fromY = y;
+      if (plan.steer && plan.stepTiles > 0) {
+        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
+        x += plan.dirX * travel;
+        y += plan.dirY * travel;
+      }
+      // The shot flies east, so east of where they stood is running with it.
+      ahead = Math.max(ahead, x - 10);
+      across = Math.max(across, Math.abs(y - 10));
+      for (const shot of shots) {
+        closest = Math.min(closest, roomOverFrame(shot, fromX, fromY, x, y, at, FRAME_MS));
+      }
+    }
+
+    // Out of its way, sideways, and not a step the way it was flying.
+    expect(closest).toBeGreaterThan(0);
+    expect(across).toBeGreaterThan(0.5);
+    expect(ahead).toBeLessThan(0.1);
+  });
+
   // **The way home is a course like any other, and the fire knows where home
   // is.** A monster aims at where the server last saw the character, which after
   // a sidestep is the very ground the planner is walking back to — so a return
@@ -513,6 +593,8 @@ describe('how far it moves to get out of the way', () => {
         OPEN_GROUND,
         shots,
       );
+      const fromX = x;
+      const fromY = y;
       if (plan.steer && plan.stepTiles > 0) {
         const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
         x += plan.dirX * travel;
@@ -520,12 +602,7 @@ describe('how far it moves to get out of the way', () => {
       }
 
       for (const shot of shots) {
-        const where = shot.positionAt(at);
-        if (where === undefined) continue;
-        // The client's hit test: a square the size of the shot's, around a
-        // character that is a point.
-        const gap =
-          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) - DEFAULT_PROJECTILE_HALF_TILES;
+        const gap = roomOverFrame(shot, fromX, fromY, x, y, at, FRAME_MS);
         if (gap < closest) closest = gap;
       }
     }
@@ -669,6 +746,11 @@ describe('the ground the player named', () => {
     readonly shots?: readonly (DodgeShot & { firedAtMs: number; expiresAtMs: number })[];
     readonly world?: DodgeGround;
     readonly settings?: DodgeSettings;
+    /**
+     * How many frames a command takes to reach the character. Nought is a
+     * module that acts on a plan the moment it is made.
+     */
+    readonly lateFrames?: number;
   }): { x: number; y: number; closest: number } {
     const planner = new DodgePlanner();
     const base = situation({
@@ -678,6 +760,8 @@ describe('the ground the player named', () => {
     });
     const world = options.world ?? OPEN_GROUND;
     const settings = options.settings ?? SETTINGS;
+    // Copied out, because the planner hands back the same record every plan.
+    const pending: { dirX: number; dirY: number; stepTiles: number }[] = [];
     let x = base.x;
     let y = base.y;
     let closest = Infinity;
@@ -693,18 +777,21 @@ describe('the ground the player named', () => {
         world,
         shots,
       );
-      if (plan.steer && plan.stepTiles > 0) {
-        const travel = Math.min(plan.stepTiles, (WALK * FRAME_MS) / 1000);
-        x += plan.dirX * travel;
-        y += plan.dirY * travel;
+      pending.push({
+        dirX: plan.dirX,
+        dirY: plan.dirY,
+        stepTiles: plan.steer ? plan.stepTiles : 0,
+      });
+      const acting = pending.length > (options.lateFrames ?? 0) ? pending.shift() : undefined;
+      const fromX = x;
+      const fromY = y;
+      if (acting !== undefined && acting.stepTiles > 0) {
+        const travel = Math.min(acting.stepTiles, (WALK * FRAME_MS) / 1000);
+        x += acting.dirX * travel;
+        y += acting.dirY * travel;
       }
       for (const shot of shots) {
-        const where = shot.positionAt(at);
-        if (where === undefined) continue;
-        // The client's hit test: a square the size of the shot's, around a
-        // character that is a point.
-        const gap =
-          Math.max(Math.abs(where.x - x), Math.abs(where.y - y)) - DEFAULT_PROJECTILE_HALF_TILES;
+        const gap = roomOverFrame(shot, fromX, fromY, x, y, at, FRAME_MS);
         if (gap < closest) closest = gap;
       }
     }
@@ -841,6 +928,26 @@ describe('the ground the player named', () => {
       shots: [
         // One from the west to move them off it, and one across the ground they
         // were holding, timed for the moment they would be walking back over it.
+        straightShot({ x: 6, y: 10 }, 0, 8, 0, 2000),
+        straightShot({ x: 10, y: 4 }, Math.PI / 2, 8, 700, 2000),
+      ],
+    });
+
+    expect(at.closest).toBeGreaterThan(0.1);
+  });
+
+  // **A command lands after it is chosen, and the walk it replaces goes on until
+  // it does.** A plan that starts every future from where the character stands
+  // chooses the side of a shot's line nearer to there; the walk still in flight
+  // carries the character across, and the next plan chooses the other side. The
+  // same fight as the one above, a frame late — which is the least any module
+  // can be.
+  it('keeps to the side it chose while its last step is still being walked', () => {
+    const at = hold({
+      anchor: { x: 10, y: 10 },
+      frames: 100,
+      lateFrames: 1,
+      shots: [
         straightShot({ x: 6, y: 10 }, 0, 8, 0, 2000),
         straightShot({ x: 10, y: 4 }, Math.PI / 2, 8, 700, 2000),
       ],
@@ -2017,6 +2124,10 @@ describe('when the plugin decides', () => {
        * rather than a hundredth of a tile.
        */
       shot?: ProjectileView;
+      /** Area effects on their way down. None, unless a test is about them. */
+      blasts?: readonly WorldBlastView[];
+      /** How far round itself each type of enemy has been learned to blast. */
+      keepOutTiles?: (objectType: number) => number | undefined;
       /** What the last run left behind, for the settings that survive one. */
       store?: PluginPreferences;
     } = {},
@@ -2057,8 +2168,8 @@ describe('when the plugin decides', () => {
           return clock.ms;
         },
         projectiles: () => [shot],
-        blasts: () => [],
-        selfBlastKeepoutTiles: (): undefined => undefined,
+        blasts: () => map.blasts ?? [],
+        selfBlastKeepoutTiles: (objectType: number) => map.keepOutTiles?.(objectType),
         enemies: () => enemies,
         entity: (objectId: number) => enemies.find((one) => one.objectId === objectId),
         canStandAt: map.canStandAt ?? ((): boolean => true),
@@ -2729,6 +2840,54 @@ describe('when the plugin decides', () => {
     expect(showPicture.mock.calls[1]?.[1]).toEqual([]);
   });
 
+  // **Area attacks are one switch, and off means projectiles only.** A bomb
+  // on its way down is walked out from under while it is on and left to land
+  // while it is off; nothing else is in the air that could move anybody.
+  it('walks out from under a bomb on its way down, and not once area attacks are off', () => {
+    // Half a tile east of them and going off in four hundred milliseconds: a
+    // step west clears it in time, and staying put does not.
+    const bomb: WorldBlastView = {
+      x: 10.5,
+      y: 10,
+      radiusTiles: 1.5,
+      armsAtMs: 400,
+      confirmed: false,
+    };
+    const harmless = ELSEWHERE as unknown as ProjectileView;
+
+    const minded = underFire(0, { shot: harmless, blasts: [bomb] });
+    minded.plan();
+    expect(minded.commands().length).toBeGreaterThan(0);
+
+    const projectilesOnly = underFire(0, { shot: harmless, blasts: [bomb] });
+    projectilesOnly.host.settingsOf('auto-dodge')?.apply('avoidBlasts', false);
+    projectilesOnly.plan();
+    expect(projectilesOnly.commands()).toHaveLength(0);
+  });
+
+  // **And a self-blast is an area attack too**, whatever ground it is kept out
+  // of as: an enemy learned to go off round itself has no telegraph, so the
+  // planner holds the player out of its radius — and a player who has asked for
+  // projectiles only has asked for that to stop as well.
+  it('keeps out of reach of an enemy that blasts itself, and not once area attacks are off', () => {
+    // Learned to go off three tiles round itself; the character is not quite
+    // three tiles off it — clear of the room kept round a body, inside the blast.
+    const options = {
+      shot: ELSEWHERE as unknown as ProjectileView,
+      enemies: [monsterAt(12.8, 10)],
+      keepOutTiles: () => 3,
+    };
+
+    const minded = underFire(0, options);
+    minded.plan();
+    expect(minded.commands().length).toBeGreaterThan(0);
+
+    const projectilesOnly = underFire(0, options);
+    projectilesOnly.host.settingsOf('auto-dodge')?.apply('avoidBlasts', false);
+    projectilesOnly.plan();
+    expect(projectilesOnly.commands()).toHaveLength(0);
+  });
+
   // **The live report: "I cannot get through there."** A wall in this game is an
   // object with hit points and the enemy flag, and a brazier is `<Enemy/>` with
   // no health bar at all — so a three-tile no-go circle went round every
@@ -2961,15 +3120,15 @@ describe('when the plugin decides', () => {
     });
 
     it('plans on the preset it was given', () => {
-      const relaxed = underFire(825);
+      const relaxed = underFire(760);
       relaxed.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Relaxed);
       relaxed.plan();
-      // Three hundred milliseconds of window: at 825 ms the shot is three and a
-      // half tiles out and well over that from reaching the square it hits
-      // with, which is nobody's problem yet.
+      // Three hundred milliseconds of window: at 760 ms the shot is four tiles
+      // out and over four hundred milliseconds from reaching the square it hits
+      // with, which is nobody's problem yet. Five hundred and sixty of them is.
       expect(relaxed.commands()).toHaveLength(0);
 
-      const cautious = underFire(825);
+      const cautious = underFire(760);
       cautious.host.settingsOf('auto-dodge')?.apply('preset', DodgePresetId.Cautious);
       cautious.plan();
       expect(cautious.commands().length).toBeGreaterThan(0);

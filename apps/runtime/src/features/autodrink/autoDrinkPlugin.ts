@@ -40,12 +40,16 @@ export interface AutoDrinkInputs {
 }
 
 /**
- * `USEITEM.useType` for drinking something out of one of your own slots.
+ * `USEITEM.useType` for drinking a potion: `Default`.
  *
- * The reference implementation's value, observed against the live game. A bag
- * is the other case and uses a different one — see auto-loot.
+ * **What the game client itself sends, read out of its code rather than copied
+ * from another tool.** The type is the game's enum `Default = 0, StartUse = 1,
+ * EndUse = 2`; its consumable path (`EquipmentManager.UseInventoryItem`) always
+ * sends `Default`, and `StartUse` comes only from the ability key, on the press.
+ * The reference implementation sent `StartUse` for potions too, which is a use
+ * no client ever makes.
  */
-const USE_TYPE_SELF = 1;
+const USE_TYPE_CONSUMABLE = 0;
 
 /**
  * How long a queued potion is still worth drinking.
@@ -169,7 +173,7 @@ export function createAutoDrinkPlugin(inputs: AutoDrinkInputs): Plugin {
               objectType: found.objectType,
             },
             itemUsePos: { x: session.self.x, y: session.self.y },
-            useType: USE_TYPE_SELF,
+            useType: USE_TYPE_CONSUMABLE,
             unknownInt: 0,
           },
           {

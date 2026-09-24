@@ -81,12 +81,12 @@ export interface AutoLootInputs {
 }
 
 /**
- * `USEITEM.useType` for using something that is still in a bag.
+ * `USEITEM.useType` for using something that is still in a bag: `Default`.
  *
- * The reference implementation's value, observed against the live game — and
- * different from the one for a slot of your own, which auto-drink uses. The
- * position goes out as the origin for the same reason: a bag item is not used
- * *at* anywhere.
+ * The game client's consumable path, `EquipmentManager.UseInventoryItem`, sends
+ * `Default` for every item it uses, whichever container holds it; see
+ * auto-drink. The position goes out as the origin: a bag item is not used *at*
+ * anywhere.
  */
 const USE_TYPE_FROM_BAG = 0;
 
@@ -504,12 +504,10 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         destination: Destination,
         quaffable: boolean,
       ): void => {
-        // **`tickId` is deliberately absent, and the live game said so.**
-        // `packet-definitions.json` carries it as a trailing optional, and
-        // filling it in was tried: every swap — including the stack join that
-        // had been working — came back `FAILURE [0] Bad message received`,
-        // which is the server failing to *parse* the packet rather than
-        // refusing what it asked for. Four bytes this build does not expect.
+        // Exactly the four fields the game client's own swap carries. A
+        // trailing `tickId` that some build had was tried here once: every swap
+        // came back `FAILURE [0] Bad message received`, the server failing to
+        // *parse* four bytes this build does not expect.
         session.sendToServer(
           'INVENTORYSWAP',
           {

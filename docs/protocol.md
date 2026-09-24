@@ -322,7 +322,9 @@ centre, the type is taught a keep-out of the observed radius
 projectile that declares no speed never moves, so an `ENEMYSHOOT` of that kind
 sitting on its owner is a standing damage field, and its collision square —
 circumscribed — teaches the same table. The dodge holds every living enemy of a
-learned type at that radius, as ground that hurts, and the table is cached
+learned type at that radius, as ground that hurts — unless it has been told to
+leave area attacks alone, the same switch that drops the telegraphs — and the
+table is cached
 between runs beside the measured blast radii (`game-data/self-blasts.json`):
 what an enemy does to its neighbours is a property of the game, not of a
 connection.

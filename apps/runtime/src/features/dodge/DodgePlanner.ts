@@ -27,6 +27,15 @@
  * character can actually fight from is what turns "a tile and back" into "a
  * short step and back". See `TrajectoryScore`.
  *
+ * **And not running *with* the shot is the other half.** Distance says how far
+ * and never which way, so a step across a shot's line and a step along it were
+ * the same price — and along it only meets the shot again later. Two things
+ * price them apart: a sidestep is rolled as one that *stops* once the place is
+ * clear (see `TrajectoryPlanner`'s `Settle`), and every tile walked the way the
+ * threatening shot is going is charged over and above the walking. Backing off
+ * is then what it should be — the way to buy time while nothing across the
+ * line is open, and only for as long as that lasts.
+ *
  * **The anchor is a DPS position.** Where they were, the line they are walking,
  * or a place they named with a key — all three are the same idea, which is
  * *the ground this fight is worth standing on*, and the planner's whole job is
@@ -54,7 +63,7 @@ import type { Position } from '@brownie/plugin-api';
 import type { AttackPatterns } from './AttackPatterns.js';
 import { Blasts, type BlastView } from './Blasts.js';
 import { DangerField, NO_DANGER_TILES } from './DangerField.js';
-import type { DodgeGround } from './DodgeGround.js';
+import { walkableBetween, type DodgeGround } from './DodgeGround.js';
 import { PocketLock } from './PocketLock.js';
 import { MAX_FIELD_SLICES, ShotField, type DodgeShot } from './ShotField.js';
 import {
@@ -126,9 +135,10 @@ export interface DodgeSettings {
    * How long before a plan takes effect.
    *
    * A decision made here reaches the module a frame later and the server later
-   * still, so for this long the player is still standing where they are while
-   * the shots are not. It *delays* the move rather than crediting it as a head
-   * start.
+   * still, so for this long the character goes on doing what the last plan told
+   * it while the shots do not wait. It *delays* the new move rather than
+   * crediting it as a head start — and a walk already commanded is taken to
+   * carry on for part of it, because it does.
    */
   readonly leadMs: number;
   /** How fast confidence in a prediction decays. See {@link ShotField}. */
@@ -362,6 +372,9 @@ const CROWD_ACT_TILES = 0.75;
 /** The most travel one tick may consider, so a bad speed cannot size a plan. */
 const MAX_STEP_TILES = 3;
 
+/** How much of the lead the walk already commanded is credited for. */
+const IN_FLIGHT_SHARE_OF_LEAD = 0.5;
+
 /** How far out a pattern is worth recognising, in tiles. */
 const PATTERN_REACH_TILES = 22;
 
@@ -375,6 +388,18 @@ const PATTERN_REACH_TILES = 22;
 
 /** Per tile moved. What keeps the character still when nothing forces a move. */
 const TRAVEL_PER_TILE = 0.4;
+
+/**
+ * Per tile walked the way the threatening shot is going, on top of the walking.
+ *
+ * **Sized against the two terms it sits between.** Above the anchor's whole
+ * difference between a step across a shot's line and a step on the diagonal
+ * behind it — a few tenths — so that when both get clear, across is the one
+ * taken. Far below the room a step leaves, so that it never buys a graze: while
+ * nothing across the line is open, backing off to wait for it is still the
+ * cheapest thing on the board.
+ */
+const WITH_FIRE_PER_TILE = 3;
 
 /**
  * Per tile short of comfortable, per tick.
@@ -433,6 +458,8 @@ export class DodgePlanner {
   #holdDirX = 0;
   #holdDirY = 0;
   #holdAtMs = 0;
+  /** And how far it was meant to carry the character, in tiles. */
+  #holdStepTiles = 0;
 
   /**
    * The ground the planner took the player off, and whether it is still holding
@@ -469,6 +496,7 @@ export class DodgePlanner {
     dpsRadiusTiles: 0,
     dpsPerTick: 0,
     travelPerTile: TRAVEL_PER_TILE,
+    withFirePerTile: WITH_FIRE_PER_TILE,
     turnPerReversal: TURN_PER_REVERSAL,
     safeClearanceTiles: 0,
     riskPerTile: RISK_PER_TILE,
@@ -496,6 +524,8 @@ export class DodgePlanner {
     weights: this.#weights,
     holdDirX: 0,
     holdDirY: 0,
+    threatX: 0,
+    threatY: 0,
     ground: undefined as unknown as DodgeGround,
     danger: this.#danger,
     blasts: undefined,
@@ -528,6 +558,7 @@ export class DodgePlanner {
     this.#holdDirX = 0;
     this.#holdDirY = 0;
     this.#holdAtMs = 0;
+    this.#holdStepTiles = 0;
     this.#anchorHeld = false;
     this.#anchorAtMs = 0;
     this.#orbitTiles = 0;
@@ -673,6 +704,11 @@ export class DodgePlanner {
       return plan;
     }
 
+    // **The line to cross, taken from the course that is about to be hit.** What
+    // the probe found coming at the player is the shot a dodge has to get out
+    // of the way of, and running the way it is going only meets it again later.
+    this.#request.threatX = this.#optimizer.probeThreatX;
+    this.#request.threatY = this.#optimizer.probeThreatY;
     const trajectory = this.#optimizer.run(this.#request);
     plan.evaluated = trajectory.evaluated;
     plan.impactMs = trajectory.impactMs;
@@ -688,7 +724,7 @@ export class DodgePlanner {
     plan.verdict = verdictFor(situation, plan, trajectory);
 
     if (trajectory.stepTiles > 0) {
-      this.#commit(trajectory.dirX, trajectory.dirY, situation.nowMs);
+      this.#commit(trajectory.dirX, trajectory.dirY, trajectory.stepTiles, situation.nowMs);
       // The ground under the character stops being the ground it is aiming for
       // the moment it moves them off it, and stays that way until they are back.
       this.#anchorHeld = true;
@@ -729,8 +765,20 @@ export class DodgePlanner {
       situation.nowMs - this.#holdAtMs <= HOLD_FRESH_MS;
 
     const request = this.#request;
-    request.startX = situation.x;
-    request.startY = situation.y;
+    // From where the character will be when this plan's command lands, rather
+    // than from where it is now — see {@link #inFlightTiles}. Not past a wall,
+    // which stops the walk in flight exactly as it would any other.
+    const inFlight = this.#inFlightTiles(
+      situation.nowMs,
+      settings.leadMs,
+      situation.speedTilesPerSecond,
+    );
+    const landsX = situation.x + this.#holdDirX * inFlight;
+    const landsY = situation.y + this.#holdDirY * inFlight;
+    const carried =
+      inFlight > 0 && walkableBetween(world, situation.x, situation.y, landsX, landsY);
+    request.startX = carried ? landsX : situation.x;
+    request.startY = carried ? landsY : situation.y;
     // **Their own ground**: where the planner took them from, or where they are
     // when it has not taken them anywhere — and walking, the line they are
     // walking, one tick of it at a time. See {@link #aimAnchor}.
@@ -926,9 +974,10 @@ export class DodgePlanner {
     return this.#danger.clearanceOf(middle, x, y, x, y) < 0;
   }
 
-  #commit(dirX: number, dirY: number, nowMs: number): void {
+  #commit(dirX: number, dirY: number, stepTiles: number, nowMs: number): void {
     this.#holdDirX = dirX;
     this.#holdDirY = dirY;
+    this.#holdStepTiles = stepTiles;
     this.#holdAtMs = nowMs;
   }
 
@@ -936,6 +985,42 @@ export class DodgePlanner {
   #release(): void {
     this.#holdDirX = 0;
     this.#holdDirY = 0;
+    this.#holdStepTiles = 0;
+  }
+
+  /**
+   * How far the walk already commanded will still carry the character before
+   * this plan's command can take over, in tiles along {@link #holdDirX}.
+   *
+   * **The lead is not time spent standing when something is already walking.**
+   * A command reaches the character the lead later, and until it does the one
+   * before it is still being walked — so a plan that starts every future from
+   * where the character is *now* is planning from a place it will have left.
+   * Beside the line a shot is coming down, that was the difference between two
+   * sides: each plan chose the side nearer to where the character stood, the
+   * walk still in flight carried it across the line, and the next plan chose the
+   * other one. The character stood on the line, swapping sides, until it was hit.
+   *
+   * **Half the lead, and not all of it.** The lead is a ceiling on the delay
+   * rather than a measurement of it — a frame and a pipe are usually much less —
+   * and standing still for all of it is the cautious reading everywhere else.
+   * Here the whole of it is not cautious: it credits a walk the character may
+   * already have been told to stop, and a plan that believes it is further
+   * round than it is turns for home early. Half is the reading that is never
+   * more than half a lead wrong, whichever way the truth lies; measured across
+   * delays from none to the whole lead, it is the one that is hit least.
+   *
+   * Nought once the command has run out, and while nothing has been commanded.
+   */
+  #inFlightTiles(nowMs: number, leadMs: number, speedTilesPerSecond: number): number {
+    if (this.#holdStepTiles <= 0) return 0;
+    const lead = Math.max(0, leadMs);
+    const walkingMs = (this.#holdStepTiles / Math.max(1e-6, speedTilesPerSecond)) * 1000;
+    const leftMs = Math.min(
+      lead * IN_FLIGHT_SHARE_OF_LEAD,
+      lead + walkingMs - (nowMs - this.#holdAtMs),
+    );
+    return leftMs > 0 ? (speedTilesPerSecond * leftMs) / 1000 : 0;
   }
 }
 

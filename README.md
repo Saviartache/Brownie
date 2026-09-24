@@ -116,6 +116,16 @@ and can be fired for you at a boss. What an ability does is read from the
 game's own item data, so a new class or a new item is understood without an
 update.
 
+Nothing here sends the server a packet. Casting and aiming both go through the
+game client's own ability key, via the injected module: a cast is the client
+pressing it with the cursor where the plugin chose, and an aimed press is yours
+with the enemy handed over in place of the cursor. So the client makes every
+check it makes on a real press — silenced, on cooldown, out of mana — and sends
+its own use, with the shots a quiver or a spell fires behind it, and keeps its
+own cooldown. This used to write the use itself, which the client knew nothing
+about, and sessions ended over it. **Needs the native module**; without it the
+plugin casts nothing and points nothing.
+
 - **Aim the attack abilities you use** — where what you fire lands: on the
   enemy rather than wherever the cursor happened to be.
 - **Auto-cast attack abilities at bosses** — fire them for you while a boss is
@@ -185,6 +195,15 @@ somewhere outranks it entirely — that is Cursor Walk's to answer, and this one
 stands down for it: a person pointing at a place has more
 information than any planner.
 
+When it does move you, it steps across the line a shot is flying down and
+waits there for it to pass, rather than running the way the shot is going —
+backing off only to buy time while nothing across the line is open.
+
+Area attacks — thrown bombs, novas, circles on the ground and the reach of
+enemies that blast themselves — are dodged too, behind one switch: **Dodge area
+attacks** (under *Safety*). Off, the dodge minds projectiles only and walks
+through every one of them.
+
 - **How hard it tries** — *Relaxed* (steps in late, leaves your walking alone),
   *Balanced* (what it was tuned at), *Cautious* (wide margins, takes the wheel
   sooner), or *Custom* for your own numbers.
@@ -208,7 +227,7 @@ information than any planner.
 - *Advanced, grouped:* **Reaction** (how far ahead to look, planning step,
   how urgent trouble must be, directions considered, thinking budget),
   **Safety** (caution, extra margin, distrust of far predictions, wall and
-  hazard clearance, dodging bombs), **Spacing** (how far monsters are kept),
+  hazard clearance, dodging area attacks), **Spacing** (how far monsters are kept),
   **Control** (leaving your own walking alone, cancelling your input while it
   drives, walking speed).
 
@@ -302,6 +321,16 @@ puts a potion at a survival threshold ahead of a pickup, and goes quiet for a
 while whenever the server answers `FAILURE`. Two features acting in the same
 tick used to mean one of them was silently refused and then asked again, which
 is how sessions got dropped.
+
+The queue also decides *where* in the stream a packet lands: straight behind
+one of the game client's own packets, never in the middle of a server tick. The
+client never sends an action ahead of the shot acknowledgements it owes — every
+send it makes flushes them first — and a packet injected the moment a tick
+arrives could land ahead of acknowledgements the client was about to send, an
+order the real client cannot produce. And when your own hands move or use an
+item, whatever the runtime was about to do with the inventory is dropped and
+decided again from what the server says next, rather than sent at a slot that
+has just changed.
 
 ### Auto Loot
 

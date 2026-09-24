@@ -46,7 +46,11 @@ export const SendOutcome = {
   Expired: 'expired',
   /** A newer request with the same {@link SendOptions.key} replaced it. Never sent. */
   Superseded: 'superseded',
-  /** The map changed, the session closed, or the queue was full. Never sent. */
+  /**
+   * The map changed, the session closed, the queue was full, or — for an item
+   * packet — the player's own client moved or used an item first, so what it
+   * was aimed at no longer exists. Never sent.
+   */
   Dropped: 'dropped',
 } as const;
 
@@ -112,7 +116,8 @@ export interface SendOptions {
   /** How long to poll {@link confirm} for. Defaults to the queue's own window. */
   readonly confirmWindowMs?: number;
   /**
-   * Called the moment it actually leaves.
+   * Called the moment it actually leaves — for a paced packet, straight behind
+   * the game client's next packet of its own.
    *
    * **This, not the call to send, is when a plugin's own clock starts.** A
    * cooldown measured from the request is measured from a moment that has

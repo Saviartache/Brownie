@@ -37,6 +37,7 @@
 #include "game/GlowFields.h"
 #include "game/HealthBarTint.h"
 #include "game/OffsetTable.h"
+#include "game/PlayerAbility.h"
 #include "game/PlayerCollision.h"
 #include "game/PlayerFields.h"
 #include "game/PlayerMover.h"
@@ -278,6 +279,33 @@ __attribute__((noinline)) int TripledDetour(int value) {
     // observe or adjust, then let the game's own code run.
     return g_original_doubled(value) + value;
 }
+
+// The ability method's stand-in: the game's prototype, and a body that writes
+// down what it was handed. Volatile stores for the reason `Doubled` reads a
+// volatile — they make it long enough to detour, and they cannot be optimised
+// away.
+volatile float g_used_x = 0.0F;
+volatile float g_used_y = 0.0F;
+volatile int g_used_press = -1;
+volatile int g_uses = 0;
+
+__attribute__((noinline)) bool FakeUseAbility(void* self, float x, float y, std::int32_t press,
+                                              void* method_info) {
+    (void)self;
+    (void)method_info;
+    g_used_x = x;
+    g_used_y = y;
+    g_used_press = press;
+    g_uses = g_uses + 1;
+    return true;
+}
+
+using UseAbilityFn = bool (*)(void*, float, float, std::int32_t, void*);
+
+/// The game pressing its own key: a call through the method's address, which is
+/// where a detour sits. Through a volatile pointer, so the compiler cannot call
+/// the stand-in's body directly and bypass the detour it is testing.
+UseAbilityFn volatile g_press_key = &FakeUseAbility;
 
 void HooksDivertAndRestore() {
     auto engine = brownie::hooks::HookEngine::Create();
@@ -567,6 +595,41 @@ void AimRecordsAreReadStrictly() {
                                            speedless),
           "a shot with no speed still leaves a usable aim");
     Check(!speedless.has_motion, "but nothing to solve with");
+}
+
+void AbilityRecordsAreReadStrictly() {
+    brownie::overlay::AbilityCommand cast;
+    Check(brownie::overlay::ParseAbilityCastRecord("ability-cast|1250|-400|250", cast),
+          "a cast record parses");
+    Check(cast.x_hundredths == 1250 && cast.y_hundredths == -400,
+          "in hundredths of a tile, sign and all");
+    Check(cast.hold_ms == 250, "with how long it may wait");
+
+    brownie::overlay::AbilityCommand aim;
+    Check(brownie::overlay::ParseAbilityAimRecord("ability-aim|-75|300|400", aim),
+          "an aim record parses");
+    Check(aim.x_hundredths == -75 && aim.y_hundredths == 300 && aim.hold_ms == 400,
+          "in the same units");
+
+    // The two are the same shape and opposite requests: one presses the key,
+    // the other only points presses the player makes. Reading one as the other
+    // would be a cast nobody asked for.
+    brownie::overlay::AbilityCommand kept = cast;
+    Check(!brownie::overlay::ParseAbilityCastRecord("ability-aim|1|2|300", kept),
+          "an aim is not a cast");
+    Check(!brownie::overlay::ParseAbilityAimRecord("ability-cast|1|2|300", kept),
+          "and a cast is not an aim");
+    Check(!brownie::overlay::ParseAbilityCastRecord("aim|1|2|300", kept),
+          "nor is the shots' aim either of them");
+    Check(!brownie::overlay::ParseAbilityCastRecord("ability-cast|1|2", kept),
+          "a record missing a field is refused");
+    Check(!brownie::overlay::ParseAbilityCastRecord("ability-cast|1.5|2|300", kept),
+          "and so is one that is not whole numbers");
+    Check(!brownie::overlay::ParseAbilityCastRecord("ability-cast|1|2|0", kept),
+          "a cast with no time to be made in is refused");
+    Check(!brownie::overlay::ParseAbilityAimRecord("ability-aim|1|2|-5", kept),
+          "and an aim that never applies");
+    Check(kept.hold_ms == 250 && kept.x_hundredths == 1250, "and a refusal changes nothing");
 }
 
 /// The lead the frame works out, which is the whole of what auto-aim does.
@@ -1104,6 +1167,87 @@ void AimRedirectsOnlyWhatItWasGiven() {
     // Aiming at nothing is not aiming at the origin.
     hook.Aim(nullptr, 0.5F, brownie::NowMs() + 1000);
     Check(!hook.AngleFor(nullptr, angle), "a null player is not a target");
+}
+
+/// The ability key, pressed for the player and pointed for them.
+///
+/// The game's method needs a game, but a function of the same shape in this
+/// binary can be called and detoured exactly as the game's is — which checks the
+/// claims that decide whether the client builds the use it would have built
+/// anyway: a cast is one press on the way down, a place goes in the engine's way
+/// up, the player's press is handed the aimed point and nothing else is.
+void TheAbilityKeyIsPressedAndPointedLikeTheGamesOwn() {
+    auto engine = brownie::hooks::HookEngine::Create();
+    if (!engine.ok()) {
+        Check(false, "the hook engine initialises");
+        return;
+    }
+
+    int player = 0;
+    brownie::game::PlayerAbility ability;
+    Check(!ability.Cast(&player, 1.0F, 1.0F), "an unbound ability presses nothing");
+    Check(!ability.InstallAim().ok(), "and cannot be detoured before it is bound");
+
+    ability.Bind(reinterpret_cast<void*>(&FakeUseAbility));
+    Check(ability.bound(), "binding publishes the method");
+
+    g_uses = 0;
+    Check(ability.Cast(&player, 12.5F, -4.0F), "a cast answers what the game answered");
+    Check(g_uses == 1, "and is one press");
+    Check(g_used_x == 12.5F && g_used_y == 4.0F,
+          "at the place asked for, with Y turned the engine's way up");
+    Check(g_used_press == static_cast<int>(brownie::game::AbilityPress::kStartUse),
+          "as the key going down");
+
+    Check(!ability.Cast(nullptr, 1.0F, 1.0F), "no player, no press");
+    Check(!ability.Cast(&player, std::numeric_limits<float>::quiet_NaN(), 1.0F),
+          "and no press at a place that is not a number");
+    Check(g_uses == 1, "neither of which reached the game");
+
+    Check(ability.InstallAim().ok(), "the aim detour installs once the method is bound");
+    Check(ability.aim_installed(), "and says so");
+
+    brownie::game::PlayerAbility second;
+    second.Bind(reinterpret_cast<void*>(&FakeUseAbility));
+    Check(!second.InstallAim().ok(), "while a second one is refused");
+
+    // The game's own press, cursor at (3, -5) in the engine's terms.
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 3.0F && g_used_y == -5.0F, "a press with nothing aimed keeps its cursor");
+
+    ability.Aim(7.0F, 2.0F, brownie::NowMs() + 1000);
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 7.0F && g_used_y == -2.0F,
+          "an aimed press is handed the point, the engine's way up");
+    Check(ability.redirected() == 1, "and is counted");
+
+    g_press_key(&player, 3.0F, -5.0F, 2, nullptr);
+    Check(g_used_x == 3.0F && g_used_press == 2, "the key coming up is left alone");
+
+    Check(ability.Cast(&player, 9.0F, 9.0F), "a cast still goes through with an aim standing");
+    Check(g_used_x == 9.0F && g_used_y == -9.0F,
+          "to where the runtime sent it, not to where the player's presses are pointed");
+    Check(ability.redirected() == 1, "and is not counted as one of theirs");
+
+    ability.ClearAim();
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 3.0F, "a cleared aim points nothing");
+
+    // An aim that has run out is the player's own again, whatever the runtime
+    // that published it is doing.
+    ability.Aim(7.0F, 2.0F, brownie::NowMs());
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 3.0F, "and neither does an expired one");
+
+    ability.Aim(std::numeric_limits<float>::infinity(), 2.0F, brownie::NowMs() + 1000);
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 3.0F, "nor one at a place that is not a number");
+
+    ability.Remove();
+    Check(!ability.aim_installed(), "the detour comes out");
+    ability.Aim(7.0F, 2.0F, brownie::NowMs() + 1000);
+    g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
+    Check(g_used_x == 3.0F, "and the game's own method is itself again");
 }
 
 /// A swap takes one square and puts back exactly what it took.
@@ -3079,6 +3223,13 @@ void RecordsBecomeTargetsThatExpire() {
     Check(std::fabs(aimed.x + 0.5F) < 0.001F && std::fabs(aimed.y - 0.75F) < 0.001F,
           "an aim record is converted the same way");
     Check(aimed.expires_at_ms == 5300, "and expires the same way");
+
+    const brownie::overlay::AbilityCommand cast{1250, -400, 250};
+    const auto pressed = brownie::app::AbilityCastFrom(cast, 7000);
+    Check(pressed.wanted, "a cast record is a press somebody wants");
+    Check(std::fabs(pressed.x - 12.5F) < 0.001F && std::fabs(pressed.y + 4.0F) < 0.001F,
+          "at a place on the game's map, in tiles");
+    Check(pressed.expires_at_ms == 7250, "and only for as long as it asked to wait");
 }
 
 /// A camera that is rotated and zoomed, as measured rather than as configured.
@@ -3232,6 +3383,12 @@ void AHoldIsBounded() {
     Check(brownie::app::AimTargetFrom(aim, 1000).expires_at_ms ==
               1000 + static_cast<std::uint64_t>(brownie::app::kMaxHoldMs),
           "the same for where the shots go");
+
+    brownie::overlay::AbilityCommand cast{};
+    cast.hold_ms = 1000 * 1000;
+    Check(brownie::app::AbilityCastFrom(cast, 1000).expires_at_ms ==
+              1000 + static_cast<std::uint64_t>(brownie::app::kMaxHoldMs),
+          "and for how long a press may wait to be made");
 
     // A record that asked for nothing at all expires the moment it arrives,
     // rather than reading as an enormous unsigned number.
@@ -3480,9 +3637,11 @@ int main() {
     WeaponRecordsCarryTheName();
     MoveRecordsAreReadStrictly();
     AimRecordsAreReadStrictly();
+    AbilityRecordsAreReadStrictly();
     AimPointsAreSolvedFromWhereTheShooterStands();
     TargetMotionIsMeasuredFromWhatTheClientDraws();
     AimRedirectsOnlyWhatItWasGiven();
+    TheAbilityKeyIsPressedAndPointedLikeTheGamesOwn();
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();
     ProjectileNoclipInstallsBothOrNeither();

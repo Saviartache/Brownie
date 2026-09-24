@@ -132,6 +132,19 @@ constexpr MethodQuery kComputeShootAngleQuery{kPlayer, "ELCBJAFBLJG", {}, "Syste
 constexpr std::string_view kShootWithAngleParameters[] = {"System.Single"};
 constexpr MethodQuery kShootWithAngleQuery{kShootClass, "EHGHCACPAGH", {}, "System.Void",
                                            kShootWithAngleParameters};
+
+/// `bool UseAbility(float x, float y, AbilityPress press)` on the local player.
+///
+/// **The third type is obfuscator output, spelled the way this build spells
+/// it.** A rebuild renames it — and renames the method too, so the spelling
+/// costs nothing a rename was not already going to cost, and it is what refuses
+/// a `bool(float, float, int)` of some other meaning that would then be called
+/// through a prototype that does not describe it. This method is called, not
+/// only detoured, which is the case that rule exists for.
+constexpr std::string_view kUseAbilityParameters[] = {"System.Single", "System.Single",
+                                                      "ELAINNINAMO"};
+constexpr MethodQuery kUseAbilityQuery{kLocalPlayerClass, "PBABCOMDDPO", {}, "System.Boolean",
+                                       kUseAbilityParameters};
 constexpr std::string_view kIntParameter[] = {"System.Int32"};
 constexpr std::string_view kShaderPropertiesParameter[] = {
     "DecaGames.RotMG.Objects.Map.Data.ShaderProperties"};
@@ -165,6 +178,7 @@ constexpr std::array kMethods{
     KeyedMethodQuery{kPlayerMoveTo, kMoveTo},
     KeyedMethodQuery{kComputeShootAngle, kComputeShootAngleQuery},
     KeyedMethodQuery{kShootWithAngle, kShootWithAngleQuery},
+    KeyedMethodQuery{kPlayerUseAbility, kUseAbilityQuery},
     KeyedMethodQuery{kSetPlayerSkin, kSetPlayerSkinQuery},
     KeyedMethodQuery{kSetPlayerShader, kSetPlayerShaderQuery},
     KeyedMethodQuery{kSetPlayerGlow, kSetPlayerGlowQuery},

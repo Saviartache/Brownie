@@ -279,6 +279,11 @@ export class ProxyServer implements SessionApi {
       onServerOpened: () => {
         world.markConnected();
       },
+      // The outbound queue speaks only right after the client has: that is the
+      // one point in the client's stream where it owes the server nothing.
+      onClientPacketPassed: (packet) => {
+        context?.outbound.clientPacketPassed(packet);
+      },
       onClosed: (closed) => {
         this.#sessions.delete(closed.id);
         // Before the listeners: a plugin told the session has gone must not be

@@ -498,9 +498,6 @@ export function createVaultSortPlugin(inputs: VaultSortInputs): Plugin {
             position: { x: session.self.x, y: session.self.y },
             slotObject1: { objectId: chest.objectId, slotId: move.from, objectType: fromType },
             slotObject2: { objectId: chest.objectId, slotId: move.to, objectType: toType },
-            // No `tickId`: the definition carries it as a trailing optional and
-            // this build of the game does not — filling it in was what had every
-            // swap answered with `Bad message received`.
           },
           {
             // Sorting a chest is the most patient thing the runtime does and
