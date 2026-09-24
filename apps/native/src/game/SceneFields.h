@@ -51,6 +51,10 @@ inline constexpr std::string_view kGraphicSetColor = "unity.Graphic.set_color";
 /// away while there is still a runtime to let go of. See `QuitWatch.h`.
 inline constexpr std::string_view kApplicationQuit = "unity.Application.Quit";
 
+/// The game's own `InputManager.Update`, detoured to reach the game's main
+/// thread once a frame — which `Present` is not. See `MainThreadTick.h`.
+inline constexpr std::string_view kInputManagerUpdate = "game.InputManager.Update";
+
 /// The camera, and the one thing worth asking it: where a point in the world
 /// lands on the screen. Inverted, that is where the mouse is pointing — which
 /// nothing else in either process knows. See `ScreenProjection.h`.

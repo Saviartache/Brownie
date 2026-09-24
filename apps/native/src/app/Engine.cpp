@@ -397,6 +397,12 @@ void Engine::AcceptRecord(std::string_view record) {
     }
     if (overlay::AbilityCommand cast; overlay::ParseAbilityCastRecord(record, cast)) {
         control_.Cast(AbilityCastFrom(cast, NowMs()));
+        // The main-thread detour goes in on the setup pass, and the first cast
+        // is what asks for it — so the pass is brought forward, or that cast
+        // would wait out the rest of its interval and lapse unmade.
+        if (!main_tick_.installed()) {
+            setup_.Trigger();
+        }
         return;
     }
     if (overlay::AbilityCommand aim; overlay::ParseAbilityAimRecord(record, aim)) {
@@ -763,9 +769,16 @@ void Engine::AdvanceSetup() {
 
     // And the ability key's, on the same terms: only once the runtime has asked
     // to point the player's own presses, which it does only while that setting
-    // is on. Casting needs no detour at all — it calls the method it just bound.
+    // is on.
     if (control_.ability_aim_wanted() && !control_.ability_aim_installed()) {
         control_.InstallAbilityAim();
+    }
+
+    // Casting calls the method it just bound — but from the game's main thread,
+    // which only a detour of the game's own reaches. Same terms again: not
+    // until the runtime has asked for a cast.
+    if (control_.cast_wanted() && !main_tick_.installed()) {
+        InstallMainThreadTick();
     }
 
     // The same argument, and the same shape: the detours go in the first time
@@ -865,6 +878,13 @@ void Engine::LetGo() noexcept {
 void Engine::InstallAimHook() {
     control_.InstallAim(binding_.MethodAddress(game::kComputeShootAngle).value_or(nullptr),
                         binding_.MethodAddress(game::kShootWithAngle).value_or(nullptr));
+}
+
+void Engine::InstallMainThreadTick() {
+    // Failure is the ordinary answer until the game has built its input
+    // manager, and the loop is the retry, so it stays out of the runtime's log.
+    (void)main_tick_.Install(binding_.MethodAddress(game::kInputManagerUpdate).value_or(nullptr),
+                             [this] { control_.ApplyOnMainThread(NowMs()); });
 }
 
 void Engine::InstallProjectileNoclip() {

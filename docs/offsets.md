@@ -226,6 +226,7 @@ against:
 | `self.computeShootAngle` | `void ELCBJAFBLJG(byte, out float, out bool, bool)`  | auto-aim, through `AimHook`  |
 | `self.shootWithAngle`    | `void EHGHCACPAGH(float)`                            | auto-aim, through `AimHook`  |
 | `self.useAbility`        | `bool PBABCOMDDPO(float, float, ELAINNINAMO)`        | auto-ability, through `PlayerAbility` |
+| `game.InputManager.Update` | `void Update()` on `DecaGames.RotMG.Managers.Options.InputManager` | auto-ability, through `MainThreadTick` — the game's main thread, once a frame |
 | `shot.hitsWall`          | `bool GJFKGLJEGKO(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `shot.tileBlocks`        | `bool IACODGNOFMH(int, int)`                         | projectile noclip, through `ProjectileNoclip` |
 | `map.walkable.<name>`    | every `bool(float, float)` on the world manager       | player noclip, through `PlayerNoclip` |
@@ -250,6 +251,13 @@ to cast, and detoured to hand the player's own key-down a point other than the
 cursor. Its query spells the enumeration's name because it is called as well as
 detoured: a `bool(float, float, int)` of some other meaning, found by arity
 alone, would be called through a prototype that does not describe it.
+
+**It is called from `InputManager.Update`, never from `Present`.** In this game
+`Present` runs on Unity's render thread, which IL2CPP does not know, and the
+ability method dereferenced IL2CPP's missing per-thread table there on the first
+thread-static it touched. `InputManager.Update` is a MonoBehaviour message, so
+Unity calls it by name on the main thread every frame and the obfuscator left
+both names alone.
 
 The two collision methods are detoured too, and the opposite is true of them:
 **both or neither.** The inner one makes the square under a shot passable, the

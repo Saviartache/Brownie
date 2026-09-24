@@ -154,8 +154,9 @@ bool PlayerAbility::Cast(void* player, float x, float y) {
     // only once it exists, and whether it does is the IPC thread's to change —
     // the flag is the frame's own and cannot be changed under it.
     //
-    // No thread attach, for the reason `PlayerMover::StepTowards` gives: this is
-    // the game's own thread, inside its frame.
+    // No thread attach: this is the game's main thread, which IL2CPP has known
+    // since before the first frame. It is *only* that — see `MainThreadTick.h`
+    // for what this call did on the render thread, where `Present` runs.
     casting_ = true;
     const bool used = reinterpret_cast<UseAbilityFn>(use_ability_)(
         player, x, EngineY(y), static_cast<std::int32_t>(AbilityPress::kStartUse), nullptr);

@@ -169,7 +169,6 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     // Refreshed by version: the common frame copies nothing at all.
     move_target_.Refresh(frame_target_, frame_target_version_);
     aim_target_.Refresh(frame_aim_, frame_aim_version_);
-    ability_cast_.Refresh(frame_cast_, frame_cast_version_);
 
     // Nothing is being walked at until this frame says so. Cleared first so
     // every path out of here leaves an honest answer behind it.
@@ -193,17 +192,15 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
     const bool walking = frame_target_.wanted && now_ms < frame_target_.expires_at_ms &&
                          previous != 0 && now_ms > previous;
     const bool aiming = frame_aim_.wanted && now_ms < frame_aim_.expires_at_ms && aim_.installed();
-    const bool casting =
-        frame_cast_.wanted && now_ms < frame_cast_.expires_at_ms && ability_.bound();
     if (!aiming) {
         // Whatever was aimed at has expired or been withdrawn. Said out loud
         // rather than left to the hook's own deadline — and on every frame that
-        // is not aiming, including one that only walks or casts: the player
-        // gets their own aim back on the next shot, not on the next frame that
-        // happens to have nothing else to do.
+        // is not aiming, including one that only walks: the player gets their
+        // own aim back on the next shot, not on the next frame that happens to
+        // have nothing else to do.
         aim_.Clear();
     }
-    if (!walking && !aiming && !casting) {
+    if (!walking && !aiming) {
         // Nothing was read this frame, so there is no position to measure the
         // next one against — a walk that starts after a quiet stretch would
         // otherwise be charged for every frame of it.
@@ -437,17 +434,34 @@ void PlayerControl::Apply(std::uint64_t now_ms) {
             aim_.Aim(player.object, std::atan2(dy, dx), frame_aim_.expires_at_ms);
         }
     }
+}
 
-    if (casting) {
-        // **Spent before the call, whatever the game answers.** A press the
-        // client turned down — silenced, on cooldown, out of mana — is its
-        // decision about this moment, and pressing again on the next frame
-        // would be arguing with it sixty times a second. The runtime hears
-        // whether it went through from the client's own `USEITEM`, and asks
-        // again on its own clock if it did not.
-        frame_cast_.wanted = false;
-        (void)ability_.Cast(player.object, frame_cast_.x, frame_cast_.y);
+void PlayerControl::ApplyOnMainThread(std::uint64_t now_ms) {
+    // The common frame: nothing published since the last one, one atomic load.
+    ability_cast_.Refresh(main_cast_, main_cast_version_);
+    if (!main_cast_.wanted || now_ms >= main_cast_.expires_at_ms || !ability_.bound() ||
+        !ready_.load(std::memory_order_acquire)) {
+        return;
     }
+
+    // Found afresh, for the reason `Apply` gives — and found here, on the
+    // thread about to hand it to the game as `this`, rather than trusted from a
+    // frame on another thread.
+    game::PlayerLocation player;
+    if (!game::LocatePlayer(*game_, route_, player)) {
+        // No player right now — a map loading. The press waits for one until
+        // its hold runs out.
+        return;
+    }
+
+    // **Spent before the call, whatever the game answers.** A press the client
+    // turned down — silenced, on cooldown, out of mana — is its decision about
+    // this moment, and pressing again on the next frame would be arguing with
+    // it sixty times a second. The runtime hears whether it went through from
+    // the client's own `USEITEM`, and asks again on its own clock if it did
+    // not.
+    main_cast_.wanted = false;
+    (void)ability_.Cast(player.object, main_cast_.x, main_cast_.y);
 }
 
 }  // namespace brownie::app

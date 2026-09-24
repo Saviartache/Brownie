@@ -35,6 +35,10 @@ constexpr ClassQuery kViewHandler{kMapDataNamespace, "ViewHandler", {}};
 constexpr ClassQuery kObjectProperties{kMapDataNamespace, "ObjectProperties", {}};
 constexpr ClassQuery kShaderProperties{kMapDataNamespace, "ShaderProperties", {}};
 constexpr ClassQuery kApplicationManager{"DecaGames.RotMG.Managers", "ApplicationManager", {}};
+
+/// Where the game reads its keys. A MonoBehaviour, so Unity finds its `Update`
+/// by name — which is why neither name was touched by the obfuscator.
+constexpr ClassQuery kInputManager{"DecaGames.RotMG.Managers.Options", "InputManager", {}};
 constexpr ClassQuery kShaderEffectManager{{}, "ShaderEffectManager", {}};
 constexpr ClassQuery kShaderLibrary{{}, "JCHBHNEGDFP", {}};
 
@@ -91,8 +95,6 @@ constexpr std::string_view kIntType = "System.Int32";
 constexpr std::string_view kVoidType = "System.Void";
 constexpr std::string_view kShaderEffectManagerType = "ShaderEffectManager";
 constexpr std::string_view kShaderLibraryType = "JCHBHNEGDFP";
-constexpr std::string_view kShaderPropertiesType =
-    "DecaGames.RotMG.Objects.Map.Data.ShaderProperties";
 constexpr std::string_view kShaderListType =
     "System.Collections.Generic.List<DecaGames.RotMG.Objects.Map.Data.ShaderProperties>";
 
@@ -122,6 +124,8 @@ constexpr std::array kMethods{
     // The no-argument overload. `Quit(int)` exits with a code and is not the
     // one the game's own quit path calls.
     KeyedMethodQuery{kApplicationQuit, MethodQuery{kApplication, "Quit", {}, kVoidType}},
+    // No arguments, and the only method of that name on the class.
+    KeyedMethodQuery{kInputManagerUpdate, MethodQuery{kInputManager, "Update", {}, kVoidType}},
     KeyedMethodQuery{kCameraMain, MethodQuery{kCamera, "get_main", {}, kCameraType}},
     // **The one-argument overload**, which is the one that exists in every
     // build. The other takes a stereoscopic eye that this game has no use for,

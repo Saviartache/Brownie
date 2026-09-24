@@ -642,13 +642,19 @@ of those.
 
 A cast is never answered on this link. The runtime hears it in the client's own
 `USEITEM` coming through the proxy — and hears nothing when the client refused
-it, which is how it knows to ask again later. The cast is spent by the frame
+it, which is how it knows to ask again later. The cast is spent by the tick
 that makes it, whatever the client answers: pressing again on the next frame
 would be arguing with a refusal at the frame rate. The module's own press is
 not pointed by a standing `ability-aim` — the two can name different places, an
 attack fired at a boss while the player's presses go to the minion in front of
-it. The detour goes in only once the first `ability-aim` arrives; a cast needs
-none.
+it. The aim detour goes in only once the first `ability-aim` arrives.
+
+**A cast is made on the game's main thread, not in the frame that walks.** The
+module presses the key from a detour on `InputManager.Update`, just before the
+game reads its own keys — which goes in when the first `ability-cast` arrives.
+`Present`, where `move` and `aim` act, is Unity's render thread in this game,
+and the ability method crashed the game there. See
+[the architecture](./architecture.md#threading).
 
 **Where a position enters that decision, it is the module's to supply.** The
 runtime hears where things are five times a second and the game moves them every

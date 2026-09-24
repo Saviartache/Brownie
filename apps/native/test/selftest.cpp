@@ -36,6 +36,7 @@
 #include "game/ClientShots.h"
 #include "game/GlowFields.h"
 #include "game/HealthBarTint.h"
+#include "game/MainThreadTick.h"
 #include "game/OffsetTable.h"
 #include "game/PlayerAbility.h"
 #include "game/PlayerCollision.h"
@@ -306,6 +307,24 @@ using UseAbilityFn = bool (*)(void*, float, float, std::int32_t, void*);
 /// where a detour sits. Through a volatile pointer, so the compiler cannot call
 /// the stand-in's body directly and bypass the detour it is testing.
 UseAbilityFn volatile g_press_key = &FakeUseAbility;
+
+// `InputManager.Update`'s stand-in: it notes that it ran, and in what order
+// relative to the tick, the way the game's own key handling would.
+volatile int g_updates = 0;
+volatile int g_update_saw_ticks = -1;
+volatile int g_ticks = 0;
+
+__attribute__((noinline)) void FakeInputUpdate(void* self, void* method_info) {
+    (void)self;
+    (void)method_info;
+    g_update_saw_ticks = g_ticks;
+    g_updates = g_updates + 1;
+}
+
+using InputUpdateFn = void (*)(void*, void*);
+
+/// Unity calling the component's `Update`, through its address.
+InputUpdateFn volatile g_unity_update = &FakeInputUpdate;
 
 void HooksDivertAndRestore() {
     auto engine = brownie::hooks::HookEngine::Create();
@@ -1248,6 +1267,49 @@ void TheAbilityKeyIsPressedAndPointedLikeTheGamesOwn() {
     ability.Aim(7.0F, 2.0F, brownie::NowMs() + 1000);
     g_press_key(&player, 3.0F, -5.0F, 1, nullptr);
     Check(g_used_x == 3.0F, "and the game's own method is itself again");
+}
+
+/// The main-thread tick runs once per call of the game's `Update`, ahead of it.
+///
+/// Ahead of it is the claim that matters: a press made by the tick has happened
+/// by the time the game reads the keys, so the player's own press in the same
+/// frame meets the client's checks rather than slipping in first.
+void TheMainThreadTickRunsAheadOfTheGamesInput() {
+    auto engine = brownie::hooks::HookEngine::Create();
+    if (!engine.ok()) {
+        Check(false, "the hook engine initialises");
+        return;
+    }
+
+    brownie::game::MainThreadTick tick;
+    Check(!tick.Install(nullptr, [] {}).ok(), "an unresolved Update is not detoured");
+    Check(!tick.Install(reinterpret_cast<void*>(&FakeInputUpdate), nullptr).ok(),
+          "and neither is one with nothing to run");
+    Check(!tick.installed(), "so nothing is installed");
+
+    g_ticks = 0;
+    g_updates = 0;
+    Check(tick.Install(reinterpret_cast<void*>(&FakeInputUpdate),
+                       [] { g_ticks = g_ticks + 1; })
+              .ok(),
+          "the tick installs on a resolved Update");
+
+    brownie::game::MainThreadTick second;
+    Check(!second.Install(reinterpret_cast<void*>(&FakeInputUpdate), [] {}).ok(),
+          "while a second one is refused");
+
+    int manager = 0;
+    g_unity_update(&manager, nullptr);
+    Check(g_ticks == 1 && g_updates == 1, "one Update is one tick");
+    Check(g_update_saw_ticks == 1, "and the tick has run by the time the game's own input does");
+
+    g_unity_update(&manager, nullptr);
+    Check(g_ticks == 2 && g_updates == 2, "every frame");
+
+    tick.Remove();
+    Check(!tick.installed(), "the detour comes out");
+    g_unity_update(&manager, nullptr);
+    Check(g_ticks == 2 && g_updates == 3, "and the game's Update is itself again");
 }
 
 /// A swap takes one square and puts back exactly what it took.
@@ -3642,6 +3704,7 @@ int main() {
     TargetMotionIsMeasuredFromWhatTheClientDraws();
     AimRedirectsOnlyWhatItWasGiven();
     TheAbilityKeyIsPressedAndPointedLikeTheGamesOwn();
+    TheMainThreadTickRunsAheadOfTheGamesInput();
     TextRecordsCarryTheWholeMessage();
     ATileSwapPutsBackWhatItTook();
     ProjectileNoclipInstallsBothOrNeither();

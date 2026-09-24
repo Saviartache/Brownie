@@ -593,20 +593,35 @@ a failure and there is nowhere left to report a failure of it.
 Node runs on one loop and stays there: no blocking calls in handlers, no
 synchronous file I/O after startup, no `Buffer.concat` in the framer.
 
-The native module has exactly three threads, and no component may create a
-fourth:
+The native module creates exactly two threads of its own, and no component may
+create a third. It also acts on two of the game's:
 
 | Thread | Owns | Rule |
 |---|---|---|
-| Render (the game's, via `Present`) | IL2CPP access, overlay, feature ticks | The only thread that may touch the game. |
+| Main (the game's, via `InputManager.Update`) | the ability press | The only one that may run the game's own logic. |
+| Render (the game's, via `Present`) | overlay, walking, shot aim, scene passes | Not known to IL2CPP; calls only what touches no thread-bound state. |
 | IPC | pipe read/write, message decode | May only enqueue; never calls into IL2CPP. |
 | Watchdog | unload event, health checks | Owns teardown ordering. |
+
+**`Present` is not the main thread in this game**, and the table used to say it
+was. The game renders with Unity's multithreaded renderer (`Rendering threading
+mode: MultiThreaded` in its `Player.log`), so the swap chain is presented from
+Unity's render thread — which IL2CPP has never attached. A method that reads
+and writes its own fields runs there without complaint, which is why `MoveTo`
+has worked from there. The ability method does not: it is the client's whole
+key handler, and the first `[ThreadStatic]` it touched read IL2CPP's per-thread
+table on a thread that has none and took the game down (access violation at
+address 0, in both crash dumps). So the ability press is made from a detour on
+`InputManager.Update` — a MonoBehaviour's `Update`, called by name on the main
+thread every frame, right where the game reads its own keys. See
+`game/MainThreadTick.h`. Anything that calls deeper into the game than a field
+setter belongs there too.
 
 State crossing a thread boundary crosses it as a message or through a
 single-writer atomic snapshot — not through a mutex wrapped around a subsystem.
 This is a direct consequence of the existing (correct) rule that IPC-thread
 feature handlers may only *store* state; anything needing an IL2CPP call raises
-a request that the render thread consumes on its next tick.
+a request that one of the game's threads consumes on its next tick.
 
 ## Startup and shutdown
 
@@ -650,7 +665,7 @@ belongs here and nowhere else.
 |---|---|---|
 | `Engine` | the IPC thread, the link, the published model, the wiring | IPC, plus the frame it hands to `Overlay` |
 | `GameBinding` | the IL2CPP runtime, the offset table, the player reader | IPC only |
-| `PlayerControl` | the route, the mover, the aim detours, the ability key, the targets | published on IPC, acted on by the frame |
+| `PlayerControl` | the route, the mover, the aim detours, the ability key, the targets | published on IPC; walking and aim acted on by the frame, the ability press by the main thread |
 | `ScenePatches` | the Unity scene walk, the health bar tint, the collision write | resolved on IPC, applied by the frame |
 | `Inspection` | nothing — it takes a catalog and a sink | whichever calls it |
 

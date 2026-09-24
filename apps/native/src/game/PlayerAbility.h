@@ -15,7 +15,8 @@
 // So there are two things here, and both go through the same method:
 //
 //   * `Cast` calls it, as the key does on the way down with the cursor at a
-//     point the runtime chose. **Game thread only.**
+//     point the runtime chose. **The game's main thread only** — see
+//     `MainThreadTick.h` for what running it anywhere else did.
 //   * A detour points the presses the *player* makes: while an aim stands, a
 //     press on the way down is handed the aimed point in place of the cursor,
 //     and the client builds the use, the shots and the cooldown from that point
@@ -97,7 +98,9 @@ class PlayerAbility {
     void ClearAim() noexcept;
 
     /// Uses the ability at a place on the map, as the key would with the cursor
-    /// there. **Game thread only**: it is a call into managed code.
+    /// there. **The game's main thread only**: it is the client's whole key
+    /// handler, and on any other thread the first thread-static it touches
+    /// takes the game down.
     ///
     /// Not pointed by an aim that stands — this is a press of the runtime's own,
     /// aimed where the runtime chose, and the two can differ: an attack fired at
@@ -109,7 +112,7 @@ class PlayerAbility {
     bool Cast(void* player, float x, float y);
 
     /// How many of the player's presses have been pointed. Written by the
-    /// game's thread, read by any.
+    /// game's main thread, read by any.
     [[nodiscard]] std::uint32_t redirected() const noexcept {
         return redirected_.load(std::memory_order_relaxed);
     }
@@ -120,7 +123,7 @@ class PlayerAbility {
     /// Where a press made right now should land, on the game's map, or nothing.
     [[nodiscard]] bool AimFor(float& x, float& y) noexcept;
 
-    /// Whether the call running now is {@link Cast}'s own. **Game thread.**
+    /// Whether the call running now is {@link Cast}'s own. **Main thread.**
     [[nodiscard]] bool casting() const noexcept { return casting_; }
 
     /// The code the detour replaced, to call through to. Null until the detour
@@ -138,9 +141,8 @@ class PlayerAbility {
     /// through untouched.
     ///
     /// **A plain flag, because only one thread ever reads or writes it**: the
-    /// game calls this method from its input handling and `Cast` runs inside
-    /// the frame, and those are the same thread — the one thread this module
-    /// calls into the game from at all. See `docs/architecture.md`.
+    /// game calls this method from its input handling on its main thread, and
+    /// `Cast` runs from the main-thread tick just before that input handling.
     bool casting_ = false;
 
     /// The aimed point, both halves in one word, so a press can never take one

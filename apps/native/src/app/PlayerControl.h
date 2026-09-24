@@ -1,15 +1,23 @@
-// Telling the player where to walk and where to shoot.
+// Telling the player where to walk, where to shoot, and when to use their
+// ability.
 //
-// **Two threads meet here, and that is the whole reason this is one object.**
-// What the runtime asks for arrives on the IPC thread; acting on it means
-// calling into managed code, which only the game's own thread may do. The
-// snapshots in the middle are the boundary: the IPC side publishes a target,
-// the frame reads whatever is current, and neither waits for the other.
+// **Threads meet here, and that is the whole reason this is one object.** What
+// the runtime asks for arrives on the IPC thread; acting on it means calling
+// into managed code, which the IPC thread may not do. The snapshots in the
+// middle are the boundary: the IPC side publishes a target, the acting side
+// reads whatever is current, and neither waits for the other.
 //
-// Everything the frame needs is published once and read without a lock. The
+// **And the acting side is two threads, not one.** Walking and the shot's aim
+// act from the `Present` detour, which in this game is Unity's render thread —
+// a thread IL2CPP does not know, fine for `MoveTo` and for storing an angle.
+// The ability press acts from the game's main thread, through
+// `game/MainThreadTick`, because the ability method is the client's whole key
+// handler and crashed the game the one time it ran on the render thread.
+//
+// Everything either needs is published once and read without a lock. The
 // route to the player and the runtime it belongs to settle the moment the
 // offsets resolve and never change for the run, so one release-acquire pair
-// makes both visible together — a frame either has both or has neither.
+// makes both visible together — a reader either has both or has neither.
 
 #pragma once
 
@@ -101,10 +109,10 @@ struct AimTarget {
 
 /// One press of the ability key the runtime wants made, where, and by when.
 ///
-/// **Spent by the frame that makes it**, like a one-shot move and for the same
+/// **Spent by the tick that makes it**, like a one-shot move and for the same
 /// reason: a target that stood would be pressed again on every frame of its
-/// hold. The hold is only how long it may wait for a frame that can find the
-/// player — a cast made late is aimed at where the fight used to be.
+/// hold. The hold is only how long it may wait for a main-thread tick that can
+/// find the player — a cast made late is aimed at where the fight used to be.
 struct AbilityCast {
     bool wanted = false;
     /// A place on the game's map.
@@ -227,8 +235,9 @@ class PlayerControl {
     /// write a detour into the game's code.
     [[nodiscard]] bool aim_wanted() const noexcept { return aim_wanted_; }
 
-    /// Binds the method the ability key calls. IPC thread. Casting needs only
-    /// this; pointing the player's own presses needs the detour below as well.
+    /// Binds the method the ability key calls. IPC thread. Casting needs this
+    /// and the main-thread tick; pointing the player's own presses needs the
+    /// detour below instead.
     void BindAbility(void* use_ability) noexcept { ability_.Bind(use_ability); }
     [[nodiscard]] bool ability_bound() const noexcept { return ability_.bound(); }
 
@@ -242,9 +251,9 @@ class PlayerControl {
     /// {@link aim_wanted}, and the same thread.
     [[nodiscard]] bool ability_aim_wanted() const noexcept { return ability_aim_wanted_; }
 
-    /// Where the player is right now. **Game thread only**, and false when
-    /// there is no player — between realms, at the login screen, during a map
-    /// rebuild.
+    /// Where the player is right now, or false when there is no player —
+    /// between realms, at the login screen, during a map rebuild. It only
+    /// reads, so either acting thread may ask.
     ///
     /// Here rather than in the caller because the route is here: the walk from
     /// the static field to the player object is the one thing this class knows
@@ -256,9 +265,17 @@ class PlayerControl {
     void MoveTo(const MoveTarget& target) { move_target_.Publish(target); }
     void AimAt(const AimTarget& target);
 
-    /// Asks the next frame that finds the player to press the ability key.
-    /// IPC thread. Two published between frames are one press, never two.
-    void Cast(const AbilityCast& cast) { ability_cast_.Publish(cast); }
+    /// Asks the game's main thread to press the ability key, on the next frame
+    /// that finds the player. IPC thread. Two published between frames are one
+    /// press, never two.
+    void Cast(const AbilityCast& cast) {
+        ability_cast_.Publish(cast);
+        cast_wanted_ = true;
+    }
+
+    /// Whether the runtime has ever asked for a cast, which is the only reason
+    /// to detour the game's main thread. Same thread as {@link Cast}.
+    [[nodiscard]] bool cast_wanted() const noexcept { return cast_wanted_; }
 
     /// Points the presses the player makes at a place on the map. IPC thread:
     /// the detour reads it directly, since nothing about it depends on where
@@ -331,9 +348,14 @@ class PlayerControl {
         return ability_.redirected();
     }
 
-    /// Performs whatever the runtime asked for this frame — a step, a shot, a
-    /// cast, or any of them together. **Game thread only**: it calls into
-    /// managed code, which no other thread may do.
+    /// Performs whatever the runtime asked for this frame — a step, a shot, or
+    /// both. **Render thread**, from the `Present` detour.
+    ///
+    /// **Which is not the game's main thread**: the game renders with Unity's
+    /// multithreaded renderer, and IL2CPP does not know the render thread. The
+    /// one call made from here, `MoveTo`, touches nothing that thread lacks;
+    /// anything heavier belongs in {@link ApplyOnMainThread} — see
+    /// `game/MainThreadTick.h` for what running the ability method here did.
     ///
     /// The two are one method because they share the expensive part. Finding
     /// the player is three pointer reads and a position read, none of which can
@@ -341,6 +363,15 @@ class PlayerControl {
     /// it once per *action* rather than once per frame doubled it for no answer
     /// that differed.
     void Apply(std::uint64_t now_ms);
+
+    /// Makes the ability press the runtime asked for, if one is waiting.
+    /// **The game's main thread**, from `MainThreadTick`, before the game reads
+    /// its own keys for the frame.
+    ///
+    /// Its own entry rather than a third branch of {@link Apply}: the ability
+    /// method formats text, plays sounds and allocates, and on the render
+    /// thread the first thread-static it touched took the game down.
+    void ApplyOnMainThread(std::uint64_t now_ms);
 
   private:
     /// Published by the IPC thread, read by the frame that walks towards it.
@@ -358,8 +389,10 @@ class PlayerControl {
     /// Set by a record on the IPC thread, read by the same thread's loop.
     bool aim_wanted_ = false;
 
-    /// Published by the IPC thread, spent by the frame that makes it.
+    /// Published by the IPC thread, spent by the main-thread tick that makes it.
     Snapshot<AbilityCast> ability_cast_;
+    /// Set by a record on the IPC thread, read by the same thread's loop.
+    bool cast_wanted_ = false;
     /// Presses the ability key for the runtime, and points the player's own
     /// presses. Holds a detour, so the rule `aim_` states holds for it too.
     game::PlayerAbility ability_;
@@ -383,8 +416,10 @@ class PlayerControl {
     float frame_walk_y_ = 0.0F;
     AimTarget frame_aim_;
     std::uint64_t frame_aim_version_ = 0;
-    AbilityCast frame_cast_;
-    std::uint64_t frame_cast_version_ = 0;
+    /// The main thread's own copy of the cast, and how far it has caught up.
+    /// Main thread only.
+    AbilityCast main_cast_;
+    std::uint64_t main_cast_version_ = 0;
     /// Where this frame actually pointed, once the client's own reading of the
     /// enemy — if there was one — has shifted the record's point. See
     /// {@link AimTargetNow}, and `game/MapObjects.h` for the shift.

@@ -39,6 +39,7 @@
 #include "core/Result.h"
 #include "core/Snapshot.h"
 #include "core/WinHandle.h"
+#include "game/MainThreadTick.h"
 #include "game/PlayerNoclip.h"
 #include "game/PlayerTileSpeed.h"
 #include "game/ProjectileNoclip.h"
@@ -210,6 +211,10 @@ class Engine {
     /// Puts the aim detours in place, and says in the runtime's log which ones
     /// went in. Only called once the runtime has asked to aim.
     void InstallAimHook();
+
+    /// Detours the game's main thread, so an ability press has somewhere safe
+    /// to be made. Only called once the runtime has asked for one.
+    void InstallMainThreadTick();
 
     /// The player and the camera, as this frame found them.
     struct FrameScreen {
@@ -486,6 +491,11 @@ class Engine {
     /// owns MinHook and destroyed before it.
     GameBinding binding_;
     PlayerControl control_;
+    /// The game's main thread, once a frame. Holds a detour, so it is declared
+    /// after the engine that owns MinHook — and after `control_`, so it is
+    /// destroyed first: its tick reaches into the control, and a tick that
+    /// outlived it would reach into nothing.
+    game::MainThreadTick main_tick_;
     net::ConnectHook redirect_;
     /// All three hold detours, so all three are declared after the engine that
     /// owns MinHook and destroyed before it.
