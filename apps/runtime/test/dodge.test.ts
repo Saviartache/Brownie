@@ -40,6 +40,7 @@ import {
   type BodySighting,
 } from '../src/features/dodge/EnemyBodies.js';
 import { BLAST_MARGIN_TILES, Blasts, type BlastView } from '../src/features/dodge/Blasts.js';
+import { EnemyKeepouts } from '../src/features/dodge/EnemyKeepouts.js';
 import {
   DodgeMarkAnchor,
   DodgeMarkKind,
@@ -72,10 +73,12 @@ import {
   projectileHalfTiles,
 } from '../src/features/dodge/hitbox.js';
 import { StatType } from '../src/constants/StatType.js';
+import type { ProjectileDefinition } from '../src/gamedata/projectiles.js';
+import { SELF_BLAST_MARGIN_TILES } from '../src/state/blasts/SelfBlastTable.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import { PluginPreferences } from '../src/plugins/PluginPreferences.js';
 import type { SettingsRegistry } from '../src/plugins/SettingsRegistry.js';
-import { testLogger } from './fakes.js';
+import { projectileDefinition, testLogger } from './fakes.js';
 import {
   MAX_SPEED_STAT,
   MAX_WALK_TILES_PER_SECOND,
@@ -1769,6 +1772,7 @@ describe('the picture of what it is thinking', () => {
       keepAwayTiles: 2.5 as number | undefined,
       hold: undefined as HeldGround | undefined,
       bodies: new EnemyBodies(),
+      keepOuts: new EnemyKeepouts(),
       blasts: [] as BlastView[],
       ...overrides,
     };
@@ -1876,6 +1880,32 @@ describe('the picture of what it is thinking', () => {
 
     expect(of(marks, DodgeMarkKind.Body)).toHaveLength(0);
     expect(of(marks, DodgeMarkKind.KeepAway)).toHaveLength(0);
+  });
+
+  // **Ground that hurts, drawn round a thing that is usually drawn as nothing**:
+  // a turret's point blank. It is refused under switches of its own, so the
+  // monsters being unminded says nothing about it — and it is carried by the
+  // enemy's own motion, as a body is.
+  it('draws the ground it keeps off, whether or not the monsters are minded', () => {
+    const keepOuts = new EnemyKeepouts();
+    keepOuts.collect([{ x: 13, y: 10 } as EntityView], 10, 10, 12, () => ({
+      x: 13,
+      y: 10,
+      velocityX: 0.002,
+      velocityY: 0,
+      radiusTiles: 1.9,
+    }));
+
+    const marks = dodgeMarks(scene({ keepOuts, keepAwayTiles: undefined }));
+
+    const disc = of(marks, DodgeMarkKind.KeepOut);
+    expect(disc).toHaveLength(1);
+    expect(disc[0]?.x).toBe(13);
+    expect(disc[0]?.radiusTiles).toBeCloseTo(1.9, 5);
+    expect(disc[0]?.shape).toBe(DodgeMarkShape.Circle);
+    expect(disc[0]?.anchor).toBe(DodgeMarkAnchor.Place);
+    // Tiles a second, which is what the module counts in.
+    expect(disc[0]?.velocityX).toBeCloseTo(2, 5);
   });
 
   // A bomb two seconds out and one landing this instant are the same circle in
@@ -2115,6 +2145,14 @@ describe('when the plugin decides', () => {
        */
       shots?: (objectType: number) => boolean;
       /**
+       * What each type fires, for the point blank round the ones that can never
+       * be hurt. Nothing by default, so no test has a turret in it that did not
+       * ask for one.
+       */
+      shotsOf?: (objectType: number) => Iterable<ProjectileDefinition>;
+      /** Which types the catalog marks `<Invincible/>` — a spawner, a turret, a trap. */
+      invincible?: (objectType: number) => boolean;
+      /**
        * The one shot in flight, for a test whose geometry has to be its own.
        *
        * The default is deliberately marginal — a shot arriving just inside the
@@ -2202,9 +2240,10 @@ describe('when the plugin decides', () => {
         player: { at: () => client.at },
         view: { wanted: () => view.on },
         isObstacle: () => false,
-        isInvincible: () => false,
+        isInvincible: map.invincible ?? ((): boolean => false),
         isScenery: map.scenery ?? ((): boolean => false),
         hasShots: map.shots ?? ((): boolean => true),
+        shotsOf: map.shotsOf ?? ((): Iterable<ProjectileDefinition> => []),
         bodyTiles: () => undefined,
         weaponReachTiles: () => map.weaponReachTiles,
         cursorPoint: () => cursor.point,
@@ -2276,6 +2315,12 @@ describe('when the plugin decides', () => {
   function bodiesDrawn(showPicture: ReturnType<typeof vi.fn>): number {
     const marks = (showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
     return marks.filter((mark) => mark.kind === DodgeMarkKind.Body).length;
+  }
+
+  /** The ground the last published picture says the planner is keeping off. */
+  function keepOutsDrawn(showPicture: ReturnType<typeof vi.fn>): DodgeMark[] {
+    const marks = (showPicture.mock.lastCall?.[1] ?? []) as DodgeMark[];
+    return marks.filter((mark) => mark.kind === DodgeMarkKind.KeepOut);
   }
 
   /** How wide the last published picture drew the first monster. */
@@ -2888,6 +2933,160 @@ describe('when the plugin decides', () => {
     expect(projectilesOnly.commands()).toHaveLength(0);
   });
 
+  // What is drawn is what is held: the learned radius, and on top of it the
+  // player's own half and the margin every blast is kept at.
+  it('draws the reach of an enemy that blasts itself at the distance it holds', () => {
+    const { plan, showPicture, view } = underFire(0, {
+      shot: ELSEWHERE as unknown as ProjectileView,
+      enemies: [monsterAt(14, 10)],
+      keepOutTiles: () => 3,
+    });
+    view.on = true;
+
+    plan();
+
+    const discs = keepOutsDrawn(showPicture);
+    expect(discs).toHaveLength(1);
+    expect(discs[0]?.x).toBeCloseTo(14, 5);
+    expect(discs[0]?.radiusTiles).toBeCloseTo(3 + PLAYER_HALF_TILES + SELF_BLAST_MARGIN_TILES, 5);
+  });
+
+  // **The live report: "we walk right into them, and everything they spawn
+  // lands."** A spawner, a turret or a trap that can never be hurt is no body
+  // to keep room from — auto-aim will not shoot it, and a quarter of the file's
+  // enemies are one — so nothing stopped the planner walking onto one. And a
+  // shot fired from where the character stands is inside them before any step
+  // aside could be made.
+  describe('a turret that can never be hurt', () => {
+    const TURRET = 800;
+    /** Eight tiles a second, an ordinary square, and it hurts. */
+    const TURRET_SHOT = projectileDefinition({ speed: 80, lifetimeMs: 2000, damage: 60 });
+    /**
+     * How far round one the ground is refused at the plugin's defaults: the
+     * square with the pad on it, carried as far as the shot gets in the 60 ms
+     * lead and the 109 ms it takes to walk out of that square at 5.52 tiles a
+     * second. See `PointBlank`.
+     */
+    const POINT_BLANK = 0.6 + 8 * (0.06 + 0.6 / WALK);
+
+    /** One of them on the player's row, with no health at all, as the wire sends them. */
+    function turretAt(x: number): SightedEnemy {
+      return monsterAt(x, 10, { objectType: TURRET, hp: 0, maxHp: 0 });
+    }
+
+    const firing = {
+      shot: ELSEWHERE as unknown as ProjectileView,
+      invincible: (type: number) => type === TURRET,
+      shotsOf: (type: number) => (type === TURRET ? [TURRET_SHOT] : []),
+    };
+
+    it('walks the player off one they are standing beside', () => {
+      const { commands, plan } = underFire(0, { ...firing, enemies: [turretAt(11.2)] });
+
+      plan();
+
+      const asked = commands();
+      expect(asked.length).toBeGreaterThan(0);
+      // Away from it, not round it: every step round is as deep in as this one.
+      expect(asked[0]?.[0]).toBeLessThan(0);
+    });
+
+    it('takes the wheel from a player walking at one', () => {
+      const walking = underFire(0, { ...firing, enemies: [turretAt(12.8)] });
+      walking.steer.direction = { x: 1, y: 0 };
+      walking.plan();
+      expect(walking.commands().length).toBeGreaterThan(0);
+
+      // The same walk with nothing at the end of it is left alone.
+      const clear = underFire(0, { ...firing });
+      clear.steer.direction = { x: 1, y: 0 };
+      clear.plan();
+      expect(clear.commands()).toHaveLength(0);
+    });
+
+    it('leaves them where they are while they are clear of it', () => {
+      // Past the point blank and the margin kept outside it.
+      const { commands, plan } = underFire(0, {
+        ...firing,
+        enemies: [turretAt(10 + POINT_BLANK + 0.6)],
+      });
+
+      plan();
+
+      expect(commands()).toHaveLength(0);
+    });
+
+    // **Its own switch, and no other one.** It is not room to dodge in, so the
+    // spacing switch has no say; it is not an area attack, so neither has the
+    // one for those.
+    it('is kept off under its own switch and nobody else’s', () => {
+      const unminded = underFire(0, { ...firing, enemies: [turretAt(11.2)] });
+      unminded.host.settingsOf('auto-dodge')?.apply('avoidEnemyBodies', false);
+      unminded.host.settingsOf('auto-dodge')?.apply('avoidBlasts', false);
+      unminded.plan();
+      expect(unminded.commands().length).toBeGreaterThan(0);
+
+      const off = underFire(0, { ...firing, enemies: [turretAt(11.2)] });
+      off.host.settingsOf('auto-dodge')?.apply('avoidEmitters', false);
+      off.plan();
+      expect(off.commands()).toHaveLength(0);
+    });
+
+    // A monster that can be hurt is a body, and how near it may stand is the
+    // keep-away distance's to decide — a preference, where this is a refusal.
+    it('leaves a monster that can be hurt to the room kept round bodies', () => {
+      const monster = monsterAt(11.2, 10, { objectType: TURRET });
+      const { commands, plan, host } = underFire(0, {
+        shot: ELSEWHERE as unknown as ProjectileView,
+        shotsOf: firing.shotsOf,
+        enemies: [monster],
+      });
+      host.settingsOf('auto-dodge')?.apply('avoidEnemyBodies', false);
+
+      plan();
+
+      expect(commands()).toHaveLength(0);
+    });
+
+    // The helpers fire arrows and chains ahead of the real attack, drawn as
+    // shots and hurting nobody.
+    it('keeps no distance from one whose only shots are pictures', () => {
+      const arrow = projectileDefinition({ speed: 200, lifetimeMs: 600, damage: 0 });
+      const { commands, plan } = underFire(0, {
+        ...firing,
+        shotsOf: () => [arrow],
+        enemies: [turretAt(11.2)],
+      });
+
+      plan();
+
+      expect(commands()).toHaveLength(0);
+    });
+
+    it('lets go of a turret that has been destroyed', () => {
+      const wreck = monsterAt(11.2, 10, { objectType: TURRET, hp: 0, maxHp: 900 });
+      const { commands, plan } = underFire(0, { ...firing, enemies: [wreck] });
+
+      plan();
+
+      expect(commands()).toHaveLength(0);
+    });
+
+    it('draws the ground it keeps them off, round the turret', () => {
+      const { plan, showPicture, view } = underFire(0, { ...firing, enemies: [turretAt(13)] });
+      view.on = true;
+
+      plan();
+
+      const discs = keepOutsDrawn(showPicture);
+      expect(discs).toHaveLength(1);
+      expect(discs[0]?.x).toBeCloseTo(13, 5);
+      expect(discs[0]?.radiusTiles).toBeCloseTo(POINT_BLANK, 5);
+      // And not as a body: there is nothing there to bump into.
+      expect(bodiesDrawn(showPicture)).toBe(0);
+    });
+  });
+
   // **The live report: "I cannot get through there."** A wall in this game is an
   // object with hit points and the enemy flag, and a brazier is `<Enemy/>` with
   // no health bar at all — so a three-tile no-go circle went round every
@@ -3334,6 +3533,7 @@ describe('the hit redirect', () => {
         isInvincible: () => false,
         isScenery: () => false,
         hasShots: () => true,
+        shotsOf: () => [],
         bodyTiles: () => undefined,
         weaponReachTiles: () => undefined,
         cursorPoint: () => undefined,

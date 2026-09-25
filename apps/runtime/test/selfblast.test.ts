@@ -30,11 +30,9 @@ import { BlastStore, THROW_EFFECT, type BlastTelegraph } from '../src/state/blas
 import {
   isSelfBlast,
   MAX_SELF_BLAST_TILES,
-  SELF_BLAST_MARGIN_TILES,
   SelfBlastTable,
 } from '../src/state/blasts/SelfBlastTable.js';
-import { SelfBlastKeepouts } from '../src/features/dodge/SelfBlastKeepouts.js';
-import { PLAYER_HALF_TILES } from '../src/features/dodge/hitbox.js';
+import { EnemyKeepouts } from '../src/features/dodge/EnemyKeepouts.js';
 import { WorldState } from '../src/state/WorldState.js';
 import { projectileDefinition } from './fakes.js';
 
@@ -118,6 +116,7 @@ function shooter(overrides: Partial<ProjectileDefinition> = {}): ObjectCatalog {
     displayName: () => undefined,
     projectile: () => definition,
     hasShots: () => true,
+    shotsOf: () => [definition],
     item: () => undefined,
     container: () => undefined,
     statMaxima: () => undefined,
@@ -350,26 +349,40 @@ describe('the keep-out discs the dodge holds', () => {
   }
 
   it('answers a distance outside the radius and a depth inside it', () => {
-    const keepOuts = new SelfBlastKeepouts();
+    const keepOuts = new EnemyKeepouts();
     keepOuts.collect([enemyAt(SELF_BLASTER, 10, 10, 500, 500)], 10, 10, 30, () => disc(10, 10, 3));
 
-    // Beyond the learned radius by the player's own half and the margin, which
-    // are part of the answer for the same reason every blast carries them.
-    expect(keepOuts.gapAt(14.5, 10)).toBeCloseTo(
-      4.5 - 3 - PLAYER_HALF_TILES - SELF_BLAST_MARGIN_TILES,
-      3,
-    );
+    // The radius the caller handed over, with nothing added: the margins are
+    // the caller's, because the two kinds of disc carry different ones.
+    expect(keepOuts.gapAt(14.5, 10)).toBeCloseTo(4.5 - 3, 3);
     expect(keepOuts.gapAt(12, 10)).toBeLessThan(0);
   });
 
   it('answers nothing at all when nothing was learned', () => {
-    const keepOuts = new SelfBlastKeepouts();
+    const keepOuts = new EnemyKeepouts();
     keepOuts.collect([enemyAt(OTHER_ENEMY, 10, 10, 500, 500)], 10, 10, 30, () => undefined);
     expect(keepOuts.gapAt(10, 10)).toBe(Infinity);
+    expect(keepOuts.count).toBe(0);
+  });
+
+  it('keeps each disc where the caller put it, for the picture', () => {
+    const keepOuts = new EnemyKeepouts();
+    keepOuts.collect([enemyAt(SELF_BLASTER, 10, 10, 500, 500)], 10, 10, 30, () =>
+      disc(10.5, 9.5, 2, 0.002, -0.001),
+    );
+
+    expect(keepOuts.count).toBe(1);
+    expect(keepOuts.xOf(0)).toBeCloseTo(10.5, 5);
+    expect(keepOuts.yOf(0)).toBeCloseTo(9.5, 5);
+    expect(keepOuts.radiusOf(0)).toBeCloseTo(2, 5);
+    expect(keepOuts.velocityXOf(0)).toBeCloseTo(0.002, 5);
+    expect(keepOuts.velocityYOf(0)).toBeCloseTo(-0.001, 5);
+    // A miscounted caller reads nothing rather than rubbish.
+    expect(keepOuts.radiusOf(1)).toBe(0);
   });
 
   it('carries the enemy’s own movement into the answer', () => {
-    const keepOuts = new SelfBlastKeepouts();
+    const keepOuts = new EnemyKeepouts();
     keepOuts.collect([enemyAt(SELF_BLASTER, 10, 10, 500, 500)], 10, 10, 30, () =>
       disc(10, 10, 1, 0.001, 0),
     );

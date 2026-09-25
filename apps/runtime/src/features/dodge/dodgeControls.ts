@@ -69,6 +69,11 @@ export interface DodgeControls {
    * discs round enemies that blast themselves. Off, only projectiles are.
    */
   readonly avoidBlasts: SettingHandle<boolean>;
+  /**
+   * Whether the ground round a turret, a spawner or a trap that fires is kept
+   * off — its point blank, where its next shot lands before a step aside could.
+   */
+  readonly avoidEmitters: SettingHandle<boolean>;
   readonly spacing: {
     readonly mindMonsters: SettingHandle<boolean>;
   };
@@ -440,6 +445,22 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     advanced: true,
     default: true,
   });
+  // **The things that fire and can never be hurt**: spawners, emitters, turrets
+  // and traps, most of them drawn as nothing. They are no body to keep room from,
+  // so without this the planner walked straight onto them — and a shot fired
+  // from where the character is standing lands before any step aside can. What
+  // is kept off is how far each one's own shots get in a command lead and a step,
+  // worked out from its data; see `PointBlank`.
+  //
+  // Its own switch rather than the area-attack one, because it is about shots,
+  // and because it refuses ground: somebody holding a doorway a dormant spawner
+  // sits in needs a way to say that one is fine.
+  const avoidEmitters = settings.boolean('avoidEmitters', {
+    label: 'Keep off turrets and spawners that fire',
+    group: 'Safety',
+    advanced: true,
+    default: true,
+  });
   // **The master switch for the planner knowing where the monsters are.** Off,
   // it is a pure bullet-dodger: it will thread a perfect gap and finish standing
   // inside a boss.
@@ -510,6 +531,7 @@ export function declareDodgeControls(context: PluginContext): DodgeControls {
     walls: { avoid: avoidWalls, clearanceTiles: wallClearanceTiles },
     hazards: { avoid: avoidDamagingGround, clearanceTiles: hazardClearanceTiles },
     avoidBlasts,
+    avoidEmitters,
     spacing: { mindMonsters },
     driving: { respectIntent, interceptControl, speedPercent, holdMs },
   };

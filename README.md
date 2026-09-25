@@ -204,6 +204,15 @@ enemies that blast themselves — are dodged too, behind one switch: **Dodge are
 attacks** (under *Safety*). Off, the dodge minds projectiles only and walks
 through every one of them.
 
+Turrets, spawners, emitters and traps — things that fire but can never be hurt,
+most of them invisible — are no body to keep room from, so the dodge keeps off
+their *point blank* instead: the ground where a shot they fire lands before any
+step aside could clear it, worked out from each one's own shots in the game's
+data (how big, how fast, how it accelerates) and your command lead and walking
+speed. It is refused like damaging ground and drawn in the dodge picture. **Keep
+off turrets and spawners that fire** (under *Safety*) switches it off, for a
+dormant one sitting in a doorway you need.
+
 - **How hard it tries** — *Relaxed* (steps in late, leaves your walking alone),
   *Balanced* (what it was tuned at), *Cautious* (wide margins, takes the wheel
   sooner), or *Custom* for your own numbers.
@@ -227,7 +236,8 @@ through every one of them.
 - *Advanced, grouped:* **Reaction** (how far ahead to look, planning step,
   how urgent trouble must be, directions considered, thinking budget),
   **Safety** (caution, extra margin, distrust of far predictions, wall and
-  hazard clearance, dodging area attacks), **Spacing** (how far monsters are kept),
+  hazard clearance, dodging area attacks, keeping off turrets and spawners),
+  **Spacing** (how far monsters are kept),
   **Control** (leaving your own walking alone, cancelling your input while it
   drives, walking speed).
 

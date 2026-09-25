@@ -1,15 +1,15 @@
 /**
- * Ground around enemies that blast themselves, which the dodge treats as
- * ground that hurts.
+ * Ground round enemies that the dodge treats as ground that hurts.
  *
- * **The one attack with no dodgeable half.** A bomb is telegraphed, a bullet is
- * visible the whole way, and a blast centred on the enemy that set it off is
- * neither: it damages the same instant it becomes visible, so there is nothing
- * to react to and the only defence is the radius never entered in the first
- * place. Which enemies those are and how far they reach is learned from the
- * detonations themselves — see `SelfBlastTable` — and this holds the discs that
- * knowledge turns into, one per living enemy of a learned type, rebuilt from
- * live positions every plan.
+ * **Two kinds of enemy leave nothing to dodge, and both are answered here.** A
+ * blast centred on the enemy that set it off damages the same instant it becomes
+ * visible; a shot fired by a turret the character is standing beside lands
+ * before any command could reach the character. Neither can be reacted to after
+ * the fact, so the only defence is the radius never entered in the first place:
+ * one disc per enemy, rebuilt from live positions every plan. How wide each one
+ * is, is the caller's to say — `DodgeScene` asks the learned `SelfBlastTable`
+ * about the first kind and `PointBlankReach` about the second, and hands over
+ * the wider of the two with every margin already in it.
  *
  * **Answered as a distance and fed to the hazard question, not stamped as a
  * wall.** The planner's rule for ground that costs health is a ratchet — a step
@@ -22,9 +22,7 @@
  */
 
 import type { EntityView } from '@brownie/plugin-api';
-import { SELF_BLAST_MARGIN_TILES } from '../../state/blasts/SelfBlastTable.js';
 import { MAX_BODY_LOOKAHEAD_MS } from './EnemyBodies.js';
-import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /** What one collected disc is, supplied by the caller. See {@link collect}. */
 export interface KeepOutSighting {
@@ -33,16 +31,19 @@ export interface KeepOutSighting {
   /** Tiles per millisecond, or nought for one nothing is known about. */
   readonly velocityX: number;
   readonly velocityY: number;
-  /** How far from the enemy the damage reaches, in tiles. */
+  /**
+   * How far from the enemy's centre a body has to stay, in tiles — the whole of
+   * it, margins included. Nothing is added here.
+   */
   readonly radiusTiles: number;
 }
 
-export class SelfBlastKeepouts {
+export class EnemyKeepouts {
   #x = new Float64Array(0);
   #y = new Float64Array(0);
   #vx = new Float64Array(0);
   #vy = new Float64Array(0);
-  #required = new Float64Array(0);
+  #radius = new Float64Array(0);
   #count = 0;
 
   get count(): number {
@@ -50,11 +51,42 @@ export class SelfBlastKeepouts {
   }
 
   /**
-   * Takes every learned self-blaster in reach of a point, and forgets the rest.
+   * Where one of the collected discs is, how wide, and how it is moving.
    *
-   * The caller reads each enemy — position carried to now, velocity, and the
-   * type's learned radius — because the same reading is already being made for
-   * the body list and a second opinion could disagree with the first.
+   * **For drawing them, and for nothing else**, for the reason `EnemyBodies`
+   * gives about its own: a picture rebuilt from the world a second time could
+   * disagree with the plan it claims to show. Out of range answers nought.
+   */
+  xOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#x[index] ?? 0) : 0;
+  }
+
+  yOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#y[index] ?? 0) : 0;
+  }
+
+  radiusOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#radius[index] ?? 0) : 0;
+  }
+
+  /** Tiles per millisecond, as the discs are carried by. */
+  velocityXOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#vx[index] ?? 0) : 0;
+  }
+
+  velocityYOf(index: number): number {
+    return index >= 0 && index < this.#count ? (this.#vy[index] ?? 0) : 0;
+  }
+
+  /**
+   * Takes every enemy in reach of a point that keeps a disc, and forgets the rest.
+   *
+   * The caller reads each enemy — position carried to now, velocity, and how
+   * far to stay off it — because the same reading is already being made for the
+   * body list and a second opinion could disagree with the first.
+   *
+   * @param read What this one keeps the player off, or `undefined` for an enemy
+   *   that keeps nobody off anything.
    */
   collect(
     enemies: Iterable<EntityView>,
@@ -67,17 +99,13 @@ export class SelfBlastKeepouts {
     for (const enemy of enemies) {
       if (Math.abs(enemy.x - x) > withinTiles || Math.abs(enemy.y - y) > withinTiles) continue;
       const sighting = read(enemy);
-      if (sighting === undefined) continue;
+      if (sighting === undefined || !(sighting.radiusTiles > 0)) continue;
       if (this.#count >= this.#x.length) this.#grow();
       this.#x[this.#count] = sighting.x;
       this.#y[this.#count] = sighting.y;
       this.#vx[this.#count] = sighting.velocityX;
       this.#vy[this.#count] = sighting.velocityY;
-      // The margin and the player's own half, for the same reasons every blast
-      // gets them: where the player will be is only as good as the latency the
-      // whole dodge prices, and a blast edge that grazes costs the whole hit.
-      this.#required[this.#count] =
-        sighting.radiusTiles + PLAYER_HALF_TILES + SELF_BLAST_MARGIN_TILES;
+      this.#radius[this.#count] = sighting.radiusTiles;
       this.#count += 1;
     }
   }
@@ -88,7 +116,7 @@ export class SelfBlastKeepouts {
   }
 
   /**
-   * How far a body standing here is from the nearest learned radius, in tiles.
+   * How far a body standing here is from the nearest disc's edge, in tiles.
    *
    * Negative once inside one, and `Infinity` when none was collected — the same
    * answers `hazardGapTiles` gives about pools, because the question is the
@@ -107,7 +135,7 @@ export class SelfBlastKeepouts {
     for (let i = 0; i < this.#count; i += 1) {
       const dx = (this.#x[i] ?? 0) + (this.#vx[i] ?? 0) * ahead - x;
       const dy = (this.#y[i] ?? 0) + (this.#vy[i] ?? 0) * ahead - y;
-      const here = Math.sqrt(dx * dx + dy * dy) - (this.#required[i] ?? 0);
+      const here = Math.sqrt(dx * dx + dy * dy) - (this.#radius[i] ?? 0);
       if (here < worst) worst = here;
     }
     return worst;
@@ -119,16 +147,16 @@ export class SelfBlastKeepouts {
     const y = new Float64Array(length);
     const vx = new Float64Array(length);
     const vy = new Float64Array(length);
-    const required = new Float64Array(length);
+    const radius = new Float64Array(length);
     x.set(this.#x);
     y.set(this.#y);
     vx.set(this.#vx);
     vy.set(this.#vy);
-    required.set(this.#required);
+    radius.set(this.#radius);
     this.#x = x;
     this.#y = y;
     this.#vx = vx;
     this.#vy = vy;
-    this.#required = required;
+    this.#radius = radius;
   }
 }

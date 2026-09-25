@@ -491,6 +491,7 @@ export class Application {
           displayName: (type) => this.#objects.displayName(type),
           projectile: (type, bullet) => this.#objects.projectile(type, bullet),
           hasShots: (type) => this.#objects.hasShots(type),
+          shotsOf: (type) => this.#objects.shotsOf(type),
           item: (type) => this.#objects.item(type),
           container: (type) => this.#objects.container(type),
           statMaxima: (type) => this.#objects.statMaxima(type),
@@ -823,6 +824,10 @@ export class Application {
         // around empty floor all fight. Whether it declares a shot is half of
         // what gives it away; the scene supplies the other half.
         hasShots: (objectType) => this.#objects.hasShots(objectType),
+        // And what those shots are, for the things that fire and can never be
+        // hurt: no body to keep room from, so how near is too near comes from
+        // how far their own next shot gets before anybody can step aside.
+        shotsOf: (objectType) => this.#objects.shotsOf(objectType),
         // And the third thing it cannot work without: how big the monster
         // actually is. The distance that keeps an ordinary one at arm's length
         // leaves the player standing well inside a boss four times the width.

@@ -26,6 +26,7 @@
 import type { Position } from '@brownie/plugin-api';
 import type { BlastView } from './Blasts.js';
 import { nearEdgeOf, type EnemyBodies } from './EnemyBodies.js';
+import type { EnemyKeepouts } from './EnemyKeepouts.js';
 import { PLAYER_HALF_TILES } from './hitbox.js';
 
 /** What one circle means. The drawing colours and shapes by it. */
@@ -48,6 +49,16 @@ export const DodgeMarkKind = {
    * to look at: *this is where it is trying to put you*.
    */
   Anchor: 5,
+  /**
+   * Ground round an enemy the planner will not walk into: a turret's point
+   * blank, or the reach of an enemy that blasts itself.
+   *
+   * **Its own kind because it is its own answer.** A body's keep-away is room to
+   * dodge in and gives way when a lane runs past; this is ground that hurts and
+   * does not. Drawn round a thing that is usually drawn as nothing at all,
+   * which is the whole of why it is worth seeing.
+   */
+  KeepOut: 6,
 } as const;
 
 export type DodgeMarkKind = (typeof DodgeMarkKind)[keyof typeof DodgeMarkKind];
@@ -168,6 +179,8 @@ export interface PictureScene {
   readonly hold: HeldGround | undefined;
   /** The bodies the planner collected, in the order it collected them. */
   readonly bodies: EnemyBodies;
+  /** The ground round enemies it will not walk into, as it collected it. */
+  readonly keepOuts: EnemyKeepouts;
   /** The area effects still on their way down. */
   readonly blasts: Iterable<BlastView>;
 }
@@ -176,8 +189,9 @@ export interface PictureScene {
  * Every circle the planner is currently reasoning about.
  *
  * Ordered by how much it matters that it is visible: the character first, then
- * what is landing, then the monsters. A cap reached in a crowd therefore drops
- * the least interesting rather than whatever happened to be last.
+ * what is landing, then the ground it refuses, then the monsters. A cap reached
+ * in a crowd therefore drops the least interesting rather than whatever
+ * happened to be last.
  */
 export function dodgeMarks(scene: PictureScene): DodgeMark[] {
   const marks: DodgeMark[] = [];
@@ -218,6 +232,25 @@ export function dodgeMarks(scene: PictureScene): DodgeMark[] {
     // A place, and it stays there: what a blast is, is ground that will be
     // dangerous at a moment. Nothing about it moves.
     marks.push(atPlace(DodgeMarkKind.Blast, blast.x, blast.y, blast.radiusTiles, waiting(armsIn)));
+  }
+
+  // **Before the bodies, and whether or not the monsters are minded**: this is
+  // ground that hurts, not room to dodge in, and it is refused under switches of
+  // its own. Drawn at the distance the planner holds — every margin in it — and
+  // carried by the enemy's own motion, as a body is.
+  const keepOuts = scene.keepOuts;
+  for (let i = 0; i < keepOuts.count; i += 1) {
+    if (marks.length >= MAX_DRAWN_MARKS) return marks;
+    marks.push(
+      onDisc(
+        DodgeMarkKind.KeepOut,
+        keepOuts.xOf(i),
+        keepOuts.yOf(i),
+        keepOuts.radiusOf(i),
+        keepOuts.velocityXOf(i) * A_SECOND_MS,
+        keepOuts.velocityYOf(i) * A_SECOND_MS,
+      ),
+    );
   }
 
   if (keepAwayTiles === undefined) return marks;
@@ -286,6 +319,29 @@ function atPlace(
     velocityX: 0,
     velocityY: 0,
     permille,
+  };
+}
+
+/** A circle round something that moves, carried by the velocity it was scored with. */
+function onDisc(
+  kind: DodgeMarkKind,
+  x: number,
+  y: number,
+  radiusTiles: number,
+  velocityX: number,
+  velocityY: number,
+): DodgeMark {
+  return {
+    kind,
+    anchor: DodgeMarkAnchor.Place,
+    shape: DodgeMarkShape.Circle,
+    x,
+    y,
+    radiusTiles,
+    cornerTiles: 0,
+    velocityX,
+    velocityY,
+    permille: NOT_WAITING,
   };
 }
 

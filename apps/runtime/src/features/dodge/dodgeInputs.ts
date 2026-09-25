@@ -9,6 +9,7 @@
  */
 
 import type { Position, SessionView } from '@brownie/plugin-api';
+import type { ProjectileDefinition } from '../../gamedata/projectiles.js';
 import type { DodgeMark } from './DodgeMarks.js';
 import type { ShotPath } from './ShotPaths.js';
 
@@ -144,11 +145,13 @@ export interface DodgeCatalog {
    */
   readonly isObstacle: (objectType: number) => boolean;
   /**
-   * Whether one of these can never be hurt, and never hurts anybody.
+   * Whether one of these can never be hurt.
    *
    * Spawners, emitters and room controllers answer to `<Enemy/>` and carry
    * health, and a quarter of the catalog's enemies are one. Again as auto-aim
-   * has it, and again nothing on the wire tells them apart.
+   * has it, and again nothing on the wire tells them apart. None of them is a
+   * body to keep room from — but **seven hundred kinds of them fire**, and the
+   * ones that do are kept off by their point blank instead. See `PointBlank`.
    */
   readonly isInvincible: (objectType: number) => boolean;
   /**
@@ -179,6 +182,15 @@ export interface DodgeCatalog {
    * `DodgeScene` for the other.
    */
   readonly hasShots: (objectType: number) => boolean;
+  /**
+   * Every shot one of these declares, from `objects.xml`.
+   *
+   * **What a turret's point blank is worked out from.** A spawner or a trap that
+   * can never be hurt is no body to keep room from, so the only thing that says
+   * how near it is too near is its own fire: how big each shot is and how far it
+   * gets before anybody could step aside. See `PointBlank`.
+   */
+  readonly shotsOf: (objectType: number) => Iterable<ProjectileDefinition>;
   /**
    * How wide one of these is, in tiles.
    *

@@ -234,6 +234,10 @@ export class GameObjectCatalog implements ObjectCatalog {
     return projectiles !== undefined && projectiles.size > 0;
   }
 
+  shotsOf(objectType: number): Iterable<ProjectileDefinition> {
+    return this.#byType.get(objectType)?.projectiles.values() ?? [];
+  }
+
   item(objectType: number): ItemFacts | undefined {
     return this.#byType.get(objectType)?.item;
   }

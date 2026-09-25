@@ -78,10 +78,13 @@ enum class MarkKind : int {
     KeepAway = 3,
     Blast = 4,
     Anchor = 5,
+    /// Ground round an enemy the planner will not walk into: a turret's point
+    /// blank, or the reach of an enemy that blasts itself.
+    KeepOut = 6,
 };
 
 /// The largest kind this build knows, for refusing the ones it does not.
-inline constexpr int kMaxMarkKind = 5;
+inline constexpr int kMaxMarkKind = 6;
 
 /// What outline the radius describes. Mirrors `DodgeMarkShape` in the runtime.
 ///

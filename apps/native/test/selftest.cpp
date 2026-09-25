@@ -993,6 +993,17 @@ void DodgePictureCommitsWholeSetsAndExpires() {
     Check(picture.marks().size() == 1, "with the circle in it");
     Check(picture.marks()[0].velocity_x == 0.0F, "standing still");
 
+    // The ground round a turret the planner will not walk into: a kind of its
+    // own, carried by the turret's motion like a monster's.
+    Check(picture.Apply("dodge-begin", 1700), "a set with a keep-out in it opens");
+    Check(picture.Apply("marks|6,1300,1000,195,1000,0,50,0", 1700), "and the disc is taken");
+    Check(picture.Apply("dodge-end", 1700), "and it closes");
+    Check(picture.marks().size() == 1, "with the disc in it");
+    Check(picture.marks()[0].kind == brownie::overlay::MarkKind::KeepOut,
+          "which knows it is ground kept off");
+    Check(std::fabs(picture.marks()[0].radius_tiles - 1.95F) < 0.001F, "at the width it is held");
+    Check(std::fabs(picture.marks()[0].velocity_x - 0.5F) < 0.001F, "and moving with its turret");
+
     // A path with one end is not a path, and a record outside a set is not one
     // either — both are dropped rather than drawn. A circle whose kind this
     // build does not know is dropped for the same reason: drawing it as

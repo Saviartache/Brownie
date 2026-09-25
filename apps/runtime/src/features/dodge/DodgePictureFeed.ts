@@ -120,6 +120,7 @@ export class DodgePictureFeed {
         // looking, against one per plan fifty times a second if it travelled.
         hold: heldGround(anchor, orbit),
         bodies: scene.bodies,
+        keepOuts: scene.keepOuts,
         blasts: scene.blastsIn(world, controls),
       }),
     );

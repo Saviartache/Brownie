@@ -297,6 +297,15 @@ void DrawDodgeRings(const RingMark* marks, int count) {
                 list->AddCircleFilled(centre, ring.radius, Lifetime(ring.ahead, kBlastFill));
                 list->AddCircle(centre, ring.radius, Lifetime(ring.ahead, 1.0F), 0, kStroke);
                 break;
+            case RingRole::KeepOut:
+                // **A blast's colour at the instant it lands**, because that is
+                // what this ground is — it hurts now and goes on hurting — and
+                // it is usually drawn round a thing the game draws as nothing.
+                // Fainter than a blast, so a bomb landing inside one still
+                // reads as the more urgent of the two.
+                list->AddCircleFilled(centre, ring.radius, Lifetime(0.0F, kBodyFill));
+                list->AddCircle(centre, ring.radius, Lifetime(0.0F, 1.0F), 0, kRingStroke);
+                break;
         }
     }
 }

@@ -21,17 +21,35 @@ import { StatType } from '../../constants/StatType.js';
 import { bodyTilesFromPercent } from '../../gamedata/GameCatalogs.js';
 import { isShootable, type ShootableRules } from '../autoaim/shootable.js';
 import { MotionTracker } from '../../state/MotionTracker.js';
-import { MAX_SELF_BLAST_TILES } from '../../state/blasts/SelfBlastTable.js';
+import {
+  MAX_SELF_BLAST_TILES,
+  SELF_BLAST_MARGIN_TILES,
+} from '../../state/blasts/SelfBlastTable.js';
+import { statMultiplier } from '../../state/projectiles/ShotMotion.js';
 import type { DodgeSettings } from './DodgePlanner.js';
 import type { DodgeGround } from './DodgeGround.js';
 import { walkSpeedOf, type DodgeControls } from './dodgeControls.js';
 import type { DodgeCatalog } from './dodgeInputs.js';
 import { GroundCache } from './GroundCache.js';
 import { ENEMY_CONTACT_HALF_TILES, EnemyBodies, type BodySighting } from './EnemyBodies.js';
-import { SelfBlastKeepouts, type KeepOutSighting } from './SelfBlastKeepouts.js';
+import { EnemyKeepouts, type KeepOutSighting } from './EnemyKeepouts.js';
+import { PLAYER_HALF_TILES } from './hitbox.js';
+import { MAX_POINT_BLANK_TILES, PointBlankReach } from './PointBlank.js';
 
 /** How far past the player's own reach to look for bodies worth avoiding. */
 const ENEMY_SEARCH_MARGIN_TILES = 2;
+
+/**
+ * The widest disc either kind of keep-out can come to, in tiles from the enemy.
+ *
+ * A learned self-blast carries the player's half and the blast margin on top of
+ * its radius, so its widest is more than the table's own bound — and an enemy
+ * culled on the bare bound is one whose edge still reaches the player.
+ */
+const MAX_KEEP_OUT_TILES = Math.max(
+  MAX_SELF_BLAST_TILES + PLAYER_HALF_TILES + SELF_BLAST_MARGIN_TILES,
+  MAX_POINT_BLANK_TILES,
+);
 
 /**
  * How fast a body's position stops being believed, in tiles per second.
@@ -62,18 +80,29 @@ export class DodgeScene {
   readonly #catalog: DodgeCatalog;
   readonly #bodies = new EnemyBodies();
   /**
-   * Ground that hurts around enemies learned to blast themselves.
+   * Ground that hurts around enemies: the ones learned to blast themselves, and
+   * the ones that fire and can never be hurt.
    *
-   * **Collected whatever the spacing switch says**, because a self blast is not
-   * a preference: there is no keep-away setting whose value could stand in for
+   * **Collected whatever the spacing switch says**, because neither is a
+   * preference: there is no keep-away setting whose value could stand in for
    * "this ground takes a fifth of your health the instant you are noticed on
-   * it". It follows the switch for area attacks instead, because that is what
-   * it is — an area attack with no telegraph — and somebody who has told the
-   * dodge to mind projectiles only has told it to walk through this too. The
-   * lava switch was its home until that switch stopped being the only way to
-   * say so. See `SelfBlastKeepouts`.
+   * it". Each kind follows a switch of its own instead. A self blast is an area
+   * attack with no telegraph, so it goes with area attacks, and somebody who has
+   * told the dodge to mind projectiles only has told it to walk through this
+   * too; a turret's point blank is about its shots, and has its own. See
+   * `EnemyKeepouts`.
    */
-  readonly #keepOuts = new SelfBlastKeepouts();
+  readonly #keepOuts = new EnemyKeepouts();
+  /** How far round a turret its own next shot is out of reach of a step aside. */
+  readonly #pointBlank: PointBlankReach;
+  /**
+   * How that is judged this plan: the lead, the walk and the planner's own view
+   * of a shot's square. Rewritten in place, like everything else here.
+   */
+  readonly #timing = { leadMs: 0, walkTilesPerSecond: 0, hitScale: 1, padTiles: 0 };
+  /** Which of the two kinds of keep-out this plan collects. */
+  #selfBlastsMatter = false;
+  #pointBlankMatters = false;
   /**
    * What the ground is, one tile at a time.
    *
@@ -182,6 +211,7 @@ export class DodgeScene {
 
   constructor(catalog: DodgeCatalog) {
     this.#catalog = catalog;
+    this.#pointBlank = new PointBlankReach(catalog.shotsOf);
     this.#shootable = {
       skipUntouchable: false,
       skipObstacles: true,
@@ -191,9 +221,9 @@ export class DodgeScene {
     this.world = {
       canStand: (x, y) => !this.#wallsMatter || this.#ground.canStand(x, y, this.#clearance),
       // One question — does standing here cost health — asked of two kinds of
-      // ground under two switches: the map's own under the hazard switch, and
-      // the discs round a self-blaster under the one for area attacks, which
-      // leaves them empty while it is off.
+      // ground: the map's own under the hazard switch, and the discs round
+      // enemies, each kind of disc under its own switch, which leaves them
+      // empty while both are off.
       hazardGapTiles: (x, y, aheadMs) =>
         Math.min(
           this.#damagingMatters ? this.#ground.hazardGap(x, y, this.#hazardClearance) : Infinity,
@@ -207,6 +237,11 @@ export class DodgeScene {
   /** The bodies the last plan collected, in the order it collected them. */
   get bodies(): EnemyBodies {
     return this.#bodies;
+  }
+
+  /** The keep-out discs the last plan collected, for drawing them. */
+  get keepOuts(): EnemyKeepouts {
+    return this.#keepOuts;
   }
 
   /** The room the last plan insisted on, or nothing while unminded. */
@@ -246,9 +281,13 @@ export class DodgeScene {
     this.#motion.tick(now, tickLengthMs);
     // Everything visible, not just what is in reach: a monster walking into
     // reach has to arrive with a velocity already known, or the first plan that
-    // can see it is a plan that thinks it is standing still.
+    // can see it is a plan that thinks it is standing still. Everything but a
+    // corpse — a turret that never had health is as alive as it gets, and one
+    // that rolls about carries its point blank with it.
     for (const enemy of world.enemies()) {
-      if (enemy.hp > 0) this.#motion.observe(enemy.objectId, enemy.x, enemy.y);
+      if (enemy.hp > 0 || enemy.maxHp <= 0) {
+        this.#motion.observe(enemy.objectId, enemy.x, enemy.y);
+      }
     }
     this.#sightedAtMs = now;
   }
@@ -299,6 +338,10 @@ export class DodgeScene {
     this.#minding = controls.spacing.mindMonsters.get();
     if (!this.#minding) this.#bodies.clear();
     this.#planAtMs = map.gameTimeMs;
+    // How far the character can get before the horizon, which is how far out
+    // anything it could walk into has to have been collected from.
+    const walk = walkSpeedOf(session, controls);
+    const walkReachTiles = (walk * (planning.leadMs + planning.horizonMs)) / 1000;
 
     if (this.#minding) {
       this.#keepAwayTiles = Math.max(0, controls.tuning.keepAwayTiles.get());
@@ -306,8 +349,7 @@ export class DodgeScene {
       // walk: a body the far end of a course would step into is one this has
       // to have collected, and one culled for being far away is one the
       // planner walks straight at.
-      const reach = (planning.leadMs + planning.horizonMs) / 1000;
-      const searchTiles = walkSpeedOf(session, controls) * reach + this.#keepAwayTiles;
+      const searchTiles = walkReachTiles + this.#keepAwayTiles;
       // **Where a monster is, is not known — it is inferred, and the inference
       // ages.** Positions arrive five times a second and a plan is made fifty,
       // so between two ticks the only thing holding a body in place is a
@@ -331,19 +373,29 @@ export class DodgeScene {
       );
     }
 
-    // **The keep-out discs follow the switch for area attacks, not the spacing
-    // one.** A self blast is not a matter of taste about distance — there is no
-    // keep-away setting whose value could stand in for the radius the enemy
-    // itself was measured at — and it is an area attack like any bomb, so it is
-    // minded exactly when those are.
-    if (controls.avoidBlasts.get()) {
+    // **The keep-out discs follow switches of their own, not the spacing one.**
+    // Neither is a matter of taste about distance — there is no keep-away
+    // setting whose value could stand in for the radius a blast was measured at,
+    // or for how far a turret's shot gets in a step. A self blast is an area
+    // attack like any bomb, so it is minded exactly when those are; a point
+    // blank is about shots, and somebody holding a doorway a dormant spawner
+    // sits in has a switch to say so.
+    this.#selfBlastsMatter = controls.avoidBlasts.get();
+    this.#pointBlankMatters = controls.avoidEmitters.get();
+    if (this.#selfBlastsMatter || this.#pointBlankMatters) {
       this.#map = map;
-      const reach = (planning.leadMs + planning.horizonMs) / 1000;
+      // How a shot that has not been fired yet is judged: exactly as the
+      // planner will judge it once it has, after the lead, at the walk the
+      // character is being commanded at.
+      this.#timing.leadMs = planning.leadMs;
+      this.#timing.walkTilesPerSecond = walk;
+      this.#timing.hitScale = planning.hitScale;
+      this.#timing.padTiles = planning.padTiles;
       this.#keepOuts.collect(
         map.enemies(),
         here.x,
         here.y,
-        walkSpeedOf(session, controls) * reach + MAX_SELF_BLAST_TILES,
+        walkReachTiles + MAX_KEEP_OUT_TILES,
         this.#readKeepOut,
       );
     } else {
@@ -432,21 +484,50 @@ export class DodgeScene {
   };
 
   /**
-   * What one learned self-blaster is doing, or nothing for an enemy whose type
-   * never taught a radius.
+   * How far one enemy keeps the player off, and where it is — or nothing for an
+   * enemy that keeps nobody off anything, which is nearly all of them.
+   *
+   * The wider of two discs, because they are one question: the radius a
+   * learned self-blaster was measured going off at, and a turret's point blank.
    *
    * Bound like {@link #read} rather than built per plan, and reading the same
    * motion the body list does, so the disc and the body cannot disagree about
    * where the enemy is.
    */
   readonly #readKeepOut = (enemy: EntityView): KeepOutSighting | undefined => {
-    const radiusTiles = this.#map?.selfBlastKeepoutTiles(enemy.objectType);
-    if (radiusTiles === undefined || !(radiusTiles > 0)) return undefined;
     // **A corpse is history; a setpiece that never had health is not.** A dead
     // monster reports `hp` nought against a `maxHp` it really had, while a
     // tower's blast is the one thing that proves it is alive — and dropping it
     // here would leave the most dangerous fixture on the map unkept-out-of.
     if (enemy.hp <= 0 && enemy.maxHp > 0) return undefined;
+
+    let radiusTiles = 0;
+    if (this.#selfBlastsMatter) {
+      const blast = this.#map?.selfBlastKeepoutTiles(enemy.objectType);
+      // The margin and the player's own half, for the same reasons every blast
+      // gets them: where the player *is* is only as good as the latency the
+      // whole dodge prices, and a blast edge that grazes costs the whole hit.
+      if (blast !== undefined && blast > 0) {
+        radiusTiles = blast + PLAYER_HALF_TILES + SELF_BLAST_MARGIN_TILES;
+      }
+    }
+    // **Only what the body list leaves out**: the things auto-aim refuses to
+    // shoot because they can never be hurt, that fire all the same. A monster
+    // that can be hurt is a body, and its room is the keep-away distance's to
+    // decide — which is a preference, where this is a refusal.
+    if (
+      this.#pointBlankMatters &&
+      this.#catalog.hasShots(enemy.objectType) &&
+      !isShootable(enemy, this.#shootable)
+    ) {
+      const pointBlank = this.#pointBlank.radiusOf(
+        enemy.objectType,
+        statMultiplier(enemy.stat(StatType.ProjectileSpeedMultiplier)),
+        this.#timing,
+      );
+      if (pointBlank > radiusTiles) radiusTiles = pointBlank;
+    }
+    if (!(radiusTiles > 0)) return undefined;
 
     const seen = this.#motion.motionAt(enemy.objectId, this.#planAtMs);
     this.#keepSighting.x = seen?.x ?? enemy.x;

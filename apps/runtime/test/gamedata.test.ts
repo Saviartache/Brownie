@@ -374,6 +374,25 @@ describe('object catalog', () => {
     expect(catalog.hasShots(0xffff)).toBe(false);
   });
 
+  // **What a turret's point blank is worked out from**: every shot it declares,
+  // not just the first, because the widest of them is the one that decides.
+  it('hands over every shot a type declares, and none for one it does not know', async () => {
+    const catalog = new GameObjectCatalog(
+      await readObjectDefinitions(
+        chunked(`<Objects>
+  <Object type="0x03" id="Turret">
+    <Enemy /><Invincible />
+    <Projectile id="0"><Speed>40</Speed><LifetimeMS>1000</LifetimeMS><Damage>30</Damage></Projectile>
+    <Projectile id="4"><Speed>90</Speed><LifetimeMS>800</LifetimeMS><Damage>60</Damage></Projectile>
+  </Object>
+</Objects>`),
+      ),
+    );
+
+    expect([...catalog.shotsOf(0x03)].map((shot) => shot.speed)).toEqual([40, 90]);
+    expect([...catalog.shotsOf(0xffff)]).toEqual([]);
+  });
+
   it('marks the bosses from the arrow the game draws over them', async () => {
     const catalog = new GameObjectCatalog(await readObjectDefinitions(chunked(OBJECTS)));
 

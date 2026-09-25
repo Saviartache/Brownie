@@ -183,6 +183,15 @@ export interface ObjectCatalog {
    */
   hasShots(objectType: number): boolean;
   /**
+   * Every shot one of these declares, in the file's own order.
+   *
+   * For the questions {@link projectile} cannot answer because they are about a
+   * whole attack rather than one volley of it — how far round a turret its own
+   * fire lands before anybody could step aside, most of all. Empty for a type
+   * that declares none, and for every type while no data file has been read.
+   */
+  shotsOf(objectType: number): Iterable<ProjectileDefinition>;
+  /**
    * What one of these is as an item — its slot, its tier, whether drinking it
    * does anything.
    *
@@ -222,6 +231,7 @@ export const EMPTY_CATALOG: ObjectCatalog = {
   displayName: () => undefined,
   projectile: () => undefined,
   hasShots: () => false,
+  shotsOf: () => [],
   item: () => undefined,
   container: () => undefined,
   statMaxima: () => undefined,
