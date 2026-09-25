@@ -85,10 +85,26 @@ export interface ContainerFacts {
    * dropped for us alone and nobody is racing for it.
    */
   readonly shared: boolean;
+  /**
+   * Which tier of drop the bag is for — the `<BagType>` of the items that land
+   * in it — or `undefined` for a container that is not a loot bag.
+   *
+   * **Read off the id, because the id is the only place the file says it.**
+   * The game names its loot bags `Loot Bag 0` to `Loot Bag 9`, with a `Boost`
+   * twin of each for a boosted drop, and the number is the one an item's own
+   * `<BagType>` carries: every untiered item says 6, and 6 is the bag whose
+   * minimap icon is white; set pieces say 8, and 8 is the orange one. Nothing
+   * else in a container's entry ties it to a tier — the ten bags differ in a
+   * sheet index and nothing more.
+   */
+  readonly lootTier: number | undefined;
 }
 
 /** `<Class>Container</Class>` — the game's own marker for a bag or a chest. */
 const CONTAINER_CLASS = 'Container';
+
+/** `Loot Bag 6`, `Loot Bag 6 Boost` — see {@link ContainerFacts.lootTier}. */
+const LOOT_BAG_ID = /^Loot Bag (\d+)(?: Boost)?$/;
 
 /** The families the game's gear slot types divide into. */
 export const GearFamily = {
@@ -162,15 +178,18 @@ export function readItemFacts(element: string): ItemFacts | undefined {
 /** Reads a container's facts, or `undefined` if the object is not one. */
 export function readContainerFacts(
   element: string,
+  id: string,
   objectClass: string | undefined,
 ): ContainerFacts | undefined {
   if (objectClass !== CONTAINER_CLASS) return undefined;
+  const tier = LOOT_BAG_ID.exec(id)?.[1];
   return {
     slots: countSlots(childText(element, 'SlotTypes')),
     // A vault chest is a `VaultContainer` and so is not one of these at all,
     // which is what keeps anything looting containers away from the vault.
     shared:
       hasChild(element, 'CanPutNormalObjects') && !hasChild(element, 'CanPutSoulboundObjects'),
+    lootTier: tier === undefined ? undefined : Number(tier),
   };
 }
 

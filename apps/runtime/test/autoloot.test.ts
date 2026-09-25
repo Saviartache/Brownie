@@ -8,7 +8,7 @@ import {
   type SessionApi,
   type SessionView,
 } from '@brownie/plugin-api';
-import { createPacket, decodeFrame, encodePacket } from '@brownie/protocol';
+import { createPacket, decodeFrame, encodePacket, HEADER_BYTES } from '@brownie/protocol';
 import { createBundledRegistry } from '@brownie/protocol/bundled';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -32,8 +32,11 @@ import {
 } from '../src/features/autoloot/lootRules.js';
 import { droppedObjectType } from '../src/features/autoloot/droppedItems.js';
 import { shouldWithhold, touchesPotions } from '../src/features/autoloot/manualGuard.js';
+import { pickQuestBag, QuestArrow, RESTATE_MS } from '../src/features/autoloot/questArrow.js';
+import type { NearbyBag } from '../src/features/autoloot/bags.js';
 import { PotionKind, type ContainerFacts, type ItemFacts } from '../src/gamedata/items.js';
 import { isBeltSlot, SlotRange } from '../src/state/ItemSlots.js';
+import { NO_QUEST } from '../src/state/WorldState.js';
 import { PluginHost } from '../src/plugins/PluginHost.js';
 import { immediateSend, testLogger } from './fakes.js';
 
@@ -52,6 +55,9 @@ const DYE = 4000;
 
 const LOOT_BAG = 1280;
 const SOULBOUND_BAG = 1283;
+/** `Loot Bag 6` and `Loot Bag 8`: the white bag and the orange one. */
+const WHITE_BAG = 1292;
+const ORANGE_BAG = 1295;
 /** What a stat that is not an item slot at all reads as: a count of something. */
 const QUEST_COUNT = 7;
 
@@ -100,8 +106,10 @@ const NAMES: ReadonlyMap<number, string> = new Map([
 ]);
 
 const CONTAINERS: ReadonlyMap<number, ContainerFacts> = new Map([
-  [LOOT_BAG, { slots: 8, shared: true }],
-  [SOULBOUND_BAG, { slots: 8, shared: false }],
+  [LOOT_BAG, { slots: 8, shared: true, lootTier: 0 }],
+  [SOULBOUND_BAG, { slots: 8, shared: false, lootTier: undefined }],
+  [WHITE_BAG, { slots: 8, shared: false, lootTier: 6 }],
+  [ORANGE_BAG, { slots: 8, shared: false, lootTier: 8 }],
 ]);
 
 const INPUTS = {
@@ -649,6 +657,62 @@ describe('drawing loot bags larger', () => {
   });
 });
 
+describe('choosing the bag the quest arrow points at', () => {
+  /** A bag at a distance, as `findBags` hands it over. */
+  function nearby(objectId: number, objectType: number, distanceTiles: number): NearbyBag {
+    const facts = CONTAINERS.get(objectType);
+    if (facts === undefined) throw new Error(`no container ${String(objectType)}`);
+    return { entity: { objectId, objectType } as EntityView, facts, distanceTiles };
+  }
+
+  it('takes a white bag over a nearer orange one', () => {
+    expect(
+      pickQuestBag([nearby(1, ORANGE_BAG, 2), nearby(2, WHITE_BAG, 12)])?.entity.objectId,
+    ).toBe(2);
+  });
+
+  it('takes the nearest bag of the best colour there is', () => {
+    const bags = [nearby(1, LOOT_BAG, 1), nearby(2, ORANGE_BAG, 5), nearby(3, ORANGE_BAG, 9)];
+    expect(pickQuestBag(bags)?.entity.objectId).toBe(2);
+  });
+
+  it('points at nothing while no bag is white or orange', () => {
+    expect(pickQuestBag([nearby(1, LOOT_BAG, 1), nearby(2, SOULBOUND_BAG, 3)])).toBeUndefined();
+  });
+});
+
+describe('what the client is told its quest is', () => {
+  it('names a bag once, and the server"s quest once it goes', () => {
+    const arrow = new QuestArrow();
+    expect(arrow.next(undefined, 812, 0)).toBeUndefined();
+    expect(arrow.next(31, 812, 0)).toBe(31);
+    expect(arrow.pointingAtBag).toBe(true);
+    expect(arrow.next(31, 812, 200)).toBeUndefined();
+
+    expect(arrow.next(undefined, 812, 400)).toBe(812);
+    expect(arrow.pointingAtBag).toBe(false);
+    expect(arrow.next(undefined, 812, 600)).toBeUndefined();
+  });
+
+  it('moves straight on to another bag', () => {
+    const arrow = new QuestArrow();
+    expect(arrow.next(31, 812, 0)).toBe(31);
+    expect(arrow.next(32, 812, 100)).toBe(32);
+  });
+
+  // The client keeps what it heard last, and a plugin that was switched off let
+  // the server's own quest through to it.
+  it('restates a bag that stays, and never the server"s quest', () => {
+    const arrow = new QuestArrow();
+    expect(arrow.next(31, 812, 0)).toBe(31);
+    expect(arrow.next(31, 812, RESTATE_MS - 1)).toBeUndefined();
+    expect(arrow.next(31, 812, RESTATE_MS)).toBe(31);
+
+    expect(arrow.next(undefined, 812, RESTATE_MS)).toBe(812);
+    expect(arrow.next(undefined, 812, 10 * RESTATE_MS)).toBeUndefined();
+  });
+});
+
 describe('the auto-loot plugin', () => {
   const NATIVE: NativeApi = {
     connected: false,
@@ -695,10 +759,12 @@ describe('the auto-loot plugin', () => {
   interface Harness {
     host: PluginHost;
     session: SessionView;
-    world: { gameTimeMs: number; clientTimeMs: number; mapName: string };
-    self: { x: number; y: number; inventory: InventoryView };
+    world: { gameTimeMs: number; clientTimeMs: number; mapName: string; questObjectId: number };
+    self: { x: number; y: number; alive: boolean; inventory: InventoryView };
     bags: Map<number, EntityView>;
     sent: ReturnType<typeof vi.fn>;
+    /** Every packet sent down to the client, in order. */
+    toClient: { name: string; fields: Readonly<Record<string, unknown>> }[];
     notified: string[];
     settings: NonNullable<ReturnType<PluginHost['settingsOf']>>;
   }
@@ -727,6 +793,9 @@ describe('the auto-loot plugin', () => {
       // the connection's, and only a test that can tell them apart says so.
       clientTimeMs: 1_234_000,
       mapName: options.map ?? 'Dungeon',
+      // The quest as the server named it — what the state stage keeps, and
+      // what the arrow is pointed back at.
+      questObjectId: 812,
       entities: () => bags.values(),
       entity: (objectId: number) => bags.get(objectId),
     };
@@ -753,6 +822,7 @@ describe('the auto-loot plugin', () => {
     };
     const notified: string[] = [];
     const sent = vi.fn();
+    const toClient: Harness['toClient'] = [];
     const session = {
       id: 's1',
       self,
@@ -760,13 +830,16 @@ describe('the auto-loot plugin', () => {
       // The real session's contract: a move's clock starts when it leaves, and
       // with an empty lane it leaves during the call.
       sendToServer: immediateSend(sent),
+      sendToClient: (name: string, fields: Readonly<Record<string, unknown>>) => {
+        toClient.push({ name, fields });
+      },
       notify: (text: string) => notified.push(text),
     } as unknown as SessionView;
 
     const host = new PluginHost({
       log: testLogger(),
       native: NATIVE,
-      sessions: SESSIONS,
+      sessions: { ...SESSIONS, all: () => [session] },
       onChanged: () => undefined,
     });
     host.load(createAutoLootPlugin(INPUTS));
@@ -774,7 +847,7 @@ describe('the auto-loot plugin', () => {
     const settings = host.settingsOf('auto-loot');
     if (settings === undefined) throw new Error('the plugin declared no settings');
 
-    return { host, session, world, self, bags, sent, notified, settings };
+    return { host, session, world, self, bags, sent, toClient, notified, settings };
   }
 
   const newtick = (): MutablePacket =>
@@ -1188,6 +1261,108 @@ describe('the auto-loot plugin', () => {
     h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
     tick(h);
     expect(h.sent).not.toHaveBeenCalled();
+  });
+
+  describe('pointing the quest arrow', () => {
+    /** Every object the client has been told is its quest, in order. */
+    const named = (h: Harness): unknown[] =>
+      h.toClient
+        .filter((packet) => packet.name === 'QUESTOBJECTID')
+        .map((packet) => packet.fields['objectId']);
+
+    /** The server moving its quest, as a plugin sees it — already recorded. */
+    const serverQuest = (h: Harness, objectId: number): MutablePacket => {
+      h.world.questObjectId = objectId;
+      const packet = packetOf('QUESTOBJECTID', { objectId });
+      h.host.dispatchPacket(packet, h.session);
+      return packet;
+    };
+
+    it('points the arrow at a white bag well out of reach, and tells the server nothing', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      expect(named(h)).toEqual([31]);
+      expect(h.sent).not.toHaveBeenCalled();
+    });
+
+    // What the client reads is the id and then a list, whether or not anything
+    // is in it; a body that stopped at the id would be read past its end.
+    it('sends the client a whole packet: the id, then an empty list', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+
+      const packet = createPacket(registry, 'QUESTOBJECTID');
+      packet.fields = { ...h.toClient[0]?.fields } as typeof packet.fields;
+      const frame = encodePacket(registry, packet);
+      expect([...frame.subarray(HEADER_BYTES)]).toEqual([0, 0, 0, 31, 0]);
+    });
+
+    it('holds the server"s quest back while on a bag, and hands it back after', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      expect(serverQuest(h, 900).verdict).toBe(Verdict.Drop);
+
+      // The bag is gone: the arrow goes back to the quest the server named
+      // last, not to the one it had when the bag appeared.
+      h.bags.delete(31);
+      tick(h);
+      expect(named(h)).toEqual([31, 900]);
+      expect(serverQuest(h, 901).verdict).toBe(Verdict.Forward);
+    });
+
+    it('leaves the quest alone while no bag is white or orange', () => {
+      const h = harness();
+      h.bags.set(1, bag(1, LOOT_BAG, [T13_BOW], { x: 14, y: 10 }));
+      tick(h);
+      expect(named(h)).toEqual([]);
+      expect(serverQuest(h, 900).verdict).toBe(Verdict.Forward);
+    });
+
+    it('hands the quest back the moment the switch goes off', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, ORANGE_BAG, [ST_ROBE], { x: 40, y: 10 }));
+      tick(h);
+      h.settings.apply('questBags', false);
+      expect(named(h)).toEqual([31, 812]);
+
+      tick(h);
+      expect(named(h)).toEqual([31, 812]);
+    });
+
+    it('hands the quest back when the player dies', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      h.self.alive = false;
+      tick(h);
+      expect(named(h)).toEqual([31, 812]);
+    });
+
+    it('lets go of the bag before the client is in another map', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      // The state stage forgets the quest with the map, before any plugin
+      // sees the packet that says so.
+      h.world.questObjectId = NO_QUEST;
+      h.host.dispatchPacket(mapinfo(), h.session);
+      expect(named(h)).toEqual([31, NO_QUEST]);
+    });
+
+    it('names a bag that stays again only once a while has passed', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      tick(h);
+      expect(named(h)).toEqual([31]);
+
+      advance(h, RESTATE_MS);
+      tick(h);
+      expect(named(h)).toEqual([31, 31]);
+    });
   });
 });
 

@@ -516,7 +516,7 @@ export async function readObjectDefinitions(
       bodyTiles: readBodyTiles(element),
       projectiles: new Map(projectiles.map((p) => [p.bulletType, p])),
       item: readItemFacts(element),
-      container: readContainerFacts(element, objectClass),
+      container: readContainerFacts(element, id, objectClass),
       statMaxima: readPermanentStatMaxima(element, objectClass),
       skin: readSkin(element, type, id, objectClass),
       appearance: readAppearance(element, id, objectClass),

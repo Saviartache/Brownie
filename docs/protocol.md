@@ -329,6 +329,60 @@ between runs beside the measured blast radii (`game-data/self-blasts.json`):
 what an enemy does to its neighbours is a property of the game, not of a
 connection.
 
+## NOTIFICATION, and the one body read by hand
+
+`NOTIFICATION` (id 67) is a tagged union, which the schema cannot describe: the
+first byte is the kind, the second a flags byte, and what follows depends on
+the kind. `packet-definitions.json` names those two (`typeValue`, `textByte`)
+and keeps the rest as trailing bytes, so the packet forwards untouched and the
+codec never guesses at a layout.
+
+One kind is read by hand, in `features/payrespects/playerDeath.ts`: **kind 7, a
+player's death** — the popup with the dead character's portrait.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | `byte` | kind, 7 |
+| 1 | `byte` | flags |
+| 2 | `string` | message |
+| after it | `int32` | picture — RealmShark's `pictureType` |
+
+**The message is a localisation envelope, not text:**
+`{"k":…,"t":{"player":…,"enemy":…,}}`. The client substitutes the `player` and
+`enemy` tokens and renders the rest through its own string table, so the name is
+read from the token — never from a sentence, which would be in whatever
+language the client runs.
+
+**And the envelope is not JSON.** The server writes it as a template, with a
+comma after the last token, on every envelope anyone has looked at: a teleport
+refusal on this same packet (`{"k":"s.teleport_cooldown","t":{"amount":"3",}}`,
+kind 9, in the reference implementation's 2026-09-12 log) and an unknown-command
+line on `TEXT` (`{"k":"s.unknown_c","t":{"command":"/afk",}}`, read out of a
+running client on 2026-09-25). The client's parser takes that; `JSON.parse`
+throws on it. The first Pay Respects parsed the envelope, and so never read a
+single death — the token is matched instead, as a quoted value behind
+`"player":`.
+
+The evidence, from build `6.13.0.0.0-39635f2ca772`:
+
+- The extractor's `handlers.txt` names `NotificationManager.AJFFNNEBMFE` as the
+  callback registered for packet 67. It reads two bytes and switches on the
+  first through a jump table at RVA `0xA391A0`; entry 7 is `0x180A38360`.
+- That case reads one string, parses it as JSON, looks up `t` and inside it
+  `enemy` and `player`, substitutes both into the message, and then reads one
+  `int32`. The string-literal slots it loads (`0x18422CF00`, `0x184239E18`,
+  `0x18420AEE8`) are the ones methods whose only literal is `"t"`, `"enemy"`
+  and `"player"` load.
+- RealmShark's `NotificationPacket` reads this kind as `message` then
+  `pictureType`.
+
+Neither the key `k` nor the picture is read — the kind already says it is a
+death — so a later build that appends a field to this body still parses.
+
+**Seen live on 2026-09-26:** the server announces *other* players' deaths with
+this kind. A kind-7 notification named another player in the realm, the token
+matcher read the name, and Pay Respects answered it in chat.
+
 ## Cross-checked against RealmShark
 
 `references/RealmShark` is an independent Java implementation of this protocol

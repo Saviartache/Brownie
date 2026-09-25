@@ -24,6 +24,9 @@ export interface MapInfo {
 
 const NO_MAP: MapInfo = { name: '', displayName: '', width: 0, height: 0 };
 
+/** How `QUESTOBJECTID` says there is no quest, and what the client resets to. */
+export const NO_QUEST = -1;
+
 export interface WorldStateOptions {
   readonly objects?: ObjectCatalog;
   readonly tiles?: TileCatalog;
@@ -98,6 +101,7 @@ export class WorldState implements WorldView {
   };
 
   #map: MapInfo = NO_MAP;
+  #questObjectId = NO_QUEST;
   #connectedAtMs: number | undefined;
   /** Wall time to the client's clock. `undefined` until it has said so. */
   #clientClockOffsetMs: number | undefined;
@@ -143,6 +147,15 @@ export class WorldState implements WorldView {
 
   get mapName(): string {
     return this.#map.name;
+  }
+
+  get questObjectId(): number {
+    return this.#questObjectId;
+  }
+
+  /** Records the quest the server has just named. See {@link WorldView.questObjectId}. */
+  nameQuest(objectId: number): void {
+    this.#questObjectId = objectId;
   }
 
   /**
@@ -214,6 +227,10 @@ export class WorldState implements WorldView {
    */
   enterMap(info: MapInfo): void {
     this.#map = info;
+    // Whatever the server named was an object of the last map. The client
+    // forgets its own too: leaving a map closes the connection, and the
+    // teardown that follows clears the quest along with the rest of the HUD.
+    this.#questObjectId = NO_QUEST;
     this.entityStore.clear();
     this.tileMap.clear();
     // Shots from the previous map cannot still be in the air in this one, and

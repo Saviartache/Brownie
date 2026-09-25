@@ -29,7 +29,7 @@ import {
 } from '../src/state/blasts/BlastRadiusTable.js';
 import { StatType } from '../src/constants/StatType.js';
 import type { TileCatalog } from '../src/state/TileMap.js';
-import { WorldState } from '../src/state/WorldState.js';
+import { NO_QUEST, WorldState } from '../src/state/WorldState.js';
 import { bareName } from '../src/state/playerName.js';
 import { projectileDefinition } from './fakes.js';
 
@@ -116,6 +116,22 @@ describe('StateStage', () => {
     expect(world.map.displayName).toBe('Nexus');
     expect(world.entityStore.size).toBe(0);
     expect(world.tileMap.size).toBe(0);
+  });
+
+  it('keeps the quest the server names, and forgets it with the map', () => {
+    const { world, feed } = harness();
+    expect(world.questObjectId).toBe(NO_QUEST);
+
+    feed(packetOf('QUESTOBJECTID', { objectId: 812 }));
+    expect(world.questObjectId).toBe(812);
+
+    // Only the server's word counts: this is the quest a plugin that points the
+    // arrow elsewhere points it back at.
+    feed(packetOf('QUESTOBJECTID', { objectId: 9 }), FROM_CLIENT);
+    expect(world.questObjectId).toBe(812);
+
+    feed(mapInfo('nexus', 'Nexus'));
+    expect(world.questObjectId).toBe(NO_QUEST);
   });
 
   describe('UPDATE', () => {
@@ -383,6 +399,7 @@ describe('StateStage', () => {
       // Not state: the two other packets the client stamps with its own clock.
       'PLAYERSHOOT',
       'PONG',
+      'QUESTOBJECTID',
       'SHOWEFFECT',
       'SQUAREHIT',
       'UPDATE',

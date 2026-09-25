@@ -115,6 +115,16 @@ function buildAppliers(): ReadonlyMap<string, Applier> {
       },
     ],
     [
+      // The server naming the object the quest arrow points at. Recorded as
+      // the server said it, whatever a plugin later tells the client — see
+      // `WorldView.questObjectId`.
+      'QUESTOBJECTID',
+      (packet, world) => {
+        const objectId = packet.number('objectId');
+        if (objectId !== undefined) world.nameQuest(objectId);
+      },
+    ],
+    [
       // The server naming which object is ours. Everything that reads "my
       // health" is meaningless until this arrives.
       'CREATESUCCESS',

@@ -367,6 +367,15 @@ rings.
 - **Use the backpack**, **stop while standing still**, **leave an item alone
   once you have dropped it**, **say when a bag appears**, **draw loot bags
   larger**.
+- **Point the quest arrow at white and orange bags** — on by default. The
+  game's own quest arrow turns to the bag, with the bag's picture on it, and
+  hides while the bag is on screen, the way it does for a boss: white bags
+  first, then orange, nearest first. There is one arrow, so while a bag is
+  around it stands in for the quest, and the quest comes back once the last one
+  is gone. Only the client is told — the server never hears of it. Switching
+  the whole plugin off while the arrow is on a bag leaves it there until the
+  bag goes or the server names a new quest; switching this setting off hands
+  the quest back at once.
 - *Advanced:* least time between pickups, drinking stat potions straight from
   the bag, and standing down when you move a potion yourself.
 
@@ -510,6 +519,67 @@ are in and announces what it finds. A dungeon nobody opened has no object to
 name, so there is nothing to send — a live capture of a real Ctrl+click settled
 this (`calloutType=1 value=274676`, the id of a Puppet Master's Theatre portal
 in the Nexus).
+
+### Pay Respects
+
+Says `rip` or `F` in chat when another player dies — once, and after a short
+random pause, about as long as it takes a person to see the popup and type it.
+The line is picked at random from a list at the top of
+`features/payrespects/payRespectsPlugin.ts`; edit it to say something else.
+Off until you switch it on, since it speaks for you in public chat.
+
+- **Stay quiet after a tribute** — seconds to say nothing after one, so a party
+  wipe is one `rip` rather than a mute. `0` answers every death that is not
+  already waiting on one.
+
+Deaths that land while a tribute is still waiting are covered by it. Your own
+death is never answered, and a tribute waiting when the map changes is dropped.
+The death is read from the server's death popup (`NOTIFICATION`, kind 7), whose
+tokens name the player — so it works whatever language the client is set to.
+
+### Auto Response
+
+Answers in chat when an NPC waits on a chat line — Thessal's question, Umi's
+questions at the shrine, a `ready`, a `skip` — once, after a short random pause.
+Off until you switch it on, since it speaks for you in public chat. Each event
+has its own switch:
+
+| Event | Where | Says | On by default |
+|---|---|---|---|
+| Thessal: "Is King Alexander alive?" | Ocean Trench | `He lives and reigns and conquers the world` | yes |
+| Village Girl Umi's questions | Moonlight Village, the shrine | `Mushroom`, `Carosburg` or `The Happy Prince` | yes |
+| Umi: "something interesting" | Moonlight Village, the shrine | `yes` — starts the Kitsune Umi fight | no |
+| Umi: "the thrill of a challenge" | Moonlight Village, the hidden room | `yes` — Challenge Mode | no |
+| Umi's fishing | Moonlight Village, the dock | `ready` | no |
+| Ghost of Skuld | Haunted Cemetery, White Snake Invasion | `ready` | yes |
+| Soulwarden Murcian | Spectral Penitentiary | `ready` | yes |
+| Craig | Court of Oryx | `skip` | yes |
+| The Beekeeper's computer | The Nest | `Dr Terrible` | yes |
+| Automated Security System | The Machine | `PPEBTWXD` | yes |
+
+- **Answer after about (ms)** — the pause, 1500 by default, give or take 30%.
+
+A question with a right answer, and a prompt that only moves an event along,
+are answered by default. Anything that changes what you are in for — a secret
+boss, a harder mode, a fishing game that scores worse for starting before the
+rods are on — waits for you to switch it on. Umi's "first time at the
+festival?" is never answered: `yes` puts the whole group on Leisurely.
+
+An answer anybody can give is not said once somebody else — or you, by hand —
+has said it, nor once the NPC has moved on, nor after a map change. The same
+answer is never given to the same NPC twice in a row: the Beekeeper's computer
+shuts down for the run on a second wrong password. The pause starts when the
+NPC starts listening — Umi takes an answer only a few seconds after asking — and
+is cut short where the NPC stops sooner, as Thessal does after a few seconds.
+
+An NPC is told from a player by the negative star count the server gives it,
+and a line is compared by its words alone. The lines come from the RealmEye
+wiki, not from the wire, and two of them are not written down anywhere —
+Murcian's and Umi's fishing prompts are matched on `say ready` and `type ready`.
+The catalogue, with where each entry comes from, is
+`features/autoresponse/chatEvents.ts`. Everything else a catalogued NPC says is
+logged at debug level, which is how a question whose wording has changed shows
+up.
 
 <!-- SCREENSHOT: Chat Filter and Streamer Mode expanded -->
 

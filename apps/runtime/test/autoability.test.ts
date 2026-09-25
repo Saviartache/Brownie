@@ -548,6 +548,7 @@ describe('the auto-ability plugin', () => {
     let scans = 0;
     const world = {
       mapName: 'Undead Lair',
+      questObjectId: -1,
       gameTimeMs: 0,
       clientTimeMs: 1_234_000,
       clientTickId: 41,

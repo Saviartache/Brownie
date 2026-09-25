@@ -1141,8 +1141,15 @@
         {
           "name": "objectId",
           "type": "int32"
+        },
+        {
+          "name": "questList",
+          "type": "array",
+          "lengthType": "compressedInt",
+          "elementType": "compressedInt"
         }
-      ]
+      ],
+      "note": "questList is read after the id on every packet (HOHGFLFGEAD.JEFJDICFNBA, 6.13.0.0.0), so one sent without it is read past its end. RealmShark calls it the quest list; the client's quest arrow never reads it."
     },
     "83": {
       "name": "PIC",

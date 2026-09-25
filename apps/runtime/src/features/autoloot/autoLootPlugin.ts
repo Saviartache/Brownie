@@ -69,6 +69,7 @@ import { enchantCount, UNIQUE_DATA_STAT } from './enchants.js';
 import { LootSession, bagSlotKey, type PendingMove } from './LootSession.js';
 import { parseItemList, shouldLoot, type LootPreferences } from './lootRules.js';
 import { GUARDED_PACKETS, shouldWithhold, touchesPotions } from './manualGuard.js';
+import { pickQuestBag, QuestArrow } from './questArrow.js';
 
 /** What the composition root hands over: the game's own data, read once. */
 export interface AutoLootInputs {
@@ -263,6 +264,11 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         label: 'Draw loot bags larger',
         group: behaviour,
         default: false,
+      });
+      const questBags = context.settings.boolean('questBags', {
+        label: 'Point the quest arrow at white and orange bags',
+        group: behaviour,
+        default: true,
       });
 
       /**
@@ -681,20 +687,89 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         enlargeBags(packet, (objectType) => inputs.container(objectType) !== undefined);
       });
 
+      // ── Pointing the quest arrow at a bag ────────────────────────────────
+
+      const arrows = new Map<string, QuestArrow>();
+      const arrowFor = (session: SessionView): QuestArrow => {
+        let arrow = arrows.get(session.id);
+        if (arrow === undefined) {
+          arrow = new QuestArrow();
+          arrows.set(session.id, arrow);
+        }
+        return arrow;
+      };
+
+      /**
+       * Tells the client what its quest arrow points at, when that changes.
+       *
+       * Straight down the link rather than through the pipeline, so the world
+       * model keeps the server's own quest — which is exactly what the arrow is
+       * pointed back at. See `questArrow.ts`.
+       */
+      const pointArrow = (session: SessionView, bagId: number | undefined): void => {
+        const world = session.world;
+        const objectId = arrowFor(session).next(bagId, world.questObjectId, world.gameTimeMs);
+        if (objectId === undefined) return;
+        // The list, empty, because the client reads one after the id whether
+        // or not anything is in it — a packet that stops at the id is one it
+        // reads past the end of. Its quest arrow never looks at the list.
+        session.sendToClient('QUESTOBJECTID', { objectId, questList: [] });
+      };
+
+      // Its own handler rather than a step of the looting tick: that one stands
+      // down in safe zones, while idle and while a move is pending, and none of
+      // those is a reason to stop pointing at a bag.
+      context.packets.on('NEWTICK', (_packet, session) => {
+        const bag =
+          questBags.get() && session.self.alive
+            ? pickQuestBag(
+                findBags(session.world, session.self, inputs.container, Number.POSITIVE_INFINITY),
+              )
+            : undefined;
+        pointArrow(session, bag?.entity.objectId);
+      });
+
+      // The server moving its quest while the arrow is on a bag. Held back
+      // rather than passed on, or the arrow would leave the bag; the world model
+      // has already recorded it, and it is named again once no bag is wanted.
+      context.packets.on('QUESTOBJECTID', (packet, session) => {
+        if (arrows.get(session.id)?.pointingAtBag === true) packet.drop();
+      });
+
+      // Pointed back the moment the switch goes off rather than on the next
+      // tick. **Not gated on the plugin being enabled**, unlike everything that
+      // points: this only ever hands back the server's own quest, and a plugin
+      // switched off while its arrow was on a bag has no other moment to do it.
+      context.onDispose(
+        questBags.onChange((on) => {
+          if (on) return;
+          for (const session of context.sessions.all()) pointArrow(session, undefined);
+        }),
+      );
+
       // ── Lifecycle ────────────────────────────────────────────────────────
 
       // An object id is only unique within a map, so everything remembered
-      // about a bag is about a bag that no longer exists.
+      // about a bag is about a bag that no longer exists — and a bag the arrow
+      // is on is one the client must stop looking for, before it has a map in
+      // which that id is something else.
       context.packets.on('MAPINFO', (_packet, session) => {
         stateFor(session).reset();
+        pointArrow(session, undefined);
       });
 
       context.sessions.onDisconnected((session) => {
         bySession.delete(session.id);
+        arrows.delete(session.id);
       });
 
       context.onDispose(() => {
+        // Unloading can say so, so it does. Switching the plugin off cannot —
+        // nothing runs to notice — so the client keeps its bag, and once the bag
+        // goes no quest at all, until the server names one of its own.
+        for (const session of context.sessions.all()) pointArrow(session, undefined);
         bySession.clear();
+        arrows.clear();
       });
     },
   });

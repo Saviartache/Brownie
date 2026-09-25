@@ -368,6 +368,13 @@ recognise** rather than testing for non-zero: a stat id is a fact about a game
 build, and the two tables in this repository do not agree about all of them.
 `features/sanctuary/punishedHits.ts` is the worked example.
 
+**The world is what the server said, never what a plugin told the client.**
+`sendToClient` goes straight down the link and not through the pipeline, so no
+stage ever sees it. That is what makes `world.questObjectId` useful: it stays the
+quest the *server* named while a plugin points the client's quest arrow
+somewhere else, and it is the quest to point it back at.
+`features/autoloot/questArrow.ts` is the worked example.
+
 `session.self.inventory` is what the player is wearing, carrying and drinking
 from, addressed by the slot ids the item packets use. **A slot the server has
 not stated is absent, not empty** — see the note in

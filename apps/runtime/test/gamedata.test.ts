@@ -843,6 +843,19 @@ describe('what the catalog says about items', () => {
     <SlotTypes>0, 0, 0, 0, 0, 0, 0, 0</SlotTypes>
   </Object>`;
 
+  // The white bag's boosted twin: the same tier under a longer id.
+  const WHITE_BOOST_BAG = `<Object type="0x0510" id="Loot Bag 6 Boost">
+    <DisplayId>Loot Bag</DisplayId>
+    <Class>Container</Class>
+    <Container />
+    <CanPutNormalObjects />
+    <CanPutSoulboundObjects />
+    <Loot />
+    <MinimapIcon color="0xFFFFFF" piece="LootBag" />
+    <Size>80</Size>
+    <SlotTypes>0, 0, 0, 0, 0, 0, 0, 0</SlotTypes>
+  </Object>`;
+
   const WIZARD = `<Object type="0x030e" id="Wizard">
     <Class>Player</Class>
     <Player />
@@ -868,6 +881,7 @@ describe('what the catalog says about items', () => {
     SHARED_BAG,
     SOULBOUND_BAG,
     VAULT_CHEST,
+    WHITE_BOOST_BAG,
     WIZARD,
   ];
 
@@ -950,8 +964,18 @@ describe('what the catalog says about items', () => {
 
   it('counts a container"s slots and knows who may take from it', async () => {
     const objects = await catalog();
-    expect(objects.container(0x0500)).toEqual({ slots: 8, shared: true });
-    expect(objects.container(0x0503)).toEqual({ slots: 8, shared: false });
+    expect(objects.container(0x0500)).toMatchObject({ slots: 8, shared: true });
+    expect(objects.container(0x0503)).toMatchObject({ slots: 8, shared: false });
+  });
+
+  it('reads which tier of drop a loot bag is for off its id', async () => {
+    const objects = await catalog();
+    expect(objects.container(0x0500)?.lootTier).toBe(0);
+    // A boosted bag is the same tier as the bag it doubles.
+    expect(objects.container(0x0510)?.lootTier).toBe(6);
+    // A container that is not a loot bag is for no tier at all, not tier zero.
+    expect(objects.container(0x0503)).toBeDefined();
+    expect(objects.container(0x0503)?.lootTier).toBeUndefined();
   });
 
   it('leaves the vault chest out, because the file classes it apart', async () => {

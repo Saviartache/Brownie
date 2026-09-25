@@ -19,6 +19,7 @@ import { createAutoLootPlugin } from './features/autoloot/autoLootPlugin.js';
 import { createAutoNexusPlugin } from './features/autonexus/autoNexusPlugin.js';
 import { createAutoCalloutPlugin } from './features/autocallout/autoCalloutPlugin.js';
 import { createAutoPortalPlugin } from './features/autoportal/autoPortalPlugin.js';
+import { createAutoResponsePlugin } from './features/autoresponse/autoResponsePlugin.js';
 import { createAutoTeleportPlugin } from './features/autoteleport/autoTeleportPlugin.js';
 import { createChatFilterPlugin } from './features/chatfilter/chatFilterPlugin.js';
 import { createColliderPlugin } from './features/collider/colliderPlugin.js';
@@ -28,6 +29,7 @@ import { SteerTracker } from './features/dodge/SteerIntent.js';
 import { createGlowPlugin } from './features/glow/glowPlugin.js';
 import { createHazardGuardPlugin } from './features/hazardguard/hazardGuardPlugin.js';
 import { createNoclipPlugin } from './features/noclip/noclipPlugin.js';
+import { createPayRespectsPlugin } from './features/payrespects/payRespectsPlugin.js';
 import { createPortalEntryPlugin } from './features/portalentry/portalEntryPlugin.js';
 import { createPushTileSpoofPlugin } from './features/pushtiles/pushTileSpoofPlugin.js';
 import { createSanctuaryPlugin } from './features/sanctuary/sanctuaryPlugin.js';
@@ -1210,6 +1212,18 @@ export class Application {
         dungeonPortals: () => this.#objects.dungeonPortals(),
       }),
     );
+
+    // Needs nothing handed over — it reads one notification and says one line
+    // — and is built here rather than dropped in `plugins/` because the line is
+    // decided by a body no schema describes, read by hand, and that is worth
+    // having tests for.
+    this.#plugins.load(createPayRespectsPlugin());
+
+    // Pay Respects' neighbour — it too reads a line and says one — and needs
+    // nothing handed over. Built here because what it answers is a catalogue
+    // copied from the wiki rather than captured off the wire, and holding every
+    // entry to a test is the only check it gets before a live dungeon.
+    this.#plugins.load(createAutoResponsePlugin());
 
     for (const plugin of this.#startupPlugins) this.#plugins.load(plugin);
     await this.#loader.loadAll();

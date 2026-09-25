@@ -286,6 +286,17 @@ export interface TileView {
 
 export interface WorldView {
   readonly mapName: string;
+  /**
+   * The object the server last named as the player's quest, or `-1` for none.
+   *
+   * What the game's own quest arrow points at, as the *server* said it. A
+   * packet a plugin sends the client goes straight down the link and never
+   * through the world model, so a plugin that points the arrow somewhere else
+   * leaves this alone — and this is the quest to point it back at. Forgotten on
+   * a map change, as the client forgets its own, until the server names the
+   * next one.
+   */
+  readonly questObjectId: number;
   /** Milliseconds since this connection reached the game server. */
   readonly gameTimeMs: number;
   /**
