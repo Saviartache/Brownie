@@ -41,8 +41,9 @@ import { deadPlayerName } from './playerDeath.js';
 export const TRIBUTES: readonly [string, ...string[]] = [
   'skill issue',
   'noob down',
-  'ded on such ez boss?',
+  'ded? hehe',
   'lul',
+  'natural selecton',
 ];
 
 /** The shortest and longest pause before a tribute is said, in milliseconds. */
