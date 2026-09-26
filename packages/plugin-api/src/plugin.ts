@@ -47,6 +47,10 @@ export interface PluginMeta {
    * one. Each entry is one row in the overlay and one key of its own — see
    * {@link PluginBindable}.
    *
+   * **A press lasts for the run.** Nothing a key moves is saved, so a restart
+   * puts back what the panel was set to — and a setting a key moves is live
+   * state that is never saved at all. See {@link PluginBindable.setting}.
+   *
    * The plugin declares nothing else and hears nothing about the key itself.
    * See `apps/runtime/src/plugins/pluginBind.ts`.
    */
@@ -69,6 +73,12 @@ export interface PluginBindable {
    * overlay and reported back by the module under this name — so it is as much
    * a part of the plugin's identity as its id, and renaming one loses the key
    * the user chose.
+   *
+   * **The setting itself is live state, not a preference.** It says what the
+   * plugin is doing right now — noclip holding the socket, the ground the dodge
+   * holds — so it starts at its default on every run and is never saved,
+   * whether a key, the panel or the plugin moves it. Carried over from the last
+   * run, it would be a switch claiming something nobody started.
    */
   readonly setting?: string;
   /**

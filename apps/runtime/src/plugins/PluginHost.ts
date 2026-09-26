@@ -183,11 +183,15 @@ export class PluginHost {
       throw new Error(`plugin "${id}" is already loaded`);
     }
 
+    const slots = bindTargets(plugin.meta).map(bindSlot);
     const entry: LoadedPlugin = {
       plugin,
       settings: new SettingsRegistry({
         pluginId: id,
         store: this.#store,
+        // What a key moves is this run's state, not a preference — see
+        // `setActive` — and a setting it moves is only ever that.
+        liveKeys: new Set(slots.filter((slot) => slot !== SWITCH_SLOT)),
         onChanged: () => {
           this.#onChanged();
         },
@@ -200,10 +204,7 @@ export class PluginHost {
       // and refused rather than repaired, so a hand-edited file leaves the
       // plugin unbound instead of bound to something nobody chose.
       binds: new Map(
-        bindTargets(plugin.meta).map((target) => {
-          const slot = bindSlot(target);
-          return [slot, normaliseBind(this.#store.readBind(id, slot) ?? '') ?? ''];
-        }),
+        slots.map((slot) => [slot, normaliseBind(this.#store.readBind(id, slot) ?? '') ?? '']),
       ),
       handlerErrors: 0,
       setupFailed: false,
@@ -249,7 +250,8 @@ export class PluginHost {
   }
 
   /**
-   * Switches a plugin on or off.
+   * Switches a plugin on or off, and remembers it: the switch a restart puts
+   * back. A key moves the same switch for the run only — see {@link setActive}.
    *
    * @returns false when there is no such plugin, or when its `setup` threw —
    *   that one registered nothing, so switching it on would run nothing. A
@@ -260,24 +262,13 @@ export class PluginHost {
     const entry = this.#plugins.get(pluginId);
     if (entry === undefined || entry.setupFailed) return false;
     // A plugin switched off for failing is already off, so asking for off again
-    // changes nothing; asking for on is the retry, and that path is below.
+    // changes nothing; asking for on is the retry, which `#move` grants.
     if (entry.enabled === enabled) return true;
 
-    entry.enabled = enabled;
-    entry.state = enabled ? PluginState.Enabled : PluginState.Loaded;
-    // Only here, and not on the restore path above: this is the one place the
-    // switch is actually moved, so it is the one place worth persisting.
+    // Only here: restoring at load is not a move, and a key's move is not a
+    // choice about the next run.
     this.#store.writeEnabled(pluginId, enabled);
-    // A plugin gets a fresh budget each time it is switched on: the user has
-    // just said "try again", and refusing to would need them to restart. The
-    // recorded reason goes with it — a stale "disabled after 10 handler errors"
-    // sitting under a plugin that is now running is worse than no message.
-    if (enabled) {
-      entry.handlerErrors = 0;
-      delete entry.error;
-    }
-    this.#log.info(`plugin "${pluginId}" ${enabled ? 'enabled' : 'disabled'}`);
-    this.#onChanged();
+    this.#move(entry, enabled);
     return true;
   }
 
@@ -336,6 +327,12 @@ export class PluginHost {
   /**
    * Moves that switch the way a bound key does.
    *
+   * **For this run only.** A key is for switching mid-fight, and a press is
+   * not a choice about the next run: nothing here is written, so a restart
+   * puts back what the panel was set to. A setting a key moves is never stored
+   * at all — see `liveKeys` where the plugin is loaded. Saving each press was a
+   * write per toggle and two per hold, for a switch the hold put back.
+   *
    * **Asymmetric on purpose where the slot is a setting.** On needs both — a
    * setting armed inside a plugin that is not running does nothing — while off
    * needs only the setting disarmed: that is what makes the plugin undo
@@ -348,14 +345,36 @@ export class PluginHost {
    */
   setActive(pluginId: string, slot: string, on: boolean): boolean {
     const entry = this.#plugins.get(pluginId);
-    if (entry === undefined || !entry.binds.has(slot)) return false;
-    if (slot === SWITCH_SLOT) return this.setEnabled(pluginId, on);
+    if (entry === undefined || entry.setupFailed || !entry.binds.has(slot)) return false;
+    if (slot === SWITCH_SLOT) {
+      if (entry.enabled !== on) this.#move(entry, on);
+      return true;
+    }
 
     // Order matters both ways: arming a plugin that is not running would leave
     // it armed and inert, and disabling one before it is disarmed would leave
     // whatever it is holding held with nothing left running to let go of it.
-    if (on && !this.setEnabled(pluginId, true)) return false;
+    if (on && !entry.enabled) this.#move(entry, true);
     return entry.settings.apply(slot, on);
+  }
+
+  /**
+   * Moves a plugin's switch and saves nothing — whether it is worth saving is
+   * the caller's to know.
+   */
+  #move(entry: LoadedPlugin, enabled: boolean): void {
+    entry.enabled = enabled;
+    entry.state = enabled ? PluginState.Enabled : PluginState.Loaded;
+    // A plugin gets a fresh budget each time it is switched on: the user has
+    // just said "try again", and refusing to would need them to restart. The
+    // recorded reason goes with it — a stale "disabled after 10 handler errors"
+    // sitting under a plugin that is now running is worse than no message.
+    if (enabled) {
+      entry.handlerErrors = 0;
+      delete entry.error;
+    }
+    this.#log.info(`plugin "${entry.plugin.meta.id}" ${enabled ? 'enabled' : 'disabled'}`);
+    this.#onChanged();
   }
 
   /** Unloads one plugin, running its disposers and dropping its registrations. */

@@ -1485,8 +1485,8 @@ export class Application {
     await this.#proxy.close();
     this.#loader.stop();
     this.#overlay.stop();
-    // Before the plugins go: a held key is an override, and letting it end here
-    // is what keeps the switch it borrowed from being persisted as a choice.
+    // Before the plugins go: a held key is an override, and ending it while they
+    // are still loaded is what lets each one let go of what the hold made it take.
     this.#hotkeys.stop();
     this.#plugins.disposeAll();
     // After disposal, so a plugin that writes a setting on its way out is still

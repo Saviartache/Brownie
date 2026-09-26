@@ -62,6 +62,10 @@ export interface PluginHotkeysOptions {
  * comes back on rather than being switched off by a key that was only ever
  * meant to switch it on.
  *
+ * **And no press is saved**, a toggle's included: the host moves the switch for
+ * the run and writes nothing, so a restart puts back what the panel was set to.
+ * See `PluginHost.setActive`.
+ *
  * **Every press says where it left its switch**, in the game's own floating
  * text, and it is said here for the same reason the press is applied here: this
  * is the one place that knows what a key actually did. A plugin cannot watch
@@ -116,9 +120,9 @@ export class PluginHotkeys {
   /**
    * Stops listening and ends every live hold.
    *
-   * The release matters more than the unsubscribe: moving a switch persists it,
-   * so a run that ended mid-hold would otherwise come back with the plugin
-   * switched on by a key nobody is pressing any more.
+   * The release matters more than the unsubscribe: once this stops listening,
+   * nothing is left to deliver the key coming up, and a hold nothing can end is
+   * a plugin left running by a key nobody is pressing.
    */
   stop(): void {
     for (const unsubscribe of this.#subscriptions.splice(0)) unsubscribe();

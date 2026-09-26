@@ -563,7 +563,8 @@ the offending key named, not at 3 a.m. inside a packet handler.
 What the user configures from the overlay is a separate file and a separate
 mechanism: `config/plugins.json` holds each plugin's switch and settings, is
 read once before any plugin loads, and is written back — coalesced, and by
-rename — whenever one of them moves. It is not layered and not validated at
+rename — whenever one of them changes. A bound key is not configuring: its
+press moves a switch for the run only. It is not layered and not validated at
 startup, because it is not a contract with the operator: every value in it is
 checked against the declaration of the setting that named it, at the moment that
 setting is declared. See [`docs/plugins.md`](./plugins.md).

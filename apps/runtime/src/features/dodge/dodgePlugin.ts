@@ -251,13 +251,6 @@ export function createDodgePlugin(inputs: DodgeInputs): Plugin {
           enemy.hp > 0 && !inputs.isScenery(enemy.objectType) && isShootable(enemy, shootable),
       };
 
-      // **A switch that outlived its place, which is what every restart leaves
-      // behind.** The setting persists as every setting does and the place
-      // cannot, so a run that starts armed is a panel claiming the character is
-      // being held somewhere nobody chose. Cleared rather than honoured: the
-      // only other reading is pinning them wherever they happen to log in.
-      controls.anchor.set(false);
-
       /**
        * Lets go of the place, and of the switch that named it.
        *

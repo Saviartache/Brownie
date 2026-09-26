@@ -607,7 +607,8 @@ untouched.
 Bound from the overlay, per plugin, as either a toggle or a hold. Auto-aim,
 auto-loot, auto-dodge (its switch and a second key for *anchor here*) and
 player noclip offer one; the module watches the keyboard and the runtime
-decides what a press means.
+decides what a press means. A press lasts for the run and is not written to
+`plugins.json`: a restart puts back what the panel was set to.
 
 Three chords are the module's own and are not bindable:
 

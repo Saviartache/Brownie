@@ -189,9 +189,6 @@ export function createVaultSortPlugin(inputs: VaultSortInputs): Plugin {
         default: false,
         hidden: true,
       });
-      // A run that died mid-sort must not come back armed: nothing would fire
-      // on the change, and the next press would look like no change at all.
-      if (sortNow.get()) sortNow.set(false);
 
       const bySession = new Map<string, SessionState>();
       const stateFor = (session: SessionView): SessionState => {

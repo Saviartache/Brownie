@@ -366,7 +366,7 @@ describe('a key the module saw', () => {
 
     const second = router(plugins);
     second.native.press('auto-dodge', 'hold', true);
-    // A run that ended mid-hold must not persist the switch the hold borrowed.
+    // Once the router stops, nothing is left to deliver the key coming up.
     second.hotkeys.stop();
     expect(plugins.isEnabled('auto-dodge')).toBe(false);
   });
@@ -445,6 +445,80 @@ describe('a key the module saw', () => {
     hotkeys.stop();
     expect(plugins.isActive('auto-dodge', 'anchor')).toBe(false);
     expect(plugins.isEnabled('auto-dodge')).toBe(false);
+  });
+});
+
+describe('what a press leaves in the file', () => {
+  // A key is for switching mid-fight, and a press is not a choice about the
+  // next run: the file keeps what the panel was set to. A hold wrote it twice
+  // for a switch that ended where it started.
+  it('saves nothing, whichever way the key acts and whatever it moves', () => {
+    let writes = 0;
+    const store = new PluginPreferences(() => writes++);
+    const plugins = host(store);
+    plugins.load(switched('auto-aim'));
+    plugins.load(twoKeyed('auto-dodge'));
+    plugins.load(armed('player-noclip'));
+    const { native } = router(plugins);
+
+    native.press('auto-aim', 'toggle');
+    native.press('auto-dodge', 'hold', true);
+    native.press('auto-dodge', 'hold', true, 'anchor');
+    native.press('auto-dodge', 'hold', false, 'anchor');
+    native.press('auto-dodge', 'hold', false);
+    // Arming a setting switches its plugin on as well, and neither is saved.
+    native.press('player-noclip', 'toggle', true, 'active');
+
+    expect(plugins.isEnabled('auto-aim')).toBe(true);
+    expect(plugins.isActive('player-noclip', 'active')).toBe(true);
+    expect(writes).toBe(0);
+    expect(store.toDocument().plugins).toEqual({});
+  });
+
+  it('comes back after a restart the way the panel left it', () => {
+    const store = new PluginPreferences();
+    const first = host(store);
+    first.load(switched('auto-aim'));
+    first.setEnabled('auto-aim', true);
+    router(first).native.press('auto-aim', 'toggle');
+    expect(first.isEnabled('auto-aim')).toBe(false);
+
+    const restarted = host(store);
+    restarted.load(switched('auto-aim'));
+    expect(restarted.isEnabled('auto-aim')).toBe(true);
+  });
+
+  // The setting a key moves says what the plugin is doing right now — noclip
+  // holding the socket, the ground the dodge holds. Carried over from the last
+  // run it would claim something nobody started, so it is never stored at all.
+  it('keeps the setting a key moves out of the file, whoever moves it', () => {
+    const store = new PluginPreferences();
+    // What a build that still stored it left behind: a run that ended armed.
+    store.load({ 'player-noclip': { settings: { active: true, holdSeconds: 5 } } });
+    const plugins = host(store);
+    plugins.load(
+      definePlugin({
+        meta: {
+          id: 'player-noclip',
+          name: 'Noclip',
+          category: PluginCategory.Movement,
+          bindable: 'active',
+        },
+        setup: (ctx: PluginContext) => {
+          ctx.settings.boolean('active', { default: false });
+          ctx.settings.range('holdSeconds', { default: 20, min: 1, max: 20 });
+        },
+      }),
+    );
+    const settings = plugins.settingsOf('player-noclip')!;
+    expect(settings.value('active'), 'not restored').toBe(false);
+    expect(settings.value('holdSeconds'), 'the knob beside it is').toBe(5);
+
+    // Armed from the panel this time, then the knob beside it moved: the knob
+    // is saved, and the switch does not ride along with it.
+    settings.apply('active', true);
+    settings.apply('holdSeconds', 10);
+    expect(store.read('player-noclip')).toEqual({ holdSeconds: 10 });
   });
 });
 

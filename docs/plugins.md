@@ -245,6 +245,11 @@ run. Switching off only disarms: that is what makes the plugin let go of
 whatever it was holding, and taking the plugin's switch away as well would undo
 something the user chose.
 
+That setting is **live state, not a preference**: it says what the plugin is
+doing right now, so it starts at its default on every run and is never saved,
+whether a key, the panel or the plugin moves it. Carried over from the last run,
+it would be a switch claiming a hold nobody started.
+
 **A list offers more than one key.** A plugin that is switched on for a run and
 then *told* something inside it wants two: auto-dodge is one — its own switch,
 and a key that holds the ground you are standing on:
@@ -296,15 +301,21 @@ plugin's keys is two holds. And a hold ends on its own when the module stops
 reporting — an alt-tab, the overlay opening, the game closing — because a hold
 nothing can revoke is a plugin left running by a key nobody is pressing.
 
+**A press lasts for the run.** Nothing a key moves is written to
+`config/plugins.json` — not a toggle, not a hold — so a restart puts back what
+the panel was set to. A key is for switching mid-fight, and a press is not a
+choice about the next run; saving each one was a write per toggle and two per
+hold, for a switch the hold had already put back.
+
 Which key a bind names, and why it is stored the way it is, is
 [`docs/ipc.md`](ipc.md#hotkeyevent) — the short version being that it is the
 *physical* key, so it survives the player changing keyboard layout.
 
 ## Persistence
 
-Every setting value, every plugin's on/off switch, and the key bound to that
-switch survive a restart. They are kept in `config/plugins.json`, beside the
-runtime's own configuration:
+What the panel sets survives a restart: every setting value, every plugin's
+on/off switch, and the keys bound to them. They are kept in
+`config/plugins.json`, beside the runtime's own configuration:
 
 ```json
 {
@@ -333,7 +344,9 @@ switch is the one slot that is not a setting, and `"": "hold:Mouse5"` is not a
 line anybody reading the file could act on.
 
 The file is the user's, not the project's — it is written by clicking rather
-than by editing, and it is not in the repository.
+than by editing, and it is not in the repository. Pressing a bound key is not
+clicking: a press moves its switch for the run only, and a setting a key is
+bound to is never in the file at all — see [Hotkeys](#hotkeys).
 
 A plugin reads its persisted values while it is *declaring* them, so there is no
 replay step afterwards and no window in which a plugin is running on defaults it
@@ -344,9 +357,9 @@ is ignored rather than being an error.
 
 `meta.enabledByDefault` decides how a plugin starts **the first time it is ever
 seen**. After that the stored switch wins, including when the user switched the
-plugin off. Restoring never writes: only moving a switch or changing a value
-does, so a build that changes a default still applies it to anyone who never
-touched that setting.
+plugin off. Restoring never writes: only moving a switch from the panel or
+changing a value does, so a build that changes a default still applies it to
+anyone who never touched that setting.
 
 Writes are coalesced — dragging a slider is one write, not one per frame — and
 land by renaming a complete file over the old one, so a run that dies mid-write

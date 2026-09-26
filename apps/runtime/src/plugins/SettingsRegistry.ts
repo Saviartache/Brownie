@@ -27,6 +27,8 @@ import type { SettingsStore } from './PluginStore.js';
 export interface SettingsRegistryOptions {
   readonly pluginId: string;
   readonly store: SettingsStore;
+  /** Settings the store never sees. See {@link SettingsRegistry} for which. */
+  readonly liveKeys?: ReadonlySet<string>;
   /** Called whenever a value changes, so the overlay and config can follow. */
   readonly onChanged: (pluginId: string, key: string, value: SettingValue) => void;
 }
@@ -42,10 +44,18 @@ export interface SettingsRegistryOptions {
  * Values arrive from three untrusted directions — the overlay, config written
  * by an older build, and plugin code — so every write is validated against the
  * declaration rather than trusted for having the right TypeScript type.
+ *
+ * **A live setting never reaches the store.** It says what the plugin is doing
+ * right now rather than what the user wants — noclip holding the socket, the
+ * ground auto-dodge holds, a sort asked for — which is what the settings a key
+ * is bound to are. So it starts at its default on every run and is never
+ * written, whoever moves it: a value carried over from the last run would be a
+ * switch claiming something nobody started, and every press would be a write.
  */
 export class SettingsRegistry implements SettingsApi {
   readonly #pluginId: string;
   readonly #store: SettingsStore;
+  readonly #live: ReadonlySet<string>;
   readonly #onChanged: (pluginId: string, key: string, value: SettingValue) => void;
 
   readonly #descriptors = new Map<string, SettingDescriptor>();
@@ -57,6 +67,7 @@ export class SettingsRegistry implements SettingsApi {
   constructor(options: SettingsRegistryOptions) {
     this.#pluginId = options.pluginId;
     this.#store = options.store;
+    this.#live = options.liveKeys ?? new Set();
     this.#onChanged = options.onChanged;
   }
 
@@ -247,6 +258,9 @@ export class SettingsRegistry implements SettingsApi {
     }
     this.#descriptors.set(descriptor.key, descriptor);
     this.#values.set(descriptor.key, defaultValue);
+    // Not even read: a file written by a build that still stored live settings
+    // holds whatever state that run ended in.
+    if (this.#live.has(descriptor.key)) return;
 
     // A persisted value only wins if it still fits the declaration. A dynamic
     // select is the exception: its real options arrive after setup, and that
@@ -312,12 +326,24 @@ export class SettingsRegistry implements SettingsApi {
   #commit(key: string, value: SettingValue): void {
     if (this.#values.get(key) === value) return;
     this.#values.set(key, value);
-    this.#store.write(this.#pluginId, this.values());
+    if (!this.#live.has(key)) this.#store.write(this.#pluginId, this.#persisted());
 
     for (const listener of this.#listeners.get(key) ?? []) {
       (listener as (value: SettingValue) => void)(value);
     }
     this.#onChanged(this.#pluginId, key, value);
+  }
+
+  /**
+   * What the store keeps: every value but the live ones, which would otherwise
+   * ride along whenever a setting beside them changed.
+   */
+  #persisted(): Record<string, SettingValue> {
+    const values: Record<string, SettingValue> = {};
+    for (const [key, value] of this.#values) {
+      if (!this.#live.has(key)) values[key] = value;
+    }
+    return values;
   }
 
   /**
