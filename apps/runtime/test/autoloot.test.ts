@@ -616,28 +616,37 @@ describe('noticing what the player drops', () => {
       droppedObjectType(drop({ objectId: SELF, slotId: 4, objectType: -1 }), SELF),
     ).toBeUndefined();
   });
+
+  // Taking a potion out of a bag onto the stack of it on the belt names the
+  // stack by what is in it, so the player's side is not empty. Read as a drop,
+  // it would leave that potion in every bag for the rest of the map.
+  it('says nothing for a potion put onto the stack of it, or two of one item traded', () => {
+    expect(
+      droppedObjectType(
+        swap(
+          { objectId: BAG, slotId: 0, objectType: HEALTH_POTION },
+          { objectId: SELF, slotId: SlotRange.BeltFirst, objectType: HEALTH_POTION },
+        ),
+        SELF,
+      ),
+    ).toBeUndefined();
+    expect(
+      droppedObjectType(
+        swap(
+          { objectId: SELF, slotId: 4, objectType: T13_BOW },
+          { objectId: BAG, slotId: 0, objectType: T13_BOW },
+        ),
+        SELF,
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe('drawing loot bags larger', () => {
   const isContainer = (objectType: number): boolean => CONTAINERS.has(objectType);
 
-  function update(objectType: number, stats: { id: number; value: number; stackCount: number }[]) {
-    return packetOf('UPDATE', {
-      position: { x: 0, y: 0 },
-      levelType: 0,
-      tiles: [],
-      newObjs: [
-        {
-          objectType,
-          status: { objectId: 50, position: { x: 1, y: 1 }, data: stats },
-        },
-      ],
-      drops: [],
-    });
-  }
-
   it('injects a size for a bag the server did not send one for', () => {
-    const packet = update(LOOT_BAG, []);
+    const packet = newObject(LOOT_BAG, []);
     expect(enlargeBags(packet, isContainer)).toBe(true);
     expect(packet.modified).toBe(true);
     const stats = statsOfFirstObject(packet);
@@ -645,13 +654,13 @@ describe('drawing loot bags larger', () => {
   });
 
   it('rewrites a size the server did send', () => {
-    const packet = update(LOOT_BAG, [{ id: StatType.Size, value: 80, stackCount: 0 }]);
+    const packet = newObject(LOOT_BAG, [{ id: StatType.Size, value: 80, stackCount: 0 }]);
     expect(enlargeBags(packet, isContainer)).toBe(true);
     expect(statsOfFirstObject(packet)?.[0]).toMatchObject({ value: BIG_BAG_SIZE });
   });
 
   it('leaves anything that is not a bag alone', () => {
-    const packet = update(999, []);
+    const packet = newObject(999, []);
     expect(enlargeBags(packet, isContainer)).toBe(false);
     expect(packet.modified).toBe(false);
   });
@@ -700,8 +709,8 @@ describe('what the client is told its quest is', () => {
     expect(arrow.next(32, 812, 100)).toBe(32);
   });
 
-  // The client keeps what it heard last, and a plugin that was switched off let
-  // the server's own quest through to it.
+  // The client keeps what it heard last, and a plugin that failed let the
+  // server's own quest through to it before it was switched back on.
   it('restates a bag that stays, and never the server"s quest', () => {
     const arrow = new QuestArrow();
     expect(arrow.next(31, 812, 0)).toBe(31);
@@ -1255,12 +1264,80 @@ describe('the auto-loot plugin', () => {
     expect(h.notified).toHaveLength(2);
   });
 
-  it('does nothing at all while switched off', () => {
-    const h = harness();
-    h.host.setEnabled('auto-loot', false);
-    h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
-    tick(h);
-    expect(h.sent).not.toHaveBeenCalled();
+  // The switch, and the key bound to it, is the taking and nothing else — so a
+  // key held down only while standing on a bag leaves the rest running.
+  describe('while switched off', () => {
+    const off = (): Harness => {
+      const h = harness();
+      h.host.setEnabled('auto-loot', false);
+      return h;
+    };
+
+    it('takes nothing, and takes the moment it is switched on', () => {
+      const h = off();
+      h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+      tick(h);
+      expect(h.sent).not.toHaveBeenCalled();
+
+      h.host.setEnabled('auto-loot', true);
+      tick(h);
+      expect(h.sent).toHaveBeenCalledTimes(1);
+    });
+
+    it('still announces a bag', () => {
+      const h = off();
+      h.settings.apply('announceBags', true);
+      h.bags.set(1, bag(1, LOOT_BAG, [T13_BOW], { x: 12, y: 10 }));
+      tick(h);
+      expect(h.notified).toHaveLength(1);
+    });
+
+    it('still draws bags larger', () => {
+      const h = off();
+      h.settings.apply('bigBags', true);
+      const packet = newObject(LOOT_BAG, []);
+      h.host.dispatchPacket(packet, h.session);
+      expect(statsOfFirstObject(packet)).toContainEqual({
+        id: StatType.Size,
+        value: BIG_BAG_SIZE,
+        stackCount: 0,
+      });
+    });
+
+    // The tug-of-war the way a held key meets it: the bow is dumped back with
+    // the key up, and the key is pressed on the bag it went into.
+    it('remembers what the player drops, for when it is switched on', () => {
+      const h = off();
+      h.host.dispatchPacket(dumpIntoBag(T13_BOW, 1), h.session);
+
+      h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+      h.host.setEnabled('auto-loot', true);
+      tick(h);
+      expect(h.sent).not.toHaveBeenCalled();
+    });
+
+    it('forgets what was dropped when it leaves the map', () => {
+      const h = off();
+      h.host.dispatchPacket(dumpIntoBag(T13_BOW, 1), h.session);
+      h.host.dispatchPacket(mapinfo(), h.session);
+
+      h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+      h.host.setEnabled('auto-loot', true);
+      tick(h);
+      expect(h.sent).toHaveBeenCalledTimes(1);
+    });
+
+    // Standing down belongs to the taking: a quaff with the key up must not
+    // hold back the pickup the key is pressed for a moment later.
+    it('does not stand down for a potion the player used meanwhile', () => {
+      const h = off();
+      h.host.dispatchPacket(useItem(SlotRange.BeltFirst, HEALTH_POTION), h.session);
+
+      h.bags.set(1, bag(1, SOULBOUND_BAG, [T13_BOW], { x: 10, y: 10 }));
+      h.host.setEnabled('auto-loot', true);
+      tick(h);
+      expect(h.sent).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('pointing the quest arrow', () => {
@@ -1321,7 +1398,7 @@ describe('the auto-loot plugin', () => {
       expect(serverQuest(h, 900).verdict).toBe(Verdict.Forward);
     });
 
-    it('hands the quest back the moment the switch goes off', () => {
+    it('hands the quest back the moment its setting goes off', () => {
       const h = harness();
       h.bags.set(31, bag(31, ORANGE_BAG, [ST_ROBE], { x: 40, y: 10 }));
       tick(h);
@@ -1329,6 +1406,28 @@ describe('the auto-loot plugin', () => {
       expect(named(h)).toEqual([31, 812]);
 
       tick(h);
+      expect(named(h)).toEqual([31, 812]);
+    });
+
+    // Not the taking, so not behind the plugin's switch: with the key held
+    // only on a bag, the arrow would otherwise find the bag once you were on it.
+    it('keeps pointing at a bag while the plugin is switched off', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      h.host.setEnabled('auto-loot', false);
+
+      expect(serverQuest(h, 900).verdict).toBe(Verdict.Drop);
+      h.bags.set(32, bag(32, WHITE_BAG, [UT_BOW], { x: 20, y: 10 }));
+      tick(h);
+      expect(named(h)).toEqual([31, 32]);
+    });
+
+    it('hands the quest back when the plugin is unloaded', () => {
+      const h = harness();
+      h.bags.set(31, bag(31, WHITE_BAG, [UT_BOW], { x: 40, y: 10 }));
+      tick(h);
+      h.host.unload('auto-loot');
       expect(named(h)).toEqual([31, 812]);
     });
 
@@ -1402,6 +1501,25 @@ function dumpIntoBag(objectType: number, bagId: number): MutablePacket {
     position: { x: 0, y: 0 },
     slotObject1: { objectId: 7, slotId: 4, objectType },
     slotObject2: { objectId: bagId, slotId: 0, objectType: -1 },
+  });
+}
+
+/** An `UPDATE` announcing one object, with the stats given. */
+function newObject(
+  objectType: number,
+  stats: { id: number; value: number; stackCount: number }[],
+): MutablePacket {
+  return packetOf('UPDATE', {
+    position: { x: 0, y: 0 },
+    levelType: 0,
+    tiles: [],
+    newObjs: [
+      {
+        objectType,
+        status: { objectId: 50, position: { x: 1, y: 1 }, data: stats },
+      },
+    ],
+    drops: [],
   });
 }
 

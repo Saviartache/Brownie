@@ -121,6 +121,29 @@ describe('PluginHost', () => {
     expect(hits).toBe(0);
   });
 
+  it('delivers a subscription that asked for it while the plugin is off, and no other', () => {
+    const h = host();
+    const seen: string[] = [];
+    h.host.load(
+      plugin('half', (ctx) => {
+        ctx.packets.on('TELEPORT', () => seen.push('switched'));
+        ctx.packets.on('TELEPORT', () => seen.push('always'), { whileDisabled: true });
+      }),
+    );
+
+    h.host.dispatchPacket(teleport(), SESSION);
+    expect(seen).toEqual(['always']);
+
+    // On, both run, still in the order they were subscribed.
+    h.host.setEnabled('half', true);
+    h.host.dispatchPacket(teleport(), SESSION);
+    expect(seen).toEqual(['always', 'switched', 'always']);
+
+    h.host.setEnabled('half', false);
+    h.host.dispatchPacket(teleport(), SESSION);
+    expect(seen).toEqual(['always', 'switched', 'always', 'always']);
+  });
+
   describe('failure isolation', () => {
     it('a plugin that throws in setup is inert, and its neighbours are untouched', () => {
       const h = host();
@@ -230,6 +253,29 @@ describe('PluginHost', () => {
       expect(h.host.status('noisy')?.handlerErrors).toBe(0);
     });
 
+    it('silences even what hears packets while disabled once the plugin has failed', () => {
+      const h = host({ maxHandlerErrors: 3 });
+      let calls = 0;
+      h.host.load(
+        plugin('noisy', (ctx) =>
+          ctx.packets.on(
+            'TELEPORT',
+            () => {
+              calls++;
+              throw new Error('again');
+            },
+            { whileDisabled: true },
+          ),
+        ),
+      );
+
+      // Never switched on, and it still fails — it was running.
+      for (let i = 0; i < 5; i++) h.host.dispatchPacket(teleport(), SESSION);
+
+      expect(h.host.status('noisy')?.state).toBe(PluginState.Failed);
+      expect(calls).toBe(3);
+    });
+
     it('keeps a plugin whose setup threw out of reach', () => {
       const h = host();
       h.host.load(
@@ -253,17 +299,18 @@ describe('PluginHost', () => {
       h.host.load(
         plugin('p', (ctx) => {
           ctx.packets.on('TELEPORT', () => hits++);
+          ctx.packets.on('TELEPORT', () => hits++, { whileDisabled: true });
           ctx.packets.onAny(() => hits++);
         }),
       );
       h.host.setEnabled('p', true);
       h.host.dispatchPacket(teleport(), SESSION);
-      expect(hits).toBe(2);
+      expect(hits).toBe(3);
 
       h.host.unload('p');
       h.host.dispatchPacket(teleport(), SESSION);
 
-      expect(hits).toBe(2);
+      expect(hits).toBe(3);
       expect(h.host.status('p')).toBeUndefined();
     });
 

@@ -65,6 +65,8 @@ interface Subscription {
   /** `undefined` means every packet. */
   readonly packetName: string | undefined;
   readonly handler: PacketHandler;
+  /** Delivered while its plugin is disabled too. See `SubscribeOptions`. */
+  readonly whileDisabled: boolean;
 }
 
 interface LoadedPlugin {
@@ -373,7 +375,8 @@ export class PluginHost {
   }
 
   /**
-   * Offers a packet to every enabled plugin, in priority order.
+   * Offers a packet to every enabled plugin, in priority order — and to the
+   * subscriptions of a disabled one that asked to hear it anyway.
    *
    * `onFirst` handlers run before ordinary ones across all plugins — auto-nexus
    * has to see a health drop before a plugin that might drop the packet does.
@@ -397,7 +400,11 @@ export class PluginHost {
    */
   #deliver(subscription: Subscription, packet: MutablePacket, session: SessionView): void {
     const entry = subscription.owner;
-    if (!entry.enabled || entry.state === PluginState.Failed) return;
+    // A failed plugin is switched off *and* silenced: a handler that kept
+    // throwing is not given the packets that made it throw because it asked
+    // to hear them while disabled.
+    if (entry.state === PluginState.Failed) return;
+    if (!entry.enabled && !subscription.whileDisabled) return;
     try {
       subscription.handler(packet, session);
     } catch (cause) {
@@ -513,8 +520,15 @@ export class PluginHost {
       priority: Priority,
       packetName: string | undefined,
       handler: PacketHandler,
+      whileDisabled = false,
     ): Unsubscribe => {
-      const subscription: Subscription = { owner: entry, priority, packetName, handler };
+      const subscription: Subscription = {
+        owner: entry,
+        priority,
+        packetName,
+        handler,
+        whileDisabled,
+      };
       this.#subscriptions.push(subscription);
       this.#byName = undefined;
       return () => {
@@ -526,7 +540,8 @@ export class PluginHost {
     };
 
     const packets: PacketApi = {
-      on: (packetName, handler) => subscribe(Priority.Normal, packetName, handler),
+      on: (packetName, handler, options) =>
+        subscribe(Priority.Normal, packetName, handler, options?.whileDisabled === true),
       onFirst: (packetName, handler) => subscribe(Priority.First, packetName, handler),
       onAny: (handler) => subscribe(Priority.Any, undefined, handler),
     };

@@ -365,21 +365,25 @@ rings.
 **Behaviour**
 
 - **Use the backpack**, **stop while standing still**, **leave an item alone
-  once you have dropped it**, **say when a bag appears**, **draw loot bags
-  larger**.
+  once you have dropped it** — what you drop is noticed even while the plugin
+  is switched off, so the key cannot take it straight back.
+- *Advanced:* least time between pickups, drinking stat potions straight from
+  the bag, and standing down when you move a potion yourself.
+
+**Display** — works whether or not the plugin is switched on.
+
+- **Say when a bag appears**, **draw loot bags larger**.
 - **Point the quest arrow at white and orange bags** — on by default. The
   game's own quest arrow turns to the bag, with the bag's picture on it, and
   hides while the bag is on screen, the way it does for a boss: white bags
   first, then orange, nearest first. There is one arrow, so while a bag is
   around it stands in for the quest, and the quest comes back once the last one
   is gone. Only the client is told — the server never hears of it. Switching
-  the whole plugin off while the arrow is on a bag leaves it there until the
-  bag goes or the server names a new quest; switching this setting off hands
-  the quest back at once.
-- *Advanced:* least time between pickups, drinking stat potions straight from
-  the bag, and standing down when you move a potion yourself.
+  this setting off hands the quest back at once.
 
-Bindable to a key.
+Bindable to a key. The switch and its key are the taking and nothing else, so a
+key held down only while standing on a bag loots that bag while the display
+above keeps running.
 
 ### Auto Drink
 

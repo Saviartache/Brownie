@@ -65,6 +65,7 @@ export type {
   PacketHandler,
   PluginContext,
   SessionApi,
+  SubscribeOptions,
   TimerApi,
 } from './context.js';
 

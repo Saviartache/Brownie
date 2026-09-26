@@ -166,7 +166,9 @@ export function bindAnnouncement(meta: PluginMeta, slot: string): BindAnnounceme
  * declares settings, subscribes to packets and registers commands; the host
  * holds every subscription and only *delivers* to them while the plugin is
  * enabled. That is why there is no `onEnable`/`onDisable` pair to get wrong:
- * enabling is a gate the host applies, not work the plugin repeats.
+ * enabling is a gate the host applies, not work the plugin repeats. The one
+ * way past the gate is a subscription that asks for it, for the part of a
+ * plugin its switch is not about — see `SubscribeOptions.whileDisabled`.
  *
  * A plugin that needs to act on the transition — pushing native feature keys,
  * say — subscribes with `ctx.settings` handles and `ctx.native`, both of which
@@ -240,7 +242,10 @@ export function definePlugin(plugin: Plugin): Plugin {
 export const PluginState = {
   /** Found on disk, not yet imported. */
   Discovered: 'discovered',
-  /** Imported and `setup` completed. Handlers are registered but gated off. */
+  /**
+   * Imported and `setup` completed. Handlers are registered but gated off,
+   * bar any subscribed `whileDisabled`.
+   */
   Loaded: 'loaded',
   /** Handlers receive packets. */
   Enabled: 'enabled',

@@ -83,9 +83,6 @@ export class LootSession {
   /** Items tried recently, so a refusal is retried rather than spun on. */
   readonly attempts = new Claims<string>();
 
-  /** Bags already announced, so the notifier says each one once. */
-  readonly announced = new Set<number>();
-
   /**
    * Object types the player has dropped or dumped back, so auto-loot does not
    * put them straight back. Kept for the map — an item type is the same across
@@ -198,7 +195,6 @@ export class LootSession {
    */
   reset(): void {
     this.attempts.clear();
-    this.announced.clear();
     this.droppedTypes.clear();
     this.#pending = undefined;
     this.lastActionAtMs = Number.NEGATIVE_INFINITY;

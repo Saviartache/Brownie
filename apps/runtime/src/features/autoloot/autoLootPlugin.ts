@@ -32,6 +32,13 @@
  * that never arrives is given up on and the item left free to be tried again,
  * paced only by its own retry cooldown and the never-reset spacing floor, which
  * are what keep the retries from becoming a packet a second.
+ *
+ * **The switch, and the key bound to it, is the taking and nothing else.** A
+ * player may hold the key down only while standing on a bag, so what is not
+ * taking goes on while it is up: showing bags — see `bagDisplay.ts` — and
+ * noticing what the player drops, which is only worth anything if it was
+ * watching when they dropped it. Those subscriptions are made `whileDisabled`;
+ * the tick that takes, and the guard that stands it down, are not.
  */
 
 import {
@@ -49,13 +56,11 @@ import { isSafeZone } from '../../constants/SafeZones.js';
 import { PotionKind, type ContainerFacts, type ItemFacts } from '../../gamedata/items.js';
 import type { PermanentStatMaxima } from '../../gamedata/playerClasses.js';
 import { isBeltSlot } from '../../state/ItemSlots.js';
-import { describeBag } from './announce.js';
+import { registerBagDisplay } from './bagDisplay.js';
 import { bagSlotItem, findBags, type NearbyBag } from './bags.js';
-import { enlargeBags } from './bigBags.js';
 import {
   MANUAL_BLOCK_MS,
   MANUAL_PAUSE_MS,
-  NOTIFY_RADIUS_TILES,
   ON_TOP_TILES,
   PICKUP_INTERVAL_MS,
   QUEUE_EXPIRY_MS,
@@ -69,7 +74,6 @@ import { enchantCount, UNIQUE_DATA_STAT } from './enchants.js';
 import { LootSession, bagSlotKey, type PendingMove } from './LootSession.js';
 import { parseItemList, shouldLoot, type LootPreferences } from './lootRules.js';
 import { GUARDED_PACKETS, shouldWithhold, touchesPotions } from './manualGuard.js';
-import { pickQuestBag, QuestArrow } from './questArrow.js';
 
 /** What the composition root hands over: the game's own data, read once. */
 export interface AutoLootInputs {
@@ -119,7 +123,9 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
       id: 'auto-loot',
       name: 'Auto Loot',
       category: PluginCategory.Items,
-      description: 'Takes what you asked for out of the bag you are standing on.',
+      description:
+        'Takes what you asked for out of the bag you are standing on. ' +
+        'The switch and its key only govern taking — the Display settings work either way.',
       bindable: true,
     },
 
@@ -255,21 +261,10 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         group: behaviour,
         default: true,
       });
-      const announceBags = context.settings.boolean('announceBags', {
-        label: 'Say when a bag appears',
-        group: behaviour,
-        default: false,
-      });
-      const bigBags = context.settings.boolean('bigBags', {
-        label: 'Draw loot bags larger',
-        group: behaviour,
-        default: false,
-      });
-      const questBags = context.settings.boolean('questBags', {
-        label: 'Point the quest arrow at white and orange bags',
-        group: behaviour,
-        default: true,
-      });
+
+      // The other half, settings and all — declared here so they follow these
+      // in the panel. None of it is behind the switch.
+      registerBagDisplay(context, inputs);
 
       /**
        * The rules, resolved once and again whenever one of them moves.
@@ -552,18 +547,6 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
       // ── The tick ─────────────────────────────────────────────────────────
 
-      const announce = (session: SessionView, state: LootSession, bags: NearbyBag[]): void => {
-        for (const bag of bags) {
-          if (state.announced.has(bag.entity.objectId)) continue;
-          state.announced.add(bag.entity.objectId);
-          const name = inputs.displayName(bag.entity.objectType) ?? 'Bag';
-          session.notify(
-            `${name} (${bag.distanceTiles.toFixed(1)}t): ${describeBag(bag, inputs.displayName)}`,
-            'Auto Loot',
-          );
-        }
-      };
-
       /**
        * Whether the bag a move came out of has been seen to change.
        *
@@ -580,13 +563,7 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
           return bagSlotItem(bag, move.source.slot) !== move.source.objectType;
         };
 
-      /** Drops what is remembered about bags that are no longer in the world. */
-      const forgetGoneBags = (session: SessionView, state: LootSession): void => {
-        for (const objectId of state.announced) {
-          if (session.world.entity(objectId) === undefined) state.announced.delete(objectId);
-        }
-      };
-
+      // Behind the switch, and the only tick that is: this is the taking.
       context.packets.on('NEWTICK', (_packet, session) => {
         const self = session.self;
         if (!self.alive || isSafeZone(session.world.mapName)) return;
@@ -604,15 +581,12 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         // floor plus the per-item cooldown already keep the retries safe.
         state.resolvePending(self.inventory, sourceCleared(session), nowMs);
 
-        const bags = findBags(session.world, self, inputs.container, NOTIFY_RADIUS_TILES);
-        if (announceBags.get()) announce(session, state, bags);
-        forgetGoneBags(session, state);
-
         if (nowMs < state.pauseUntilMs) return;
 
-        // Nearest first, so nothing is in reach once the nearest is not.
-        const nearest = bags[0];
-        const onBag = nearest !== undefined && nearest.distanceTiles <= ON_TOP_TILES;
+        // Only the bags underfoot, nearest first, so stepping between two that
+        // overlap empties the one being stood on.
+        const bags = findBags(session.world, self, inputs.container, ON_TOP_TILES);
+        const onBag = bags.length > 0;
 
         // Standing still is how an idle player is told from one at work — but
         // standing on a bag *is* the work. Left to count, waiting there for the
@@ -640,13 +614,15 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
         });
 
         for (const bag of bags) {
-          if (bag.distanceTiles > ON_TOP_TILES) break;
           if (takeFrom(session, state, bag, free, nowMs)) return;
         }
       });
 
       // ── The player's own hands ───────────────────────────────────────────
 
+      // Behind the switch with the taking it stands down: a potion quaffed
+      // while the key is up must not hold back the pickup the key is pressed
+      // for a moment later.
       for (const packetName of GUARDED_PACKETS) {
         context.packets.on(packetName, (packet, session) => {
           if (!guardManualPotions.get()) return;
@@ -671,105 +647,44 @@ export function createAutoLootPlugin(inputs: AutoLootInputs): Plugin {
 
       // An item the player pushes out of their inventory — dropped on the ground
       // or dumped back into the bag — is one they do not want, so its type is
-      // remembered and left alone for the rest of the map.
+      // remembered and left alone for the rest of the map. **Not behind the
+      // switch**: with the key held only while standing on a bag, nearly every
+      // drop happens while it is up, and a drop nobody saw is a drop the next
+      // press takes straight back.
       for (const packetName of ['INVDROP', 'INVENTORYSWAP']) {
-        context.packets.on(packetName, (packet, session) => {
-          if (!skipDropped.get()) return;
-          const objectType = droppedObjectType(packet, session.self.objectId);
-          if (objectType !== undefined) stateFor(session).droppedTypes.add(objectType);
-        });
+        context.packets.on(
+          packetName,
+          (packet, session) => {
+            if (!skipDropped.get()) return;
+            const objectType = droppedObjectType(packet, session.self.objectId);
+            if (objectType !== undefined) stateFor(session).droppedTypes.add(objectType);
+          },
+          { whileDisabled: true },
+        );
       }
-
-      // ── Making bags visible ──────────────────────────────────────────────
-
-      context.packets.on('UPDATE', (packet, _session) => {
-        if (!bigBags.get() || packet.opaque) return;
-        enlargeBags(packet, (objectType) => inputs.container(objectType) !== undefined);
-      });
-
-      // ── Pointing the quest arrow at a bag ────────────────────────────────
-
-      const arrows = new Map<string, QuestArrow>();
-      const arrowFor = (session: SessionView): QuestArrow => {
-        let arrow = arrows.get(session.id);
-        if (arrow === undefined) {
-          arrow = new QuestArrow();
-          arrows.set(session.id, arrow);
-        }
-        return arrow;
-      };
-
-      /**
-       * Tells the client what its quest arrow points at, when that changes.
-       *
-       * Straight down the link rather than through the pipeline, so the world
-       * model keeps the server's own quest — which is exactly what the arrow is
-       * pointed back at. See `questArrow.ts`.
-       */
-      const pointArrow = (session: SessionView, bagId: number | undefined): void => {
-        const world = session.world;
-        const objectId = arrowFor(session).next(bagId, world.questObjectId, world.gameTimeMs);
-        if (objectId === undefined) return;
-        // The list, empty, because the client reads one after the id whether
-        // or not anything is in it — a packet that stops at the id is one it
-        // reads past the end of. Its quest arrow never looks at the list.
-        session.sendToClient('QUESTOBJECTID', { objectId, questList: [] });
-      };
-
-      // Its own handler rather than a step of the looting tick: that one stands
-      // down in safe zones, while idle and while a move is pending, and none of
-      // those is a reason to stop pointing at a bag.
-      context.packets.on('NEWTICK', (_packet, session) => {
-        const bag =
-          questBags.get() && session.self.alive
-            ? pickQuestBag(
-                findBags(session.world, session.self, inputs.container, Number.POSITIVE_INFINITY),
-              )
-            : undefined;
-        pointArrow(session, bag?.entity.objectId);
-      });
-
-      // The server moving its quest while the arrow is on a bag. Held back
-      // rather than passed on, or the arrow would leave the bag; the world model
-      // has already recorded it, and it is named again once no bag is wanted.
-      context.packets.on('QUESTOBJECTID', (packet, session) => {
-        if (arrows.get(session.id)?.pointingAtBag === true) packet.drop();
-      });
-
-      // Pointed back the moment the switch goes off rather than on the next
-      // tick. **Not gated on the plugin being enabled**, unlike everything that
-      // points: this only ever hands back the server's own quest, and a plugin
-      // switched off while its arrow was on a bag has no other moment to do it.
-      context.onDispose(
-        questBags.onChange((on) => {
-          if (on) return;
-          for (const session of context.sessions.all()) pointArrow(session, undefined);
-        }),
-      );
 
       // ── Lifecycle ────────────────────────────────────────────────────────
 
       // An object id is only unique within a map, so everything remembered
-      // about a bag is about a bag that no longer exists — and a bag the arrow
-      // is on is one the client must stop looking for, before it has a map in
-      // which that id is something else.
-      context.packets.on('MAPINFO', (_packet, session) => {
-        stateFor(session).reset();
-        pointArrow(session, undefined);
-      });
+      // about a bag is about a bag that no longer exists. Not behind the switch
+      // either, because what the player dropped is remembered while it is off
+      // and is remembered for the map.
+      context.packets.on(
+        'MAPINFO',
+        (_packet, session) => {
+          stateFor(session).reset();
+        },
+        { whileDisabled: true },
+      );
 
-      context.sessions.onDisconnected((session) => {
-        bySession.delete(session.id);
-        arrows.delete(session.id);
-      });
+      context.onDispose(
+        context.sessions.onDisconnected((session) => {
+          bySession.delete(session.id);
+        }),
+      );
 
       context.onDispose(() => {
-        // Unloading can say so, so it does. Switching the plugin off cannot —
-        // nothing runs to notice — so the client keeps its bag, and once the bag
-        // goes no quest at all, until the server names one of its own.
-        for (const session of context.sessions.all()) pointArrow(session, undefined);
         bySession.clear();
-        arrows.clear();
       });
     },
   });

@@ -24,13 +24,35 @@ export interface PluginContext {
   readonly native: NativeApi;
   readonly log: Logger;
   readonly timers: TimerApi;
-  /** True while the plugin is enabled. Handlers do not run while it is false. */
+  /**
+   * True while the plugin is enabled. Handlers do not run while it is false,
+   * bar a subscription that asked to — see {@link SubscribeOptions.whileDisabled}.
+   */
   readonly enabled: boolean;
   /** Runs when the plugin is disabled or unloaded. Prefer this over globals. */
   onDispose(fn: () => void): void;
 }
 
 export type PacketHandler = (packet: MutablePacket, session: SessionView) => void;
+
+/** How the host delivers one subscription made with {@link PacketApi.on}. */
+export interface SubscribeOptions {
+  /**
+   * Deliver while the plugin is disabled as well. Default false.
+   *
+   * **For the part of a plugin its switch is not about.** A plugin's switch,
+   * and the key bound to it, is what a player turns on and off — and for
+   * nearly every plugin that is the whole of it. Auto-loot is the one this was
+   * added for: its switch is *taking* things, often held down on a key only
+   * while standing on a bag, while drawing bags larger and pointing the quest
+   * arrow at them are wanted the whole time, each behind a setting of its own.
+   *
+   * Only the subscription that asks is affected: every other one, and every
+   * timer and command, stays behind the switch. A plugin that has failed or
+   * been unloaded hears nothing either way.
+   */
+  readonly whileDisabled?: boolean;
+}
 
 export interface PacketApi {
   /**
@@ -39,7 +61,7 @@ export interface PacketApi {
    * @throws {Error} if no definition has that name — a typo would otherwise be
    *   a handler that silently never runs.
    */
-  on(packetName: string, handler: PacketHandler): Unsubscribe;
+  on(packetName: string, handler: PacketHandler, options?: SubscribeOptions): Unsubscribe;
 
   /**
    * Subscribes ahead of every other handler for this packet.

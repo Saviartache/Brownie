@@ -62,6 +62,11 @@ export function droppedObjectType(packet: MutablePacket, selfObjectId: number): 
     // Both sides the player's own is a rearrangement; the player's side empty is
     // a pickup coming the other way. Neither is a drop.
     if (mine.objectId !== selfObjectId || other.objectId === selfObjectId) return undefined;
+    // Nor is the same type on both sides: that is a potion off the bag onto
+    // the stack of it on the belt — the swap names the stack by what is in it —
+    // or two of one item traded, and either way the inventory holds that type
+    // afterwards just as it did before.
+    if (mine.objectType === other.objectType) return undefined;
     return mine.objectType > 0 ? mine.objectType : undefined;
   }
 

@@ -59,6 +59,21 @@ That is why there is no `onEnable`/`onDisable` pair: enabling is a gate the host
 applies, not work the plugin repeats — and forgetting to unregister on disable
 is the most common way a plugin system leaks.
 
+**A subscription can ask to be delivered while the plugin is disabled too**, for
+the part of a plugin its switch is not about:
+
+```ts
+ctx.packets.on('UPDATE', enlargeBags, { whileDisabled: true });
+```
+
+Auto-loot is the plugin this exists for. Its switch — and the key bound to it —
+is *taking* things, and a player may hold that key down only while standing on
+a bag; drawing bags larger, pointing the quest arrow at them and noticing what
+the player drops are wanted the whole time, each behind a setting of its own.
+Only the subscription that asks is affected: every other one, and every timer
+and command, stays behind the switch, and a plugin that has failed or been
+unloaded hears nothing either way.
+
 `setup` is synchronous. An `async setup` would leave a window in which a plugin
 is loaded but has not finished subscribing, so a packet arriving during it would
 reach some of its handlers and not others. Asynchronous work starts inside
@@ -81,7 +96,7 @@ One plugin's mistake never reaches another plugin, the proxy, or the game.
 
 | Member | What it is for |
 |---|---|
-| `ctx.packets` | `on`, `onFirst`, `onAny` — packet subscriptions |
+| `ctx.packets` | `on`, `onFirst`, `onAny` — packet subscriptions; `on` can ask to be heard while disabled |
 | `ctx.commands` | chat commands, consumed only if the handler succeeds |
 | `ctx.settings` | typed setting handles: `boolean`, `number`, `range`, `select`, `multiSelect`, `assetSelect`, `assetMultiSelect`, `text`, `colour`, `button` |
 | `ctx.sessions` | the current session, and connect/disconnect events |

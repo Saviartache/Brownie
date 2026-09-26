@@ -46,11 +46,12 @@ export function pickQuestBag(bags: readonly NearbyBag[]): NearbyBag | undefined 
  * How long a bag the arrow stays on goes without being named again.
  *
  * **Restated rather than trusted.** The client keeps whatever it heard last,
- * and a plugin that was switched off for a while let the server's own quest
- * packets through to it — so after that the arrow is on the quest while this
- * side still believes it is on the bag. Naming the object the client already
- * holds costs the client nothing: it looks up the same id and finds the same
- * bag.
+ * and a plugin that stopped for a while — switched off for failing, then back
+ * on — let the server's own quest packets through to it, so after that the
+ * arrow is on the quest while this side still believes it is on the bag.
+ * Merely switching it off does not: none of this is behind the switch. Naming
+ * the object the client already holds costs the client nothing: it looks up
+ * the same id and finds the same bag.
  */
 export const RESTATE_MS = 2000;
 
