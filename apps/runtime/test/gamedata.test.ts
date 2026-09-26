@@ -7,7 +7,6 @@ import {
   readTileDefinitions,
 } from '../src/gamedata/GameCatalogs.js';
 import { EquippedWeapon } from '../src/gamedata/EquippedWeapon.js';
-import { reachTiles, type ProjectileDefinition } from '../src/gamedata/projectiles.js';
 import { GearFamily, PotionKind, gearFamilyOf } from '../src/gamedata/items.js';
 import { readSpriteTypes } from '../src/gamedata/spriteIndex.js';
 import { appearancePicture } from '../src/gamedata/cosmetics.js';
@@ -664,6 +663,23 @@ describe('how far a shot gets', () => {
   const SWORD = `<Object type="0xb0b" id="Sword of Acclaim">
     <Projectile id="0"><Parametric /><Magnitude>3.5</Magnitude><LifetimeMS>350</LifetimeMS></Projectile>
   </Object>`;
+  // The four below are the shipped `objects.xml`, trimmed to the projectile.
+  //
+  // The live report: 15 tiles a second for 2.25 s is 33.75 tiles by the
+  // product, but it brakes at 25 tiles a second a second down to a crawl.
+  const JAGGED_HATCHET = `<Object type="0x7eba" id="3WarriorST0">
+    <DisplayId>Jagged Hatchet</DisplayId>
+    <Projectile id="0"><Speed>150</Speed><LifetimeMS>2250</LifetimeMS><Acceleration>-250</Acceleration><AccelerationDelay>0</AccelerationDelay><SpeedClamp>1</SpeedClamp></Projectile>
+  </Object>`;
+  const GILDED_FLAIL = `<Object type="0x4490" id="Gilded Flail">
+    <Projectile id="0"><Speed>100</Speed><LifetimeMS>750</LifetimeMS><Boomerang /><MultiHit /></Projectile>
+  </Object>`;
+  const FURY_FLAIL = `<Object type="0xFF02" id="Fury Flail">
+    <Projectile id="0"><Speed>230</Speed><LifetimeMS>1000</LifetimeMS><MultiHit /><CircleTurnDelay>200</CircleTurnDelay><CircleTurnAngle>90</CircleTurnAngle><PassesCover /></Projectile>
+  </Object>`;
+  const VOID_BLADE = `<Object type="0x716d" id="Void Blade">
+    <Projectile><Speed>0</Speed><LifetimeMS>2100</LifetimeMS><Acceleration>200</Acceleration><AccelerationDelay>1250</AccelerationDelay><SpeedClamp>100</SpeedClamp><MultiHit /></Projectile>
+  </Object>`;
 
   async function catalogOf(...objects: string[]): Promise<GameObjectCatalog> {
     return new GameObjectCatalog(
@@ -671,20 +687,46 @@ describe('how far a shot gets', () => {
     );
   }
 
+  async function reachOf(object: string, objectType: number): Promise<number | undefined> {
+    const catalog = await catalogOf(object);
+    return new EquippedWeapon(() => catalog).of(objectType)?.reachTiles;
+  }
+
   it('is speed times life for an ordinary shot', async () => {
-    const catalog = await catalogOf(BOW);
-    const definition = catalog.projectile(0xb06, 0);
-    expect(definition).toBeDefined();
-    expect(reachTiles(definition as ProjectileDefinition)).toBeCloseTo(7.04, 6);
+    expect(await reachOf(BOW, 0xb06)).toBeCloseTo(7.04, 6);
   });
 
   // Reading a parametric weapon as speed × life gives nought, which would read
-  // as "this weapon has no range" for every sword and dagger in the game.
+  // as "this weapon has no range" for every sword and dagger in the game. And
+  // not the widest the figure gets either: that is a quarter further out, to
+  // the side, where a shot aimed at a monster does not go.
   it('is the magnitude for a fixed-arc weapon', async () => {
-    const catalog = await catalogOf(SWORD);
-    const definition = catalog.projectile(0xb0b, 0);
-    expect(definition).toBeDefined();
-    expect(reachTiles(definition as ProjectileDefinition)).toBeCloseTo(3.5, 6);
+    expect(await reachOf(SWORD, 0xb0b)).toBeCloseTo(3.5, 6);
+  });
+
+  // Read as the product, the engage ring was held at a share of 33.75 tiles —
+  // the player ran off the screen instead of holding the fight.
+  it('is where a braking shot has got to when it expires', async () => {
+    // 0.596 s of braking from 15 to 0.1 tiles a second, then the crawl.
+    const braking = (15 - 0.1) / 25;
+    const expected = 15 * braking - 0.5 * 25 * braking ** 2 + 0.1 * (2.25 - braking);
+    expect(await reachOf(JAGGED_HATCHET, 0x7eba)).toBeCloseTo(expected, 6);
+    expect(expected).toBeCloseTo(4.6652, 4);
+  });
+
+  it('is half the flight for a shot that comes back', async () => {
+    expect(await reachOf(GILDED_FLAIL, 0x4490)).toBeCloseTo(3.75, 6);
+  });
+
+  // Out for a fifth of a second at 23 tiles a second, then round the thrower.
+  it('is the circle for a shot that circles its thrower', async () => {
+    expect(await reachOf(FURY_FLAIL, 0xff02)).toBeCloseTo(4.6, 6);
+  });
+
+  // Nought by the product, which read as no range at all: it hangs still for
+  // 1.25 s, speeds up to 10 tiles a second in half a second and flies on.
+  it('counts a shot that sets off late', async () => {
+    expect(await reachOf(VOID_BLADE, 0x716d)).toBeCloseTo(0.5 * 20 * 0.5 ** 2 + 10 * 0.35, 6);
   });
 
   describe('resolved once per weapon', () => {

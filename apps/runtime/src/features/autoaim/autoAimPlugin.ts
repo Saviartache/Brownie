@@ -512,7 +512,8 @@ export function createAutoAimPlugin(options: AutoAimOptions): Plugin {
 
         // **How long a shot has to hit something with, which is not its
         // lifetime.** The two agree for an ordinary weapon and do not for one
-        // whose reach the data states outright, and the difference is the whole
+        // that is not flown at one speed all its life — a fixed arc, an axe
+        // that brakes, a flail that comes back — and the difference is the whole
         // guard on how far this can aim: a solution is a point exactly
         // `speed × flight` from the player, so bounding the flight by the reach
         // is what makes every aim point somewhere the shot actually arrives.
